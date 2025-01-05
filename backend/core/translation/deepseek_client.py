@@ -41,7 +41,7 @@ class DeepSeekClient:
                     {"role": "system", "content": SYSTEM_PROMPT.format(target_language=LANGUAGE_MAP[target_language])},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3
+                stream=False
             )
             
             logger.info(f"DeepSeek 翻译请求成功，目标语言: {LANGUAGE_MAP[target_language]}")

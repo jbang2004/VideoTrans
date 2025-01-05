@@ -40,6 +40,7 @@ class Sentence:
         adjusted_duration: 调整后的时长（毫秒）
         segment_index: 所属分段的索引
         segment_start: 所属分段的起始时间（秒）
+        task_id: 任务ID
     """
     raw_text: str
     start: float  # 单位：毫秒
@@ -61,6 +62,7 @@ class Sentence:
     adjusted_start: float = field(default=0.0)  # 单位：毫秒
     segment_index: int = field(default=-1)  # 所属分段的索引
     segment_start: float = field(default=0.0)  # 所属分段的起始时间（秒）
+    task_id: str = field(default="")  # 任务ID
 
 def tokens_timestamp_sentence(tokens: List[Token], timestamps: List[Timestamp], speaker_segments: List[SpeakerSegment], tokenizer: Any, config: Config) -> List[Tuple[List[Token], List[Timestamp], int]]:
     sentences = []
@@ -180,6 +182,17 @@ def merge_sentences(raw_sentences: List[Tuple[List[Token], List[Timestamp], int]
     return merged_sentences
 
 def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, config: Config) -> List[Sentence]:
+    """提取说话人音频并保存
+    
+    Args:
+        sentences: 句子列表
+        speech: 输入音频
+        sr: 采样率
+        config: 配置对象
+        
+    Returns:
+        List[Sentence]: 处理后的句子列表
+    """
     target_samples = int(config.SPEAKER_AUDIO_TARGET_DURATION * sr)
     speech = speech.unsqueeze(0) if speech.dim() == 1 else speech
 
@@ -226,15 +239,15 @@ def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, conf
     for sentence in sentences:
         sentence.audio = speaker_audio_cache.get(sentence.speaker_id)
 
-    # 修改输出目录到 temp/spk_cuts
-    # output_dir = Path(config.BASE_TEMP_DIR) / 'spk_cuts'
-    # output_dir.mkdir(parents=True, exist_ok=True)
+    # 保存每个说话人的音频文件
+    output_dir = Path(config.TASKS_DIR) / sentences[0].task_id / 'speakers'
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # # 只保存每个说话人的一个音频文件
-    # for speaker_id, audio in speaker_audio_cache.items():
-    #     if audio is not None:
-    #         output_path = output_dir / f'spk_{speaker_id}.wav'
-    #         torchaudio.save(str(output_path), audio, sr)
+    # 只保存每个说话人的一个音频文件
+    for speaker_id, audio in speaker_audio_cache.items():
+        if audio is not None:
+            output_path = output_dir / f'speaker_{speaker_id}.wav'
+            torchaudio.save(str(output_path), audio, sr)
 
     return sentences
 

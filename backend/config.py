@@ -36,11 +36,12 @@ class Config:
     NORMALIZATION_THRESHOLD = 0.9
     
     # 视频分段配置
-    SEGMENT_MINUTES = 10
+    SEGMENT_MINUTES = 5
     MIN_SEGMENT_MINUTES = 3
     
     # 模型配置
-    TRANSLATION_MODEL = os.getenv("TRANSLATION_MODEL", "deepseek")  # glm4,gemini,deepseek
+    # 支持的翻译模型: glm4, gemini, deepseek
+    TRANSLATION_MODEL = os.getenv("TRANSLATION_MODEL", "deepseek")
     ZHIPUAI_API_KEY = os.getenv("ZHIPUAI_API_KEY", "")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")

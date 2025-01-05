@@ -21,6 +21,9 @@ import aiofiles
 
 app = FastAPI(debug=config.DEBUG)
 
+# 初始化视频翻译器（全局单例）
+vi_translator = ViTranslator(config=config)
+
 # 添加 CORS 中间件
 app.add_middleware(
     CORSMiddleware,
@@ -57,7 +60,7 @@ async def index(request: Request):
 @app.post("/upload")
 async def upload_video(
     video: UploadFile = File(...),
-    target_language: str = Form("zh")  # 添加语言参数，默认中文
+    target_language: str = Form("zh")
 ):
     """处理视频上传"""
     try:
@@ -91,18 +94,13 @@ async def upload_video(
         # 创建 HLS 管理器
         hls_manager = HLSManager(config, task_id, task_paths)
         
-        # 创建翻译器实例并注入依赖
-        vi_translator = ViTranslator(
-            config=config,
-            task_id=task_id,
-            task_paths=task_paths,
-            hls_manager=hls_manager
-        )
-        
-        # 创建后台任务
+        # 创建后台任务，直接传入所需参数
         task = asyncio.create_task(vi_translator.trans_video(
             video_path=str(video_path),
-            target_language=target_language  # 传递目标语言参数
+            task_id=task_id,
+            task_paths=task_paths,
+            hls_manager=hls_manager,
+            target_language=target_language
         ))
         
         # 存储任务信息

@@ -30,15 +30,16 @@ logger = logging.getLogger(__name__)
 
 class TaskState:
     """任务状态类"""
-    def __init__(self, task_id: str, task_paths, hls_manager: HLSManager):
+    def __init__(self, task_id: str, video_path: str, task_paths, hls_manager: HLSManager, target_language: str = "zh"):
         self.task_id = task_id
+        self.video_path = video_path
         self.task_paths = task_paths
         self.hls_manager = hls_manager
+        self.target_language = target_language
         self.sentence_counter = 0
         self.current_time = 0
         self.segment_counter = 0
         self.segment_media_files = {}  # 存储所有分段的媒体文件 {segment_index: media_files}
-        self.target_language = "zh"  # 默认值
         
         # 任务相关的队列
         self.translation_queue = asyncio.Queue()
@@ -60,7 +61,7 @@ class ViTranslator:
             cls._instance = super().__new__(cls)
         return cls._instance
     
-    def __init__(self, config=None, task_id=None, task_paths=None, hls_manager=None):
+    def __init__(self, config=None):
         # 只在第一次初始化时加载模型
         if not self._initialized:
             self.logger = logging.getLogger(__name__)
@@ -68,9 +69,8 @@ class ViTranslator:
             self._init_models()
             self._initialized = True
         
-        if task_id and task_paths and hls_manager:
-            # 为每个任务创建独立的状态
-            self.task_state = TaskState(task_id, task_paths, hls_manager)
+        # 移除task_state的初始化，改为在trans_video时设置
+        self.task_state = None
 
     def _init_models(self):
         """初始化所有需要的模型和工具"""
@@ -112,14 +112,29 @@ class ViTranslator:
         self.timestamp_adjuster = TimestampAdjuster()
 
         # 初始化翻译器
-        if self.config.TRANSLATION_MODEL == "glm4":
-            self.translator = Translator(GLM4Client(api_key=self.config.ZHIPUAI_API_KEY))
-        elif self.config.TRANSLATION_MODEL == "gemini":
-            self.translator = Translator(GeminiClient(api_key=self.config.GEMINI_API_KEY))
-        elif self.config.TRANSLATION_MODEL == "deepseek":
-            self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
-        else:
-            raise ValueError(f"不支持的翻译模型: {self.config.TRANSLATION_MODEL}")
+        translation_model = self.config.TRANSLATION_MODEL.strip().strip('"').lower()
+        self.logger.info(f"使用翻译模型: {repr(translation_model)}")
+        
+        try:
+            if translation_model == "glm4":
+                self.translator = Translator(GLM4Client(api_key=self.config.ZHIPUAI_API_KEY))
+            elif translation_model == "gemini":
+                self.translator = Translator(GeminiClient(api_key=self.config.GEMINI_API_KEY))
+            elif translation_model == "deepseek":
+                self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
+            else:
+                import traceback
+                error_location = traceback.extract_stack()[-1]
+                error_msg = (
+                    f"不支持的翻译模型: {repr(translation_model)}，支持的模型有: glm4, gemini, deepseek\n"
+                    f"错误位置: {error_location.filename}:{error_location.lineno}\n"
+                    f"配置来源: {self.config.__class__.__name__}"
+                )
+                self.logger.error(error_msg)
+                raise ValueError(error_msg)
+        except Exception as e:
+            self.logger.error(f"初始化翻译器失败: {str(e)}", exc_info=True)
+            raise
 
         self.mixer = MediaMixer(config=self.config, sample_rate=self.config.TARGET_SR)
         self.sentence_logger = SentenceLogger(self.config)
@@ -134,7 +149,7 @@ class ViTranslator:
     )
     async def _translation_worker(self, sentences):
         """翻译工作者"""
-        self.logger.debug(f"开始翻译 {len(sentences)} 个句子，目标语言: {self.config.TARGET_LANGUAGE}")
+        self.logger.debug(f"开始翻译 {len(sentences)} 个句子，目标语言: {self.task_state.target_language}")
         async for translated_batch in self.translator.translate_sentences(
             sentences, 
             batch_size=self.config.TRANSLATION_BATCH_SIZE,
@@ -224,26 +239,22 @@ class ViTranslator:
         return None
 
     @handle_errors(logger)
-    async def trans_video(self, video_path: str, target_language: str = "zh") -> dict:
-        """视频翻译主函数
-        
-        Args:
-            video_path: 视频文件路径
-            target_language: 目标语言代码 (zh/en/ja/ko)
-        """
+    async def trans_video(self, video_path: str, task_id: str, task_paths, hls_manager: HLSManager, target_language: str = "zh") -> dict:
+        """视频翻译主函数"""
         try:
-            if not hasattr(self, 'task_state'):
-                raise ValueError("必要的任务状态未初始化")
+            # 初始化任务状态，直接传入所有参数
+            self.task_state = TaskState(
+                task_id=task_id,
+                video_path=video_path,
+                task_paths=task_paths,
+                hls_manager=hls_manager,
+                target_language=target_language
+            )
             
-            # 设置目标语言
-            self.task_state.target_language = target_language
-            
-            state = self.task_state
-            state.task_paths.video_path = video_path  # 保存原始视频路径
-            self.logger.info(f"开始处理视频，任务ID: {state.task_id}，目标语言: {target_language}")
+            self.logger.info(f"开始处理视频，任务ID: {self.task_state.task_id}，目标语言: {self.task_state.target_language}")
             
             # 获取视频时长
-            duration = await self.media_utils.get_video_duration(state.task_paths.video_path)
+            duration = await self.media_utils.get_video_duration(self.task_state.video_path)
             
             # 获取音频分段
             segments = await self.media_utils.get_audio_segments(duration)
@@ -273,12 +284,12 @@ class ViTranslator:
 
             finally:
                 # 发送停止信号
-                await state.translation_queue.put(None)
+                await self.task_state.translation_queue.put(None)
                 # 等待所有工作者完成
                 await asyncio.gather(*workers, return_exceptions=True)
 
             # 检查是否有成功处理的片段
-            if not state.hls_manager.has_segments:
+            if not self.task_state.hls_manager.has_segments:
                 self.logger.error("没有成功处理任何视频片段")
                 return {
                     'status': 'error',
@@ -286,7 +297,7 @@ class ViTranslator:
                 }
 
             # 标记播放列表为完成状态
-            await state.hls_manager.finalize_playlist()
+            await self.task_state.hls_manager.finalize_playlist()
             return {'status': 'success'}
 
         except Exception as e:
@@ -294,29 +305,28 @@ class ViTranslator:
             return {
                 'status': 'error',
                 'message': f'处理失败: {str(e)}',
-                'task_id': state.task_id
+                'task_id': self.task_state.task_id
             }
 
     async def _process_segment(self, i: int, start: float, duration: float, is_first: bool = False, language:str="auto"):
         """处理单个分段"""
-        state = self.task_state
         try:
             # 使用 TaskPaths 中定义的 segments_dir
-            segment_dir = state.task_paths.segments_dir / f"segment_{i}"
+            segment_dir = self.task_state.task_paths.segments_dir / f"segment_{i}"
             segment_dir.mkdir(parents=True, exist_ok=True)
             
             # 分离当前分段的媒体文件并直接存储
-            state.segment_media_files[i] = await self.media_utils.extract_segment(
-                state.task_paths.video_path,  # 原始视频路径
+            self.task_state.segment_media_files[i] = await self.media_utils.extract_segment(
+                self.task_state.video_path,  # 使用 task_state.video_path 而不是 task_paths.video_path
                 start,
                 duration,
-                state.task_paths.media_dir,
+                self.task_state.task_paths.media_dir,
                 i
             )
             
             # 语音识别
             sentences = self.sense_model.generate(
-                input=state.segment_media_files[i]['vocals'],
+                input=self.task_state.segment_media_files[i]['vocals'],
                 cache={},
                 language=language,
                 use_itn=True,
@@ -330,21 +340,22 @@ class ViTranslator:
 
             # 为每个句子设置 ID 和分段信息
             for sentence in sentences:
-                sentence.sentence_id = state.sentence_counter
+                sentence.sentence_id = self.task_state.sentence_counter
                 sentence.segment_index = i
                 sentence.segment_start = start
-                state.sentence_counter += 1
+                sentence.task_id = self.task_state.task_id  # 设置任务ID
+                self.task_state.sentence_counter += 1
             
             self.logger.info(f"处理分段 {i} 完成，共 {len(sentences)} 个句子")
 
             # 如果是第一段，等待完整处理完成
             if is_first:
-                state.mixing_complete = asyncio.Queue()
-                await state.translation_queue.put(sentences)
-                await state.mixing_complete.get()
-                state.mixing_complete = None
+                self.task_state.mixing_complete = asyncio.Queue()
+                await self.task_state.translation_queue.put(sentences)
+                await self.task_state.mixing_complete.get()
+                self.task_state.mixing_complete = None
             else:
-                await state.translation_queue.put(sentences)
+                await self.task_state.translation_queue.put(sentences)
 
         except Exception as e:
             self.logger.error(f"处理视频段落 {i} 失败: {str(e)}")
