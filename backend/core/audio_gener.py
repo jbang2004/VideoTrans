@@ -7,13 +7,15 @@ import os
 import inspect  # 导入 inspect 模块
 
 class AudioGenerator:
-    def __init__(self, cosyvoice_model, max_workers=None):
+    def __init__(self, cosyvoice_model, sample_rate: int = None, max_workers=None):
         """
         Args:
             cosyvoice_model: CosyVoice模型
+            sample_rate: 采样率，如果为None则使用cosyvoice_model的采样率
             max_workers: 并行处理的最大工作线程数，默认为None（将根据CPU核心数自动设置）
         """
-        self.cosyvoice_model = cosyvoice_model
+        self.cosyvoice_model = cosyvoice_model.model
+        self.sample_rate = sample_rate or cosyvoice_model.sample_rate
         # 获取CPU核心数
         cpu_count = os.cpu_count()
         # 如果未指定max_workers，则使用CPU核心数
@@ -67,40 +69,30 @@ class AudioGenerator:
             else:
                 token2wav_kwargs = {
                     'token': torch.tensor(model_input['tts_speech_token']).unsqueeze(dim=0),
+                    'token_offset': 0,  # 显式设置为0
+                    'finalize': True,  # 确保最终生成
                     'prompt_token': model_input.get('flow_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32)),
                     'prompt_feat': model_input.get('prompt_speech_feat', torch.zeros(1, 0, 80)),
                     'embedding': model_input.get('flow_embedding', torch.zeros(0)),
                     'uuid': model_input['uuid'],
-                    'finalize': True,
-                    'speed': sentence.speed
+                    'speed': sentence.speed if sentence.speed else 1.0
                 }
 
-                # 获取 token2wav 方法的签名
-                signature = inspect.signature(self.cosyvoice_model.token2wav)
-
-                # 检查 token_offset 是否是 token2wav 的参数
-                if 'token_offset' in signature.parameters:
-                    token2wav_kwargs['token_offset'] = 0
-
                 speech_output = self.cosyvoice_model.token2wav(**token2wav_kwargs)
-
             # 处理静音
             if sentence.is_first and sentence.start > 0:
                 speech_output = self._add_silence(speech_output, sentence.start, 'before')  # 单位：毫秒
-                self.logger.info(f"添加了 {sentence.start:.2f}ms 起始静音")
 
             if sentence.silence_duration > 0:
                 speech_output = self._add_silence(speech_output, sentence.silence_duration, 'after') # 单位：毫秒
-                self.logger.info(f"添加了 {sentence.silence_duration:.2f}ms 结尾静音")
 
             # 确保音频数据为1维并在CPU上
             audio_np = speech_output.cpu().numpy()
             if audio_np.ndim > 1:
                 # 平均声道以转换为单声道
                 audio_np = audio_np.mean(axis=0)
-                self.logger.debug(f"音频数据已降维为1维，形状: {audio_np.shape}")
 
-            self.logger.info(f"音频生成完成 (UUID: {model_input['uuid']})")
+            
             return audio_np
 
         except Exception as e:
@@ -109,8 +101,7 @@ class AudioGenerator:
 
     def _add_silence(self, audio, silence_duration_ms, position='before'):
         """添加静音"""
-        sample_rate = 22050
-        silence_samples = int(silence_duration_ms / 1000 * sample_rate) # 毫秒转换为秒再计算样本数
+        silence_samples = int(silence_duration_ms / 1000 * self.sample_rate) # 毫秒转换为秒再计算样本数
         silence = torch.zeros(1, silence_samples, device=audio.device)
         
         # 处理空音频的情况

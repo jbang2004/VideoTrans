@@ -15,14 +15,14 @@ from core.media_mixer import MediaMixer
 from core.hls_manager import HLSManager
 from utils.sentence_logger import SentenceLogger
 from core.audio_separator import ClearVoiceSeparator
-from core.duration_aligner import DurationAligner
-from core.timestamp_adjuster import TimestampAdjuster
+from core.timeadjust.duration_aligner import DurationAligner
+from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from utils.decorators import worker_decorator, handle_errors
 import os.path
 
 # 导入自定义模块
 from core.model_in import ModelIn
-from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice
+from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2,CosyVoice
 from core.auto_sense import SenseAutoModel as AutoModel
 
 # 设置日志
@@ -38,7 +38,7 @@ class TaskState:
         self.target_language = target_language
         self.sentence_counter = 0
         self.current_time = 0
-        self.segment_counter = 0
+        self.batch_counter = 0
         self.segment_media_files = {}  # 存储所有分段的媒体文件 {segment_index: media_files}
         
         # 任务相关的队列
@@ -51,6 +51,9 @@ class TaskState:
         
         # 用于监控第一段处理的完成状态
         self.mixing_complete = None
+        # 用于跟踪第一个segment的处理进度
+        self.first_segment_batch_count = 0  # 第一个segment的总batch数
+        self.first_segment_processed_count = 0  # 已处理的batch数
 
 class ViTranslator:
     _instance = None
@@ -95,21 +98,20 @@ class ViTranslator:
         )
         
         # CosyVoice TTS模型
-        # self.cosyvoice_model = CosyVoice2("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")#CosyVoice-300M-25Hz
-        self.cosyvoice_model = CosyVoice("models/CosyVoice/pretrained_models/CosyVoice-300M-25Hz")
-        
-        # 注入音频分离器
-        self.media_utils = MediaUtils(
-            config=self.config,
-            audio_separator=self.audio_separator
-        )
+        self.cosyvoice_model = CosyVoice2("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
+        # self.cosyvoice_model = CosyVoice("models/CosyVoice/pretrained_models/CosyVoice-300M")
+        # 统一使用CosyVoice的采样率
+        self.target_sr = self.cosyvoice_model.sample_rate
         
         # 初始化各个处理器
-        self.model_in = ModelIn(self.cosyvoice_model.frontend)
-        self.tts_generator = TTSTokenGenerator(self.cosyvoice_model.model, Hz=25)
-        self.audio_generator = AudioGenerator(self.cosyvoice_model.model)
+        self.media_utils = MediaUtils(config=self.config, audio_separator=self.audio_separator, target_sr=self.target_sr)
+        self.model_in = ModelIn(self.cosyvoice_model)
+        self.tts_generator = TTSTokenGenerator(self.cosyvoice_model, Hz=25)
+        self.audio_generator = AudioGenerator(self.cosyvoice_model, sample_rate=self.target_sr)
         self.duration_aligner = DurationAligner()
-        self.timestamp_adjuster = TimestampAdjuster()
+        self.timestamp_adjuster = TimestampAdjuster(sample_rate=self.target_sr)
+        self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr)
+        self.sentence_logger = SentenceLogger(self.config)
 
         # 初始化翻译器
         translation_model = self.config.TRANSLATION_MODEL.strip().strip('"').lower()
@@ -136,9 +138,6 @@ class ViTranslator:
             self.logger.error(f"初始化翻译器失败: {str(e)}", exc_info=True)
             raise
 
-        self.mixer = MediaMixer(config=self.config, sample_rate=self.config.TARGET_SR)
-        self.sentence_logger = SentenceLogger(self.config)
-        
         self.logger.info("模型初始化完成")
 
     @worker_decorator(
@@ -221,20 +220,27 @@ class ViTranslator:
             return None
             
         # 设置输出视频路径
-        output_path = self.task_state.task_paths.segments_dir / f"segment_{self.task_state.segment_counter}.mp4"
+        output_path = self.task_state.task_paths.segments_dir / f"segment_{self.task_state.batch_counter}.mp4"
         
         if await self.mixer.mixed_media_maker(
             sentences,
             task_state=self.task_state,
             output_path=str(output_path)
         ):
-            await self.task_state.hls_manager.add_segment(str(output_path), self.task_state.segment_counter)
+            await self.task_state.hls_manager.add_segment(str(output_path), self.task_state.batch_counter)
             
-            # 如果是第一段且有监控队列，通知处理完成
-            if self.task_state.segment_counter == 0 and self.task_state.mixing_complete:
-                await self.task_state.mixing_complete.put(True)
+            # 如果是第一个segment的batch
+            if sentences[0].segment_index == 0:
+                self.task_state.first_segment_processed_count += 1
+                self.logger.info(f"第一个segment处理进度: {self.task_state.first_segment_processed_count}/{self.task_state.first_segment_batch_count}")
+                
+                # 当所有batch都处理完成时，发送完成信号
+                if (self.task_state.first_segment_processed_count >= self.task_state.first_segment_batch_count 
+                    and self.task_state.mixing_complete):
+                    self.logger.info("第一个segment的所有batch处理完成")
+                    await self.task_state.mixing_complete.put(True)
             
-            self.task_state.segment_counter += 1
+            self.task_state.batch_counter += 1
             
         return None
 
@@ -242,7 +248,7 @@ class ViTranslator:
     async def trans_video(self, video_path: str, task_id: str, task_paths, hls_manager: HLSManager, target_language: str = "zh") -> dict:
         """视频翻译主函数"""
         try:
-            # 初始化任务状态，直接传入所有参数
+            # 初始化任务状态
             self.task_state = TaskState(
                 task_id=task_id,
                 video_path=video_path,
@@ -287,6 +293,9 @@ class ViTranslator:
                 await self.task_state.translation_queue.put(None)
                 # 等待所有工作者完成
                 await asyncio.gather(*workers, return_exceptions=True)
+                # 关闭翻译客户端session
+                if hasattr(self.translator.translation_client, 'close'):
+                    await self.translator.translation_client.close()
 
             # 检查是否有成功处理的片段
             if not self.task_state.hls_manager.has_segments:
@@ -317,7 +326,7 @@ class ViTranslator:
             
             # 分离当前分段的媒体文件并直接存储
             self.task_state.segment_media_files[i] = await self.media_utils.extract_segment(
-                self.task_state.video_path,  # 使用 task_state.video_path 而不是 task_paths.video_path
+                self.task_state.video_path,
                 start,
                 duration,
                 self.task_state.task_paths.media_dir,
@@ -343,13 +352,20 @@ class ViTranslator:
                 sentence.sentence_id = self.task_state.sentence_counter
                 sentence.segment_index = i
                 sentence.segment_start = start
-                sentence.task_id = self.task_state.task_id  # 设置任务ID
+                sentence.task_id = self.task_state.task_id
                 self.task_state.sentence_counter += 1
             
-            self.logger.info(f"处理分段 {i} 完成，共 {len(sentences)} 个句子")
+            self.logger.info(f"分段 {i} 语音识别完成，共 {len(sentences)} 个句子")
 
-            # 如果是第一段，等待完整处理完成
+            # 如果是第一段，计算总batch数
             if is_first:
+                # 计算第一个segment的总batch数
+                translation_batch_size = self.config.TRANSLATION_BATCH_SIZE
+                modelin_batch_size = self.config.MODELIN_BATCH_SIZE
+                # 使用最小的batch_size来确保不会遗漏任何batch
+                min_batch_size = min(translation_batch_size, modelin_batch_size)
+                self.task_state.first_segment_batch_count = (len(sentences) - 1) // min_batch_size + 1
+                self.logger.info(f"第一个segment预计有 {self.task_state.first_segment_batch_count} 个batch")
                 self.task_state.mixing_complete = asyncio.Queue()
                 await self.task_state.translation_queue.put(sentences)
                 await self.task_state.mixing_complete.get()

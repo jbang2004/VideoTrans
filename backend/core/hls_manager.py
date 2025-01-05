@@ -60,14 +60,12 @@ class HLSManager:
         async with self._lock:
             try:
                 # 确保目录存在
-                if isinstance(self.segments_dir, str):
-                    self.segments_dir = Path(self.segments_dir)
                 self.segments_dir.mkdir(parents=True, exist_ok=True)
                 
                 # 生成文件名和路径
                 segment_filename = f'segment_{self.sequence_number:04d}_%03d.ts'
-                # 使用 processing_segments_dir 来存储临时片段
-                segment_pattern = str(self.task_paths.processing_segments_dir / segment_filename)
+                # 直接在目标目录生成ts文件
+                segment_pattern = str(self.segments_dir / segment_filename)
                 temp_playlist_path = self.task_paths.processing_dir / f'temp_{part_index}.m3u8'
                 
                 cmd = [
@@ -92,12 +90,6 @@ class HLSManager:
                 if process.returncode != 0:
                     self.logger.error(f"FFmpeg 错误: {stderr.decode()}")
                     raise RuntimeError(f"FFmpeg 错误: {stderr.decode()}")
-                
-                # 检查输出文件
-                expected_first_segment = str(self.task_paths.processing_segments_dir / f'segment_{self.sequence_number:04d}_000.ts')
-                if not os.path.exists(expected_first_segment):
-                    self.logger.error(f"片段文件未生成: {expected_first_segment}")
-                    raise FileNotFoundError(f"片段文件未生成: {expected_first_segment}")
 
                 # 加载并处理临时播放列表
                 temp_m3u8 = m3u8.load(str(temp_playlist_path))
@@ -106,19 +98,9 @@ class HLSManager:
                 discontinuity_segment = m3u8.Segment(discontinuity=True)
                 self.playlist.add_segment(discontinuity_segment)
                 
-                # 修改片段 URI 为相对路径并移动文件
+                # 添加片段到播放列表
                 for segment in temp_m3u8.segments:
-                    segment_name = Path(segment.uri).name
-                    # 源文件和目标文件路径
-                    src_path = self.task_paths.processing_segments_dir / segment_name
-                    dst_path = self.segments_dir / segment_name
-                    # 移动文件到公共目录
-                    shutil.move(str(src_path), str(dst_path))
-                    # 更新播放列表中的路径
-                    segment.uri = f"segments/{self.task_id}/{segment_name}"
-                    # 在添加片段时检查 URI 是否为 None
-                    if segment.uri is None:
-                        logger.error(f"添加片段 {segment_name} 时 URI 为 None。")
+                    segment.uri = f"segments/{self.task_id}/{Path(segment.uri).name}"
                     self.playlist.segments.append(segment)
                 
                 self.sequence_number += len(temp_m3u8.segments)
@@ -126,11 +108,9 @@ class HLSManager:
                 self._save_playlist()
                 
             finally:
-                # 清理临时文件
-                temp_playlist = self.task_paths.processing_dir / f'temp_{part_index}.m3u8'
-                if os.path.exists(str(temp_playlist)):
+                if os.path.exists(str(temp_playlist_path)):
                     try:
-                        os.unlink(str(temp_playlist))
+                        os.unlink(str(temp_playlist_path))
                     except Exception as e:
                         self.logger.warning(f"清理临时文件失败: {e}")
     

@@ -14,10 +14,9 @@ from utils.temp_file_manager import TempFileManager
 logger = logging.getLogger(__name__)
 
 class MediaUtils:
-    def __init__(self, config, audio_separator):
+    def __init__(self, config, audio_separator, target_sr: int = 24000):
         self.config = config
-        self.target_sr = self.config.TARGET_SR
-        self.vad_sr = self.config.VAD_SR
+        self.target_sr = target_sr
         self.logger = logging.getLogger(__name__)
         self.audio_separator = audio_separator
 
@@ -25,7 +24,6 @@ class MediaUtils:
                              audio_input: Union[Tuple[int, np.ndarray], np.ndarray],
                              target_sr: int = None) -> np.ndarray:
         """音频标准化和重采样处理"""
-        target_sr = target_sr or self.target_sr
         
         # 解析输入
         if isinstance(audio_input, tuple):

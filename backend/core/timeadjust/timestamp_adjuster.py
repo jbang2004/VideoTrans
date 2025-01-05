@@ -5,15 +5,15 @@ from dataclasses import dataclass
 class TimestampAdjuster:
     """句子时间戳调整器"""
     
-    def __init__(self):
+    def __init__(self, sample_rate: int):
         self.logger = logging.getLogger(__name__)
+        self.sample_rate = sample_rate
         
-    def update_timestamps(self, sentences: List, sample_rate: int = 22050, start_time: float = None) -> float:
+    def update_timestamps(self, sentences: List, start_time: float = None) -> float:
         """更新句子的时间戳信息
         
         Args:
             sentences: 要更新的句子列表
-            sample_rate: 音频采样率，默认为 22050 (CosyVoice的采样率)
             start_time: 起始时间（毫秒），如果为 None 则使用第一个句子的开始时间
             
         Returns:
@@ -28,7 +28,7 @@ class TimestampAdjuster:
         for i, sentence in enumerate(sentences):
             # 计算实际音频长度（毫秒）
             if sentence.generated_audio is not None:
-                actual_duration = (len(sentence.generated_audio) / sample_rate) * 1000
+                actual_duration = (len(sentence.generated_audio) / self.sample_rate) * 1000
             else:
                 actual_duration = 0
                 self.logger.warning(f"句子 {sentence.sentence_id} 没有生成音频")
@@ -43,14 +43,7 @@ class TimestampAdjuster:
             # 更新下一个句子的开始时间
             current_time += actual_duration
             
-            self.logger.debug(
-                f"更新句子时间戳 [ID: {sentence.sentence_id}] - "
-                f"开始: {sentence.adjusted_start:.2f}ms, "
-                f"时长: {sentence.adjusted_duration:.2f}ms, "
-                f"差异: {sentence.diff:.2f}ms"
-            )
-            
-        return current_time  # 返回最终的时间点
+        return current_time
         
     def validate_timestamps(self, sentences: List) -> bool:
         """验证时间戳的连续性和有效性

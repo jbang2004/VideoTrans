@@ -32,7 +32,6 @@ class DeepSeekClient:
             prompt = TRANSLATION_PROMPT.format(
                 json_content=json.dumps(texts, ensure_ascii=False, indent=2),
                 target_language=LANGUAGE_MAP[target_language],
-                example_output=EXAMPLE_OUTPUTS[target_language]
             )
             
             response = self.client.chat.completions.create(
@@ -41,7 +40,9 @@ class DeepSeekClient:
                     {"role": "system", "content": SYSTEM_PROMPT.format(target_language=LANGUAGE_MAP[target_language])},
                     {"role": "user", "content": prompt}
                 ],
-                stream=False
+                response_format={
+                    'type': 'json_object'
+                }
             )
             
             logger.info(f"DeepSeek 翻译请求成功，目标语言: {LANGUAGE_MAP[target_language]}")

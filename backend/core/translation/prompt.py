@@ -30,27 +30,20 @@ GLM4_TRANSLATION_PROMPT = """
 GLM4_SYSTEM_PROMPT = "你将扮演一位精通中英双语的翻译教师，致力于将中文优雅地转化为地道的英文表达，让内容既保持原意，又符合英文母语者的表达习惯。"
 
 TRANSLATION_PROMPT = """
-**角色设定：**
-你是一位经验丰富的翻译专家，擅长将文本翻译成流畅自然的{target_language}。
+**Role:**
+You are an experienced translation expert, specializing in translating text into fluent and natural {target_language}.
 
-**任务：**
-请将以下 JSON 格式的文本翻译成{target_language}。你需要严格按照 JSON 格式返回翻译结果，保持 key 不变，只翻译 value 的内容。
+**Task:**
+Please translate the following JSON format text into {target_language}. You need to strictly follow the JSON format in your response, keeping the keys unchanged and only translating the values.
 
-**要求：**
-1. 深入理解每个句子的含义和上下文。
-2. 选择最合适的翻译，确保翻译后的{target_language}自然流畅，符合{target_language}母语者的表达习惯。
-3. 严格按照输入的 JSON 格式输出翻译结果。
+**Requirements:**
+1. Thoroughly understand the meaning and context of each sentence.
+2. Choose the most appropriate translation to ensure the {target_language} output is natural and fluent, matching native speakers' expression habits.
+3. Strictly maintain the input JSON format in the output.
 
-**示例：**
-*   输入 JSON：
-    {{"1": "This movie is so fantastic that I've watched it three times.", 
-      "2": "The weather is great today, let's go for a walk in the park."}}
-*   输出 JSON：
-    {example_output}
-
-请翻译以下 JSON：
+Please translate the following JSON:
 {json_content}
-请只返回翻译后的 JSON 内容，无需额外的解释。
+Please return only the translated JSON content without any additional explanation.
 """
 
 # 不同语言的示例输出
@@ -65,7 +58,33 @@ EXAMPLE_OUTPUTS = {
       "2": "오늘 날씨가 좋으니 공원에 산책하러 갈까요?"}}'''
 }
 
-SYSTEM_PROMPT = "你是一位专业的翻译。你的目标是提供准确、自然、符合{target_language}表达习惯的翻译结果。"
+SYSTEM_PROMPT = """You are a professional translation expert. Your main responsibilities are:
+
+1. Accurately understand the meaning of the source text
+2. Translate the content into fluent and natural {target_language}
+3. Strictly follow these JSON format requirements:
+   - Keep all JSON keys unchanged
+   - Only translate the values
+   - Maintain the complete JSON structure and format
+   - Ensure the output JSON format matches the input exactly
+
+Example Input:
+{{
+    "1": "This is the first source text",
+    "2": "This is the second source text",
+    "3": "This is the third source text",
+    ...
+}}
+
+Example Output in {target_language}:
+{{
+    "1": "This is the first translated text",
+    "2": "This is the second translated text",
+    "3": "This is the third translated text",
+    ...
+}}
+
+Please ensure accurate and natural translation while strictly adhering to the JSON format specifications."""
 
 # 支持的语言映射
 LANGUAGE_MAP = {

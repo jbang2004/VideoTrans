@@ -13,7 +13,7 @@ class TTSTokenGenerator:
             Hz: 采样率
             max_workers: 并行处理的最大工作线程数，默认为None（将根据CPU核心数自动设置）
         """
-        self.cosyvoice_model = cosyvoice_model
+        self.cosyvoice_model = cosyvoice_model.model
         self.Hz = Hz
         # 获取CPU核心数
         cpu_count = os.cpu_count()
@@ -82,13 +82,14 @@ class TTSTokenGenerator:
 
             # 更新 model_input
             model_input['tts_speech_token'] = self.cosyvoice_model.tts_speech_token_dict[this_uuid]
+
             model_input['uuid'] = this_uuid
             
             # 更新 Sentence 对象
             sentence.duration = duration * 1000  # 单位：毫秒
             sentence.diff = diff * 1000  # 单位：毫秒
 
-            self.logger.info(f"TTS token 生成完成 (UUID: {this_uuid}, 时长: {duration:.2f}s)")
+            self.logger.info(f"TTS token 生成完成 (UUID: {this_uuid}, 预期时长: {duration:.2f}s)")
 
         except Exception as e:
             self.logger.error(f"生成失败 (UUID: {this_uuid}): {str(e)}")

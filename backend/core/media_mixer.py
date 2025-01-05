@@ -13,10 +13,9 @@ from utils.decorators import handle_errors
 logger = logging.getLogger(__name__)
 
 class MediaMixer:
-    def __init__(self, config, sample_rate: int = None):
+    def __init__(self, config, sample_rate: int):
         self.config = config
-        self.sample_rate = sample_rate or self.config.TARGET_SR
-        self.background_buffer = None
+        self.sample_rate = sample_rate
         self.max_val = 1.0
         self.overlap = self.config.AUDIO_OVERLAP
         self.vocals_volume = self.config.VOCALS_VOLUME
@@ -68,9 +67,7 @@ class MediaMixer:
         # 混合背景音频
         background_audio_path = segment_files['background']
         if background_audio_path is not None:
-            background_audio, sr = sf.read(background_audio_path)
-            self.background_buffer = np.asarray(background_audio, dtype=np.float32)
-            full_audio = self._mix_with_background(full_audio, start_time)
+            full_audio = self._mix_with_background(background_audio_path, start_time, duration, full_audio)
             full_audio = self._normalize_audio(full_audio)
 
         self.full_audio_buffer = np.concatenate((self.full_audio_buffer, full_audio))
@@ -78,13 +75,7 @@ class MediaMixer:
         # 处理视频
         video_path = segment_files['video']
         if video_path:
-            await self._add_video_segment(
-                video_path,
-                start_time,
-                duration,
-                full_audio,
-                output_path
-            )
+            await self._add_video_segment(video_path, start_time, duration, full_audio, output_path)
             return True
 
         return False
@@ -113,25 +104,40 @@ class MediaMixer:
                 )
         return audio_data
 
-    def _mix_with_background(self, audio_data: np.ndarray, start_time: float) -> np.ndarray:
-        """混合背景音频与语音"""
-        if self.background_buffer is None:
-            return audio_data
+    def _mix_with_background(self, background_audio_path: str, start_time: float, duration: float, audio_data: np.ndarray) -> np.ndarray:
+        """混合背景音频与语音
         
+        Args:
+            background_audio_path: 背景音频文件路径
+            start_time: 开始时间（秒）
+            duration: 持续时间（秒）
+            audio_data: 语音音频数据
+            
+        Returns:
+            np.ndarray: 混合后的音频数据
+        """
+        # 读取背景音频
+        background_audio, _ = sf.read(background_audio_path)
+        background_audio = np.asarray(background_audio, dtype=np.float32)
+        
+        # 计算目标长度（采样点数）
+        target_length = int(duration * self.sample_rate)
+        
+        # 截取指定时间范围的背景音频
         start_sample = int(start_time * self.sample_rate)
+        end_sample = start_sample + target_length
+        background_segment = background_audio[start_sample:end_sample]
         
-        if start_sample >= len(self.background_buffer):
-            return audio_data
+        # 确保音频数据长度一致
+        result = np.zeros(target_length, dtype=np.float32)
+        audio_length = min(len(audio_data), target_length)
+        background_length = min(len(background_segment), target_length)
         
-        available_length = len(self.background_buffer) - start_sample
-        mix_length = min(len(audio_data), available_length)
-        
-        result = np.copy(audio_data)
-        result[:mix_length] = np.add(
-            audio_data[:mix_length] * self.vocals_volume,
-            self.background_buffer[start_sample:start_sample + mix_length] * self.background_volume,
-            dtype=np.float32
-        )
+        # 混合音频
+        if audio_length > 0:
+            result[:audio_length] = audio_data[:audio_length] * self.vocals_volume
+        if background_length > 0:
+            result[:background_length] += background_segment[:background_length] * self.background_volume
         
         return result
 
@@ -209,7 +215,6 @@ class MediaMixer:
 
     async def reset(self):
         """重置混音器状态"""
-        self.background_buffer = None
         self.full_audio_buffer = np.array([], dtype=np.float32)
         logger.debug("已重置 mixer 状态")
 

@@ -27,7 +27,6 @@ class Config:
     BATCH_SIZE = 6
     
     # 音频配置
-    TARGET_SR = 22050
     TARGET_SPEAKER_AUDIO_DURATION = 8
     VAD_SR = 16000
     VOCALS_VOLUME = 0.7

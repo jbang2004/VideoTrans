@@ -6,13 +6,13 @@ from typing import List
 import torchaudio
 
 class ModelIn:
-    def __init__(self, cosy_frontend):
-        self.cosy_frontend = cosy_frontend
+    def __init__(self, cosy_model):
+        self.cosy_frontend = cosy_model.frontend
+        self.cosy_sample_rate = cosy_model.sample_rate
         self.last_speaker_id = None
         self.logger = logging.getLogger(__name__)
         self.speaker_cache = {}
         self.max_val = 0.8  # 最大音量阈值
-        self.target_sr = 22050  # 目标采样率
 
     def postprocess(self, speech, top_db=60, hop_length=220, win_length=440):
         """音频后处理
@@ -30,7 +30,7 @@ class ModelIn:
         )
         if speech.abs().max() > self.max_val:
             speech = speech / speech.abs().max() * self.max_val
-        speech = torch.concat([speech, torch.zeros(1, int(self.target_sr * 0.2))], dim=1)
+        speech = torch.concat([speech, torch.zeros(1, int(self.cosy_sample_rate * 0.2))], dim=1)
         return speech
 
     async def modelin_maker(self, sentences, batch_size: int = 3):
@@ -55,40 +55,32 @@ class ModelIn:
                     prompt_speech = sentence.audio
                     # 使用 postprocess 处理音频,此时的sentence.audio是16k的
                     prompt_speech_16k = self.postprocess(prompt_speech)
-                    prompt_speech_22050 = torchaudio.transforms.Resample(
-                        orig_freq=16000, new_freq=22050)(prompt_speech_16k)
                     
-                    self.speaker_cache[speaker_id] = {
-                        'speech_token': self.cosy_frontend._extract_speech_token(prompt_speech_16k),
-                        'embedding': self.cosy_frontend._extract_spk_embedding(prompt_speech_16k),
-                        'speech_feat': self.cosy_frontend._extract_speech_feat(prompt_speech_22050)
-                    }
-                    
-                cached_features = self.speaker_cache[speaker_id]
-                speech_token, speech_token_len = cached_features['speech_token']
-                embedding = cached_features['embedding']
-                prompt_speech_feat, prompt_speech_feat_len = cached_features['speech_feat']
-
-                # 文本处理
+                    # 使用 frontend_cross_lingual 方法准备数据
+                    self.speaker_cache[speaker_id] = self.cosy_frontend.frontend_cross_lingual(
+                        "", # 空字符串作为占位符，实际文本稍后添加
+                        prompt_speech_16k,
+                        self.cosy_sample_rate
+                    )
+                
+                # 获取缓存的基础数据
+                cached_features = self.speaker_cache[speaker_id].copy()
+                
+                # 处理当前句子的文本
                 tts_text = sentence.trans_text
                 tts_text = self.cosy_frontend.text_normalize(tts_text, split=False)
-                print("成功添加model_in句子:",tts_text)
+                print("成功添加model_in句子:", tts_text)
+                
+                # 更新文本相关的特征
                 text_token, text_token_len = self.cosy_frontend._extract_text_token(tts_text)
+                cached_features['text'] = text_token
+                cached_features['text_len'] = text_token_len
+                
+                # 添加uuid字段
+                cached_features['tts_speech_token'] = []
+                cached_features['uuid'] = ''
 
-                model_input = {
-                    'text': text_token,
-                    'text_len': text_token_len,
-                    'flow_prompt_speech_token': speech_token,
-                    'flow_prompt_speech_token_len': speech_token_len,
-                    'prompt_speech_feat': prompt_speech_feat,
-                    'prompt_speech_feat_len': prompt_speech_feat_len,
-                    'llm_embedding': embedding,
-                    'flow_embedding': embedding,
-                    'tts_speech_token': [],
-                    'uuid': '',
-                }
-
-                sentence.model_input = model_input
+                sentence.model_input = cached_features
                 modelined_batch.append(sentence)
                 
                 # 当批次达到指定大小时，yield整个批次
