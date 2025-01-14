@@ -2,7 +2,7 @@ import json
 import logging
 from openai import OpenAI
 from typing import Dict
-from .prompt import TRANSLATION_PROMPT, SYSTEM_PROMPT, LANGUAGE_MAP, EXAMPLE_OUTPUTS
+from json_repair import loads
 
 logger = logging.getLogger(__name__)
 
@@ -18,37 +18,41 @@ class DeepSeekClient:
         )
         logger.info("DeepSeek 客户端初始化成功")
 
-    async def translate(self, texts: Dict[str, str], target_language: str = "zh") -> str:
-        """调用 DeepSeek 模型进行翻译，返回 JSON 字符串
+    async def translate(
+        self,
+        texts: Dict[str, str],
+        system_prompt: str,
+        user_prompt: str
+    ) -> Dict[str, str]:
+        """调用 DeepSeek 模型进行处理
         
         Args:
-            texts: 要翻译的文本字典
-            target_language: 目标语言代码 (zh/en/ja/ko)
+            texts: 要处理的文本字典
+            system_prompt: 系统提示词
+            user_prompt: 用户提示词
+            
+        Returns:
+            处理后的文本字典
         """
         try:
-            if target_language not in LANGUAGE_MAP:
-                raise ValueError(f"不支持的目标语言: {target_language}")
-                
-            prompt = TRANSLATION_PROMPT.format(
-                json_content=json.dumps(texts, ensure_ascii=False, indent=2),
-                target_language=LANGUAGE_MAP[target_language],
-            )
-            
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
                 messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT.format(target_language=LANGUAGE_MAP[target_language])},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
                 ],
                 response_format={
                     'type': 'json_object'
                 }
             )
             
-            logger.info(f"DeepSeek 翻译请求成功，目标语言: {LANGUAGE_MAP[target_language]}")
-            return response.choices[0].message.content
+            result = response.choices[0].message.content
+            logger.info(f"DeepSeek 请求结果: {result}")
+            logger.info("DeepSeek 请求成功")
+            return loads(result)
+            
         except Exception as e:
-            logger.error(f"DeepSeek 翻译请求失败: {str(e)}")
+            logger.error(f"DeepSeek 请求失败: {str(e)}")
             if "503" in str(e):
                 logger.error("连接错误：无法连接到 DeepSeek API，可能是代理或网络问题")
             raise 

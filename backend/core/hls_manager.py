@@ -48,8 +48,7 @@ class HLSManager:
             
             with open(self.playlist_path, 'w', encoding='utf-8') as f:
                 f.write(self.playlist.dumps())
-            logger.info(f"播放列表已保存到: {self.playlist_path}")
-            logger.debug(f"播放列表内容: {self.playlist.dumps()}")
+            logger.info(f"播放列表已更新")
         except Exception as e:
             logger.error(f"保存播放列表失败: {e}")
             raise

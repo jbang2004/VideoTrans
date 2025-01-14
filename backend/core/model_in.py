@@ -33,6 +33,30 @@ class ModelIn:
         speech = torch.concat([speech, torch.zeros(1, int(self.cosy_sample_rate * 0.2))], dim=1)
         return speech
 
+    def update_text_features(self, sentence) -> None:
+        """更新句子的文本相关特征
+        
+        Args:
+            sentence: 需要更新的句子对象，必须包含 trans_text 和 model_input 属性
+        """
+        try:
+            # 处理文本
+            tts_text = sentence.trans_text
+            tts_text = self.cosy_frontend.text_normalize(tts_text, split=False)
+            
+            # 提取新的文本特征
+            text_token, text_token_len = self.cosy_frontend._extract_text_token(tts_text)
+            
+            # 更新 model_input
+            sentence.model_input['text'] = text_token
+            sentence.model_input['text_len'] = text_token_len
+            
+            self.logger.debug(f"成功更新句子文本特征: {tts_text}")
+            
+        except Exception as e:
+            self.logger.error(f"更新文本特征失败: {str(e)}")
+            raise
+
     async def modelin_maker(self, sentences, batch_size: int = 3):
         """处理Sensevoice的输出
         
@@ -66,21 +90,14 @@ class ModelIn:
                 # 获取缓存的基础数据
                 cached_features = self.speaker_cache[speaker_id].copy()
                 
-                # 处理当前句子的文本
-                tts_text = sentence.trans_text
-                tts_text = self.cosy_frontend.text_normalize(tts_text, split=False)
-                print("成功添加model_in句子:", tts_text)
-                
-                # 更新文本相关的特征
-                text_token, text_token_len = self.cosy_frontend._extract_text_token(tts_text)
-                cached_features['text'] = text_token
-                cached_features['text_len'] = text_token_len
-                
-                # 添加uuid字段
-                cached_features['tts_speech_token'] = []
-                cached_features['uuid'] = ''
-
+                # 添加基础字段
                 sentence.model_input = cached_features
+                sentence.model_input['tts_speech_token'] = []
+                sentence.model_input['uuid'] = ''
+                
+                # 更新文本特征
+                self.update_text_features(sentence)
+                
                 modelined_batch.append(sentence)
                 
                 # 当批次达到指定大小时，yield整个批次

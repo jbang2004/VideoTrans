@@ -62,7 +62,7 @@ class Sentence:
     adjusted_start: float = field(default=0.0)  # 单位：毫秒
     segment_index: int = field(default=-1)  # 所属分段的索引
     segment_start: float = field(default=0.0)  # 所属分段的起始时间（秒）
-    task_id: str = field(default="")  # 任务ID
+    task_id: str = field(default="")
 
 def tokens_timestamp_sentence(tokens: List[Token], timestamps: List[Timestamp], speaker_segments: List[SpeakerSegment], tokenizer: Any, config: Config) -> List[Tuple[List[Token], List[Timestamp], int]]:
     sentences = []

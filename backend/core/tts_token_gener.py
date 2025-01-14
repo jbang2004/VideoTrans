@@ -48,16 +48,25 @@ class TTSTokenGenerator:
     async def _generate_single_async(self, sentence):
         """异步生成单个句子的 tts_speech_token"""
         loop = asyncio.get_event_loop()
+        # 生成新的 UUID
+        this_uuid = str(uuid.uuid1())
         await loop.run_in_executor(
             self.executor, 
             self._generate_tts_single, 
-            sentence
+            sentence,
+            this_uuid
         )
 
-    def _generate_tts_single(self, sentence):
-        """生成单个句子的 tts_speech_token"""
+    def _generate_tts_single(self, sentence, this_uuid=None):
+        """生成单个句子的 tts_speech_token
+        
+        Args:
+            sentence: 句子对象
+            this_uuid: 指定的 UUID，如果为 None 则使用句子现有的 UUID
+        """
         model_input = sentence.model_input
-        this_uuid = str(uuid.uuid1())
+        # 如果没有指定 UUID，则使用现有的
+        this_uuid = this_uuid or model_input.get('uuid') or str(uuid.uuid1())
         
         try:
             with self.cosyvoice_model.lock:
@@ -82,7 +91,6 @@ class TTSTokenGenerator:
 
             # 更新 model_input
             model_input['tts_speech_token'] = self.cosyvoice_model.tts_speech_token_dict[this_uuid]
-
             model_input['uuid'] = this_uuid
             
             # 更新 Sentence 对象

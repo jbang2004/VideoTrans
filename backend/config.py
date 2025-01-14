@@ -93,7 +93,7 @@ class Config:
     STRONG_END_TOKENS = {9688, 9676, 9705, 9729, 20046, 24883}  # 句号、感叹号和问号
     WEAK_END_TOKENS = {9686, 9728, 24879}
     SPEAKER_AUDIO_TARGET_DURATION = 8.0 # 提取说话人音频的目标长度（秒）
-    TRANSLATION_BATCH_SIZE = 100      # 每批翻译最大句子数
+    TRANSLATION_BATCH_SIZE = 30      # 每批翻译最大句子数
     MODELIN_BATCH_SIZE = 3      # 每批模型输入最大句子数
 
 # 开发环境配置
