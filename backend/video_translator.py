@@ -5,8 +5,8 @@ from pathlib import Path
 import shutil
 from typing import Dict, Optional
 from core.translation.translator import Translator
-from core.translation.glm4_client import GLM4Client
-from core.translation.gemini_client import GeminiClient
+# from core.translation.glm4_client import GLM4Client
+# from core.translation.gemini_client import GeminiClient
 from core.translation.deepseek_client import DeepSeekClient
 from core.tts_token_gener import TTSTokenGenerator
 from core.audio_gener import AudioGenerator
@@ -108,22 +108,18 @@ class ViTranslator:
         self.model_in = ModelIn(self.cosyvoice_model)
         self.tts_generator = TTSTokenGenerator(self.cosyvoice_model, Hz=25)
         self.audio_generator = AudioGenerator(self.cosyvoice_model, sample_rate=self.target_sr)
-        self.duration_aligner = DurationAligner()
-        self.timestamp_adjuster = TimestampAdjuster(sample_rate=self.target_sr)
-        self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr)
-        self.sentence_logger = SentenceLogger(self.config)
-
+        
         # 初始化翻译器
         translation_model = self.config.TRANSLATION_MODEL.strip().strip('"').lower()
         self.logger.info(f"使用翻译模型: {repr(translation_model)}")
         
         try:
-            if translation_model == "glm4":
-                self.translator = Translator(GLM4Client(api_key=self.config.ZHIPUAI_API_KEY))
-            elif translation_model == "gemini":
-                self.translator = Translator(GeminiClient(api_key=self.config.GEMINI_API_KEY))
-            elif translation_model == "deepseek":
+            if translation_model == "deepseek":
                 self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
+            # if translation_model == "glm4":
+            #     self.translator = Translator(GLM4Client(api_key=self.config.ZHIPUAI_API_KEY))
+            # elif translation_model == "gemini":
+            #     self.translator = Translator(GeminiClient(api_key=self.config.GEMINI_API_KEY))
             else:
                 import traceback
                 error_location = traceback.extract_stack()[-1]
@@ -137,6 +133,18 @@ class ViTranslator:
         except Exception as e:
             self.logger.error(f"初始化翻译器失败: {str(e)}", exc_info=True)
             raise
+
+        # 初始化时长对齐器，使用 translator 作为简化器
+        self.duration_aligner = DurationAligner(
+            model_in=self.model_in,
+            simplifier=self.translator,
+            tts_token_gener=self.tts_generator,
+            max_speed=1.2
+        )
+        
+        self.timestamp_adjuster = TimestampAdjuster(sample_rate=self.target_sr)
+        self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr)
+        self.sentence_logger = SentenceLogger(self.config)
 
         self.logger.info("模型初始化完成")
 
@@ -187,7 +195,7 @@ class ViTranslator:
     async def _duration_align_worker(self, sentences):
         """时长对齐工作者"""
         self.logger.debug(f"开始对齐 {len(sentences)} 个句子的时长")
-        self.duration_aligner.align_durations(sentences)
+        await self.duration_aligner.align_durations(sentences)
         return sentences
 
     @worker_decorator(

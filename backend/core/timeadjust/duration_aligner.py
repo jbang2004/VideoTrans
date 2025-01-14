@@ -1,19 +1,42 @@
 import logging
 
 class DurationAligner:
-    def __init__(self):
+    def __init__(self, model_in=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
+        self.model_in = model_in
+        self.simplifier = simplifier
+        self.tts_token_gener = tts_token_gener
+        self.max_speed = max_speed
         self.logger = logging.getLogger(__name__)
 
-    def align_durations(self, sentences):
+    async def align_durations(self, sentences):
         """时长对齐处理"""
         if not sentences:
             self.logger.warning("待处理的句子列表为空")
             return
+        
+        self._align_batch(sentences)
+        self.logger.info("第一轮对齐完成")
+        
+        # 检查需要重新处理的句子
+        sentences_to_retry = [s for s in sentences if getattr(s, 'speed', 1.0) > self.max_speed]
+        
+        if sentences_to_retry:
+            self.logger.info(f"发现{len(sentences_to_retry)}个句子速度过快(>{self.max_speed}):")
+            for s in sentences_to_retry:
+                self.logger.info(f"句子速度: {s.speed:.2f}, 文本: {s.trans_text}")
+                
+            self.logger.info("开始重试处理速度过快的句子...")
+            for sentence in sentences_to_retry:
+                await self._retry_sentence(sentence)
+                
+            # 重新对齐整个批次
+            self._align_batch(sentences)
 
+    def _align_batch(self, sentences):
+        """原有的对齐逻辑"""
         total_diff_to_adjust = sum(s.diff for s in sentences)
-
-        current_time = sentences[0].start  # 从第一个句子的开始时间开始计算 (毫秒)
-
+        current_time = sentences[0].start
+        
         for s in sentences:
             s.adjusted_start = current_time  # 先设置当前句子的开始时间
             diff = s.diff  # 提前计算 diff
@@ -63,3 +86,27 @@ class DurationAligner:
                 s.diff = s.duration - s.adjusted_duration
 
             current_time += s.adjusted_duration  # 更新 current_time
+
+    async def _retry_sentence(self, sentence):
+        """重试处理单个句子"""
+        try:
+            self.logger.info(f"开始精简句子: {sentence.trans_text}")
+            
+            # 获取简化的翻译
+            simplified_text = await self.simplifier.simplify_text(sentence.trans_text)
+            self.logger.info(f"句子精简结果: \n原文: {sentence.trans_text}\n精简: {simplified_text}")
+            
+            sentence.trans_text = simplified_text
+            
+            # 直接使用 model_in 更新文本特征
+            self.model_in.update_text_features(sentence)
+            
+            # 重新生成语音 token，复用原有的 UUID
+            self.tts_token_gener._generate_tts_single(sentence, sentence.model_input.get('uuid'))
+            
+            self.logger.info(f"句子重试成功，字数变化: {len(sentence.trans_text)}/{len(sentence.raw_text)}")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"句子重试失败: {str(e)}")
+            return False
