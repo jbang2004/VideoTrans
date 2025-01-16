@@ -9,27 +9,27 @@ class DurationAligner:
         self.logger = logging.getLogger(__name__)
 
     async def align_durations(self, sentences):
-        """时长对齐处理"""
+        """
+        Align the durations of sentences.
+        """
         if not sentences:
-            self.logger.warning("待处理的句子列表为空")
             return
-        
+
+        # First round alignment
         self._align_batch(sentences)
-        self.logger.info("第一轮对齐完成")
-        
-        # 检查需要重新处理的句子
-        sentences_to_retry = [s for s in sentences if getattr(s, 'speed', 1.0) > self.max_speed]
-        
-        if sentences_to_retry:
-            self.logger.info(f"发现{len(sentences_to_retry)}个句子速度过快(>{self.max_speed}):")
-            for s in sentences_to_retry:
-                self.logger.info(f"句子速度: {s.speed:.2f}, 文本: {s.trans_text}")
-                
-            self.logger.info("开始重试处理速度过快的句子...")
-            for sentence in sentences_to_retry:
-                await self._retry_sentence(sentence)
-                
-            # 重新对齐整个批次
+
+        # Check and retry sentences that are too fast
+        retry_sentences = []
+        for sentence in sentences:
+            if sentence.speed > self.max_speed:
+                retry_sentences.append(sentence)
+
+        if retry_sentences:
+            self.logger.info(f"发现 {len(retry_sentences)} 个句子语速过快，尝试精简并重试...")
+            for sentence in retry_sentences:
+                self._retry_sentence(sentence)
+
+            # Second round alignment after retries
             self._align_batch(sentences)
 
     def _align_batch(self, sentences):

@@ -216,6 +216,35 @@ class ViTranslator:
         if not self.timestamp_adjuster.validate_timestamps(sentences):
             self.logger.warning("检测到时间戳异常")
         
+        # 计算总时长
+        total_adjusted = sum(s.adjusted_duration for s in sentences)
+        total_target = sum(s.target_duration for s in sentences)
+        
+        # 将信息写入文本文件
+        log_file = self.task_state.task_paths.media_dir / "sentences_info.txt"
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"\n批次 {self.task_state.batch_counter} 的句子详情：\n")
+            f.write("-" * 50 + "\n")
+            
+            # 写入每个句子的详细信息
+            for i, s in enumerate(sentences, 1):
+                f.write(
+                    f"句子 {i}/{len(sentences)}:\n"
+                    f"文本: {s.trans_text}\n"
+                    f"调整后时长: {s.adjusted_duration:.1f}ms\n"
+                    f"目标时长: {s.target_duration:.1f}ms\n"
+                    f"语速: {s.speed:.2f}\n"
+                    f"静音时长: {getattr(s, 'silence_duration', 0):.1f}ms\n"
+                    f"\n"
+                )
+            
+            # 写入总体统计信息
+            f.write(f"总体时长统计:\n")
+            f.write(f"调整后总时长: {total_adjusted:.1f}ms\n")
+            f.write(f"目标总时长: {total_target:.1f}ms\n")
+            f.write(f"时长差异: {total_adjusted - total_target:.1f}ms\n")
+            f.write("=" * 50 + "\n\n")
+        
         return sentences
 
     @worker_decorator(

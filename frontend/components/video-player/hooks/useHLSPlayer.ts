@@ -1,24 +1,20 @@
-// frontend/components/VideoPlayer.tsx
-"use client"
-
-import { useEffect, useRef } from 'react'
+import { useRef, useEffect } from 'react'
 import Hls from 'hls.js'
-import { toast } from "sonner"
+import { toast } from 'sonner'
+import { API_BASE_URL } from '../utils/format'
+import type { HLSInstance } from '../types'
 
-interface VideoPlayerProps {
-  taskId: string
-  apiBaseUrl: string
-}
-
-export default function VideoPlayer({ taskId, apiBaseUrl }: VideoPlayerProps) {
-  const videoRef = useRef<HTMLVideoElement | null>(null)
+export function useHLSPlayer(
+  videoRef: React.RefObject<HTMLVideoElement>,
+  isPlaying: boolean
+): HLSInstance {
   const hlsRef = useRef<Hls | null>(null)
 
-  useEffect(() => {
+  const initHLS = (taskId: string) => {
     if (!videoRef.current) return
 
     const video = videoRef.current
-    const playlistUrl = `${apiBaseUrl}/playlists/playlist_${taskId}.m3u8`
+    const playlistUrl = `${API_BASE_URL}/playlists/playlist_${taskId}.m3u8`
 
     // 清理之前的 HLS 实例
     if (hlsRef.current) {
@@ -42,9 +38,11 @@ export default function VideoPlayer({ taskId, apiBaseUrl }: VideoPlayerProps) {
       hlsRef.current = hls
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video.play().catch(error => {
-          console.log('自动播放失败:', error)
-        })
+        if (isPlaying) {
+          video.play().catch(error => {
+            console.log('自动播放失败:', error)
+          })
+        }
       })
 
       hls.on(Hls.Events.ERROR, (event, data) => {
@@ -68,27 +66,30 @@ export default function VideoPlayer({ taskId, apiBaseUrl }: VideoPlayerProps) {
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = playlistUrl
       video.addEventListener('loadedmetadata', () => {
-        video.play().catch(error => {
-          console.log('自动播放失败:', error)
-        })
+        if (isPlaying) {
+          video.play().catch(error => {
+            console.log('自动播放失败:', error)
+          })
+        }
       })
     }
+  }
 
-    return () => {
-      if (hlsRef.current) {
-        hlsRef.current.destroy()
-      }
+  const destroyHLS = () => {
+    if (hlsRef.current) {
+      hlsRef.current.destroy()
+      hlsRef.current = null
     }
-  }, [taskId, apiBaseUrl])
+  }
 
-  return (
-    <div className="rounded-xl overflow-hidden bg-black aspect-video">
-      <video
-        ref={videoRef}
-        className="w-full h-full"
-        controls
-        playsInline
-      />
-    </div>
-  )
-}
+  useEffect(() => {
+    return () => {
+      destroyHLS()
+    }
+  }, [])
+
+  return {
+    initHLS,
+    destroyHLS
+  }
+} 

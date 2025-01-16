@@ -121,7 +121,7 @@ async def upload_video(
                         "progress": 100
                     })
                     # 清理处理文件，保留输出
-                    await task_paths.cleanup(keep_output=True)
+                    # await task_paths.cleanup(keep_output=True)
                 else:
                     task_results[task_id].update({
                         "status": "error",
