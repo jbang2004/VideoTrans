@@ -50,26 +50,78 @@ class Translator:
             self.logger.error(f"翻译失败: {str(e)}")
             raise
 
-    async def simplify(self, texts: Dict[str, str]) -> Dict[str, str]:
-        """执行文本简化并处理结果"""
-        try:
-            # 准备 prompt
-            system_prompt = SIMPLIFICATION_SYSTEM_PROMPT
-            user_prompt = SIMPLIFICATION_USER_PROMPT.format(
-                json_content=texts
-            )
-            
-            # 调用简化
-            result = await self.translation_client.translate(
-                texts=texts,
-                system_prompt=system_prompt,
-                user_prompt=user_prompt
-            )
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"文本简化失败: {str(e)}")
-            raise
+    async def simplify(self, texts: Dict[str, str], batch_size: int = 4) -> Dict[str, str]:
+        """执行文本简化并处理结果，支持批量处理和错误恢复
+        
+        Args:
+            texts: 要简化的文本字典
+            batch_size: 初始批次大小
+        Returns:
+            简化后的文本字典
+        """
+        if not texts:
+            return {}
+
+        result = {}
+        keys = list(texts.keys())
+        i = 0
+        success_count = 0
+        current_batch_size = batch_size
+
+        while i < len(keys):
+            try:
+                # 获取当前批次的文本
+                batch_keys = keys[i:i+current_batch_size]
+                batch_texts = {k: texts[k] for k in batch_keys}
+                
+                self.logger.info(f"简化批次: {len(batch_texts)}条文本, 大小: {current_batch_size}, 位置: {i}")
+
+                # 准备 prompt
+                system_prompt = SIMPLIFICATION_SYSTEM_PROMPT
+                user_prompt = SIMPLIFICATION_USER_PROMPT.format(
+                    json_content=batch_texts
+                )
+                
+                # 调用简化
+                batch_result = await self.translation_client.translate(
+                    texts=batch_texts,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt
+                )
+                
+                # 检查结果完整性
+                if len(batch_result) == len(batch_texts):
+                    success_count += 1
+                    result.update(batch_result)
+                    i += len(batch_texts)
+                    self.logger.info(f"简化成功: {len(batch_texts)}条文本, 连续成功: {success_count}次")
+                    
+                    # 在连续成功足够次数后恢复批次大小
+                    if current_batch_size < batch_size and success_count >= 2:
+                        self.logger.info(f"连续成功{success_count}次，恢复到初始批次大小: {batch_size}")
+                        current_batch_size = batch_size
+                        success_count = 0
+                else:
+                    raise ValueError(f"简化结果不完整 (输入: {len(batch_texts)}, 输出: {len(batch_result)})")
+
+                # 避免API限流
+                if i < len(keys):
+                    await asyncio.sleep(0.1)
+
+            except Exception as e:
+                self.logger.error(f"简化失败: {str(e)}")
+                if current_batch_size > 1:
+                    current_batch_size = max(current_batch_size // 2, 1)
+                    success_count = 0
+                    self.logger.info(f"出错后减小批次大小到: {current_batch_size}")
+                    continue
+                else:
+                    # 单条简化失败，保持原文
+                    for k in batch_keys:
+                        result[k] = texts[k]
+                    i += len(batch_keys)
+
+        return result
 
     async def translate_sentences(
         self,
@@ -149,12 +201,3 @@ class Translator:
                             results.append(sentence)
                         yield results
                         i += 1
-
-    async def simplify_text(self, text: str) -> str:
-        """简化单个文本"""
-        try:
-            result = await self.simplify({"1": text})
-            return result.get("1", text)
-        except Exception as e:
-            self.logger.error(f"文本简化失败: {str(e)}")
-            return text 

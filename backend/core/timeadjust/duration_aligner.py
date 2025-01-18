@@ -25,9 +25,8 @@ class DurationAligner:
                 retry_sentences.append(sentence)
 
         if retry_sentences:
-            self.logger.info(f"发现 {len(retry_sentences)} 个句子语速过快，尝试精简并重试...")
-            for sentence in retry_sentences:
-                self._retry_sentence(sentence)
+            self.logger.info(f"发现 {len(retry_sentences)} 个句子语速过快，尝试批量精简并重试...")
+            await self._retry_sentences_batch(retry_sentences)
 
             # Second round alignment after retries
             self._align_batch(sentences)
@@ -87,26 +86,34 @@ class DurationAligner:
 
             current_time += s.adjusted_duration  # 更新 current_time
 
-    async def _retry_sentence(self, sentence):
-        """重试处理单个句子"""
+    async def _retry_sentences_batch(self, sentences):
+        """批量重试处理句子"""
         try:
-            self.logger.info(f"开始精简句子: {sentence.trans_text}")
+            # 1. 准备批量精简的文本
+            texts_to_simplify = {str(i): s.trans_text for i, s in enumerate(sentences)}
             
-            # 获取简化的翻译
-            simplified_text = await self.simplifier.simplify_text(sentence.trans_text)
-            self.logger.info(f"句子精简结果: \n原文: {sentence.trans_text}\n精简: {simplified_text}")
+            # 2. 批量精简文本
+            simplified_texts = await self.simplifier.simplify(texts_to_simplify)
             
-            sentence.trans_text = simplified_text
+            # 3. 更新每个句子的文本并重新生成特征
+            for i, sentence in enumerate(sentences):
+                simplified_text = simplified_texts.get(str(i))
+                if simplified_text:
+                    self.logger.info(f"句子精简结果: \n原文: {sentence.trans_text}\n精简: {simplified_text}")
+                    sentence.trans_text = simplified_text
+                    
+                    # 更新文本特征
+                    self.model_in.update_text_features(sentence)
+                    
+                    # 重新生成语音token，复用原有的UUID
+                    self.tts_token_gener._generate_tts_single(sentence, sentence.model_input.get('uuid'))
+                    
+                    self.logger.info(f"句子重试成功，字数变化: {len(sentence.trans_text)}/{len(sentence.raw_text)}")
+                else:
+                    self.logger.warning(f"句子精简失败，保持原文: {sentence.trans_text}")
             
-            # 直接使用 model_in 更新文本特征
-            self.model_in.update_text_features(sentence)
-            
-            # 重新生成语音 token，复用原有的 UUID
-            self.tts_token_gener._generate_tts_single(sentence, sentence.model_input.get('uuid'))
-            
-            self.logger.info(f"句子重试成功，字数变化: {len(sentence.trans_text)}/{len(sentence.raw_text)}")
             return True
             
         except Exception as e:
-            self.logger.error(f"句子重试失败: {str(e)}")
+            self.logger.error(f"批量句子重试失败: {str(e)}")
             return False

@@ -59,61 +59,66 @@ class AudioGenerator:
     def _generate_audio_single(self, sentence):
         """生成单个音频"""
         model_input = sentence.model_input
-        self.logger.info(f"开始生成音频 (UUID: {model_input['uuid']})")
+        self.logger.info(f"开始生成音频 (主UUID: {model_input['uuid']})")
         
         try:
-            # 检查 tts_speech_token 是否为空
-            if model_input['tts_speech_token'] is None or len(model_input['tts_speech_token']) == 0:
+            # 检查是否有分段token
+            if not model_input.get('segment_speech_tokens') or not model_input.get('segment_uuids'):
                 self.logger.info(f"空的语音标记，创建空音频 (UUID: {model_input['uuid']})")
-                speech_output = torch.zeros(1, 0)  # 创建空的2维张量
-            else:
+                return np.zeros(0)
+
+            segment_audio_list = []
+            
+            # 为每段生成音频
+            for i, (tokens, segment_uuid) in enumerate(zip(model_input['segment_speech_tokens'], 
+                                                         model_input['segment_uuids'])):
+                if not tokens:
+                    continue
+                    
                 token2wav_kwargs = {
-                    'token': torch.tensor(model_input['tts_speech_token']).unsqueeze(dim=0),
-                    'token_offset': 0,  # 显式设置为0
-                    'finalize': True,  # 确保最终生成
+                    'token': torch.tensor(tokens).unsqueeze(dim=0),
+                    'token_offset': 0,
+                    'finalize': True,
                     'prompt_token': model_input.get('flow_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32)),
                     'prompt_feat': model_input.get('prompt_speech_feat', torch.zeros(1, 0, 80)),
                     'embedding': model_input.get('flow_embedding', torch.zeros(0)),
-                    'uuid': model_input['uuid'],
+                    'uuid': segment_uuid,
                     'speed': sentence.speed if sentence.speed else 1.0
                 }
 
-                speech_output = self.cosyvoice_model.token2wav(**token2wav_kwargs)
+                segment_output = self.cosyvoice_model.token2wav(**token2wav_kwargs)
+                
+                # 转换为numpy并确保是单声道
+                segment_audio = segment_output.cpu().numpy()
+                if segment_audio.ndim > 1:
+                    segment_audio = segment_audio.mean(axis=0)
+                    
+                segment_audio_list.append(segment_audio)
+                
+                self.logger.debug(f"段落 {i+1}/{len(model_input['segment_uuids'])} 生成完成，"
+                                f"时长: {len(segment_audio)/self.sample_rate:.2f}秒")
+
+            # 合并所有音频段
+            if not segment_audio_list:
+                return np.zeros(0)
+                
+            final_audio = np.concatenate(segment_audio_list)
+
             # 处理静音
             if sentence.is_first and sentence.start > 0:
-                speech_output = self._add_silence(speech_output, sentence.start, 'before')  # 单位：毫秒
+                silence_samples = int(sentence.start * self.sample_rate / 1000)  # 毫秒转样本数
+                final_audio = np.concatenate([np.zeros(silence_samples), final_audio])
 
             if sentence.silence_duration > 0:
-                speech_output = self._add_silence(speech_output, sentence.silence_duration, 'after') # 单位：毫秒
+                silence_samples = int(sentence.silence_duration * self.sample_rate / 1000)  # 毫秒转样本数
+                final_audio = np.concatenate([final_audio, np.zeros(silence_samples)])
 
-            # 确保音频数据为1维并在CPU上
-            audio_np = speech_output.cpu().numpy()
-            if audio_np.ndim > 1:
-                # 平均声道以转换为单声道
-                audio_np = audio_np.mean(axis=0)
-
+            self.logger.info(f"音频生成完成 (主UUID: {model_input['uuid']}, "
+                           f"段落数: {len(segment_audio_list)}, "
+                           f"总时长: {len(final_audio)/self.sample_rate:.2f}秒)")
             
-            return audio_np
+            return final_audio
 
         except Exception as e:
             self.logger.error(f"音频生成失败 (UUID: {model_input['uuid']}): {str(e)}")
             raise
-
-    def _add_silence(self, audio, silence_duration_ms, position='before'):
-        """添加静音"""
-        silence_samples = int(silence_duration_ms / 1000 * self.sample_rate) # 毫秒转换为秒再计算样本数
-        silence = torch.zeros(1, silence_samples, device=audio.device)
-        
-        # 处理空音频的情况
-        if audio is None or (isinstance(audio, torch.Tensor) and audio.numel() == 0):
-            audio = torch.zeros(1, 0, device=silence.device)
-        elif isinstance(audio, torch.Tensor) and audio.dim() == 1:
-            # 如果是1维张量，转换为2维 (1, length)
-            audio = audio.unsqueeze(0)
-        
-        if position == 'before':
-            return torch.concat((silence, audio), dim=1)
-        elif position == 'after':
-            return torch.concat((audio, silence), dim=1)
-        else:
-            raise ValueError("position 必须是 'before' 或 'after'")

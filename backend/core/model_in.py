@@ -40,18 +40,26 @@ class ModelIn:
             sentence: 需要更新的句子对象，必须包含 trans_text 和 model_input 属性
         """
         try:
-            # 处理文本
+            # 处理文本并分段
             tts_text = sentence.trans_text
-            tts_text = self.cosy_frontend.text_normalize(tts_text, split=False)
+            normalized_text_segments = self.cosy_frontend.text_normalize(tts_text, split=True)
             
-            # 提取新的文本特征
-            text_token, text_token_len = self.cosy_frontend._extract_text_token(tts_text)
+            # 初始化列表存储每段文本的特征
+            segment_tokens = []
+            segment_token_lens = []
+            
+            # 为每段文本提取特征
+            for segment in normalized_text_segments:
+                text_token, text_token_len = self.cosy_frontend._extract_text_token(segment)
+                segment_tokens.append(text_token)
+                segment_token_lens.append(text_token_len)
             
             # 更新 model_input
-            sentence.model_input['text'] = text_token
-            sentence.model_input['text_len'] = text_token_len
+            sentence.model_input['text'] = segment_tokens
+            sentence.model_input['text_len'] = segment_token_lens
+            sentence.model_input['normalized_text_segments'] = normalized_text_segments
             
-            self.logger.debug(f"成功更新句子文本特征: {tts_text}")
+            self.logger.debug(f"成功更新句子文本特征: {normalized_text_segments}")
             
         except Exception as e:
             self.logger.error(f"更新文本特征失败: {str(e)}")
@@ -92,8 +100,7 @@ class ModelIn:
                 
                 # 添加基础字段
                 sentence.model_input = cached_features
-                sentence.model_input['tts_speech_token'] = []
-                sentence.model_input['uuid'] = ''
+                sentence.model_input['uuid'] = ''  # 主UUID将在token生成时设置
                 
                 # 更新文本特征
                 self.update_text_features(sentence)
