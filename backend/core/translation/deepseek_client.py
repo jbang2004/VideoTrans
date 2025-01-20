@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from openai import OpenAI
 from typing import Dict
 from json_repair import loads
@@ -17,6 +18,22 @@ class DeepSeekClient:
             base_url="https://api.deepseek.com"
         )
         logger.info("DeepSeek 客户端初始化成功")
+
+    def _extract_output_content(self, text: str) -> str:
+        """从响应中提取 <OUTPUT> 标签中的内容
+        
+        Args:
+            text: 包含 <OUTPUT> 标签的文本
+            
+        Returns:
+            <OUTPUT> 标签中的内容
+        """
+        pattern = r"<OUTPUT>(.*?)</OUTPUT>"
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        logger.warning("未找到 <OUTPUT> 标签，返回原始内容")
+        return text
 
     async def translate(
         self,
@@ -41,15 +58,18 @@ class DeepSeekClient:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                response_format={
-                    'type': 'json_object'
-                }
             )
             
             result = response.choices[0].message.content
             logger.info(f"DeepSeek 请求结果: {result}")
+            
+            # 提取 <OUTPUT> 标签中的内容
+            output_content = self._extract_output_content(result)
+            logger.info(f"提取的 OUTPUT 内容: {output_content}")
+            
+            parsed_result = loads(output_content)
             logger.info("DeepSeek 请求成功")
-            return loads(result)
+            return parsed_result
             
         except Exception as e:
             logger.error(f"DeepSeek 请求失败: {str(e)}")
