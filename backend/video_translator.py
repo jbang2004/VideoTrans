@@ -1,91 +1,41 @@
-import sys
 import logging
-import asyncio
+from typing import List, Dict, Any
 from pathlib import Path
-import shutil
-from typing import Dict, Optional
+from core.auto_sense import SenseAutoModel
+from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
 from core.translation.translator import Translator
-# from core.translation.glm4_client import GLM4Client
-# from core.translation.gemini_client import GeminiClient
 from core.translation.deepseek_client import DeepSeekClient
 from core.tts_token_gener import TTSTokenGenerator
 from core.audio_gener import AudioGenerator
-from utils.media_utils import MediaUtils
-from core.media_mixer import MediaMixer
-from core.hls_manager import HLSManager
-from utils.sentence_logger import SentenceLogger
-from core.audio_separator import ClearVoiceSeparator
 from core.timeadjust.duration_aligner import DurationAligner
 from core.timeadjust.timestamp_adjuster import TimestampAdjuster
-from utils.decorators import worker_decorator, handle_errors
-import os.path
-
-# 导入自定义模块
+from core.media_mixer import MediaMixer
+from utils.media_utils import MediaUtils
+from pipeline_scheduler import PipelineScheduler
+from core.audio_separator import ClearVoiceSeparator
 from core.model_in import ModelIn
-from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2,CosyVoice
-from core.auto_sense import SenseAutoModel as AutoModel
+from utils.task_storage import TaskPaths
+from config import Config
+from utils.task_state import TaskState
 
-# 设置日志
+
 logger = logging.getLogger(__name__)
 
-class TaskState:
-    """任务状态类"""
-    def __init__(self, task_id: str, video_path: str, task_paths, hls_manager: HLSManager, target_language: str = "zh"):
-        self.task_id = task_id
-        self.video_path = video_path
-        self.task_paths = task_paths
-        self.hls_manager = hls_manager
-        self.target_language = target_language
-        self.sentence_counter = 0
-        self.current_time = 0
-        self.batch_counter = 0
-        self.segment_media_files = {}  # 存储所有分段的媒体文件 {segment_index: media_files}
-        
-        # 任务相关的队列
-        self.translation_queue = asyncio.Queue()
-        self.modelin_queue = asyncio.Queue()
-        self.tts_token_queue = asyncio.Queue()
-        self.duration_align_queue = asyncio.Queue()
-        self.audio_gen_queue = asyncio.Queue()
-        self.mixing_queue = asyncio.Queue()
-        
-        # 用于监控第一段处理的完成状态
-        self.mixing_complete = None
-        # 用于跟踪第一个segment的处理进度
-        self.first_segment_batch_count = 0  # 第一个segment的总batch数
-        self.first_segment_processed_count = 0  # 已处理的batch数
-
 class ViTranslator:
-    _instance = None
-    _initialized = False
-    
-    def __new__(cls, *args, **kwargs):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-    
-    def __init__(self, config=None):
-        # 只在第一次初始化时加载模型
-        if not self._initialized:
-            self.logger = logging.getLogger(__name__)
-            self.config = config
-            self._init_models()
-            self._initialized = True
-        
-        # 移除task_state的初始化，改为在trans_video时设置
-        self.task_state = None
+    """
+    全局持有大模型(ASR/TTS/翻译)对象, 每次 trans_video 时创建新的 TaskState + PipelineScheduler
+    """
 
-    def _init_models(self):
-        """初始化所有需要的模型和工具"""
-        self.logger.info("初始化模型（仅首次加载）...")
-        
-        # 初始化音频分离器
-        self.audio_separator = ClearVoiceSeparator(
-            model_name='MossFormer2_SE_48K'
-        )
-        
-        # 初始化其他模型
-        self.sense_model = AutoModel(
+    def __init__(self, config: Config = None):
+        self.logger = logger
+        self.config = config or Config()
+        self._init_global_models()
+
+    def _init_global_models(self):
+        self.logger.info("[ViTranslator] 初始化模型和工具...")
+
+        self.audio_separator = ClearVoiceSeparator(model_name='MossFormer2_SE_48K')
+        self.sense_model = SenseAutoModel(
             config=self.config,
             model="iic/SenseVoiceSmall",
             remote_code="./models/SenseVoice/model.py",
@@ -96,331 +46,147 @@ class ViTranslator:
             disable_update=True,
             device="cuda"
         )
-        
-        # CosyVoice TTS模型
         self.cosyvoice_model = CosyVoice2("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
-        # self.cosyvoice_model = CosyVoice("models/CosyVoice/pretrained_models/CosyVoice-300M")
-        # 统一使用CosyVoice的采样率
         self.target_sr = self.cosyvoice_model.sample_rate
-        
-        # 初始化各个处理器
+
         self.media_utils = MediaUtils(config=self.config, audio_separator=self.audio_separator, target_sr=self.target_sr)
         self.model_in = ModelIn(self.cosyvoice_model)
         self.tts_generator = TTSTokenGenerator(self.cosyvoice_model, Hz=25)
         self.audio_generator = AudioGenerator(self.cosyvoice_model, sample_rate=self.target_sr)
-        
-        # 初始化翻译器
-        translation_model = self.config.TRANSLATION_MODEL.strip().strip('"').lower()
-        self.logger.info(f"使用翻译模型: {repr(translation_model)}")
-        
-        try:
-            if translation_model == "deepseek":
-                self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
-            # if translation_model == "glm4":
-            #     self.translator = Translator(GLM4Client(api_key=self.config.ZHIPUAI_API_KEY))
-            # elif translation_model == "gemini":
-            #     self.translator = Translator(GeminiClient(api_key=self.config.GEMINI_API_KEY))
-            else:
-                import traceback
-                error_location = traceback.extract_stack()[-1]
-                error_msg = (
-                    f"不支持的翻译模型: {repr(translation_model)}，支持的模型有: glm4, gemini, deepseek\n"
-                    f"错误位置: {error_location.filename}:{error_location.lineno}\n"
-                    f"配置来源: {self.config.__class__.__name__}"
-                )
-                self.logger.error(error_msg)
-                raise ValueError(error_msg)
-        except Exception as e:
-            self.logger.error(f"初始化翻译器失败: {str(e)}", exc_info=True)
-            raise
 
-        # 初始化时长对齐器，使用 translator 作为简化器
+        # 选择翻译模型(此处演示 DeepSeekClient)
+        translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
+        if translation_model == "deepseek":
+            self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
+        else:
+            raise ValueError(f"不支持的翻译模型：{translation_model}")
+
         self.duration_aligner = DurationAligner(
             model_in=self.model_in,
             simplifier=self.translator,
             tts_token_gener=self.tts_generator,
             max_speed=1.2
         )
-        
         self.timestamp_adjuster = TimestampAdjuster(sample_rate=self.target_sr)
         self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr)
-        self.sentence_logger = SentenceLogger(self.config)
 
-        self.logger.info("模型初始化完成")
+        self.logger.info("[ViTranslator] 初始化完成")
 
-    @worker_decorator(
-        input_queue_attr='translation_queue',
-        next_queue_attr='modelin_queue',
-        worker_name='翻译工作者',
-        mode='stream'
-    )
-    async def _translation_worker(self, sentences):
-        """翻译工作者"""
-        self.logger.debug(f"开始翻译 {len(sentences)} 个句子，目标语言: {self.task_state.target_language}")
-        async for translated_batch in self.translator.translate_sentences(
-            sentences, 
-            batch_size=self.config.TRANSLATION_BATCH_SIZE,
-            target_language=self.task_state.target_language
-        ):
-            yield translated_batch
-
-    @worker_decorator(
-        input_queue_attr='modelin_queue',
-        next_queue_attr='tts_token_queue',
-        worker_name='模型输入工作者',
-        mode='stream'
-    )
-    async def _modelin_worker(self, sentences):
-        """模型输入工作者"""
-        self.logger.debug(f"开始处理 {len(sentences)} 个句子的模型输入")
-        async for modelined_batch in self.model_in.modelin_maker(sentences, batch_size=self.config.MODELIN_BATCH_SIZE):
-            yield modelined_batch
-
-    @worker_decorator(
-        input_queue_attr='tts_token_queue',
-        next_queue_attr='duration_align_queue',
-        worker_name='TTS Token 生成工作者'
-    )
-    async def _tts_token_worker(self, sentences):
-        """TTS Token 生成工作者"""
-        self.logger.debug(f"开始生成 {len(sentences)} 个句子的 TTS tokens")
-        await self.tts_generator.tts_token_maker(sentences)
-        return sentences
-
-    @worker_decorator(
-        input_queue_attr='duration_align_queue',
-        next_queue_attr='audio_gen_queue',
-        worker_name='时长对齐工作者'
-    )
-    async def _duration_align_worker(self, sentences):
-        """时长对齐工作者"""
-        self.logger.debug(f"开始对齐 {len(sentences)} 个句子的时长")
-        await self.duration_aligner.align_durations(sentences)
-        return sentences
-
-    @worker_decorator(
-        input_queue_attr='audio_gen_queue',
-        next_queue_attr='mixing_queue',
-        worker_name='音频生成工作者'
-    )
-    async def _audio_generation_worker(self, sentences):
-        """音频生成工作者"""
-        self.logger.debug(f"开始生成 {len(sentences)} 个句子的音频")
-        await self.audio_generator.vocal_audio_maker(sentences)
-        
-        self.task_state.current_time = self.timestamp_adjuster.update_timestamps(
-            sentences, 
-            start_time=self.task_state.current_time
+    async def trans_video(
+        self,
+        video_path: str,
+        task_id: str,
+        task_paths: TaskPaths,
+        hls_manager=None,
+        target_language="zh"
+    ) -> Dict[str, Any]:
+        """对外主函数：翻译一个视频文件"""
+        self.logger.info(
+            f"[trans_video] 开始处理视频: {video_path}, task_id={task_id}, target_language={target_language}"
         )
-        
-        if not self.timestamp_adjuster.validate_timestamps(sentences):
-            self.logger.warning("检测到时间戳异常")
-        
-        # 计算总时长
-        total_adjusted = sum(s.adjusted_duration for s in sentences)
-        total_target = sum(s.target_duration for s in sentences)
-        
-        # 将信息写入文本文件
-        log_file = self.task_state.task_paths.media_dir / "sentences_info.txt"
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(f"\n批次 {self.task_state.batch_counter} 的句子详情：\n")
-            f.write("-" * 50 + "\n")
-            
-            # 写入每个句子的详细信息
-            for i, s in enumerate(sentences, 1):
-                f.write(
-                    f"句子 {i}/{len(sentences)}:\n"
-                    f"文本: {s.trans_text}\n"
-                    f"调整后时长: {s.adjusted_duration:.1f}ms\n"
-                    f"目标时长: {s.target_duration:.1f}ms\n"
-                    f"语速: {s.speed:.2f}\n"
-                    f"静音时长: {getattr(s, 'silence_duration', 0):.1f}ms\n"
-                    f"\n"
-                )
-            
-            # 写入总体统计信息
-            f.write(f"总体时长统计:\n")
-            f.write(f"调整后总时长: {total_adjusted:.1f}ms\n")
-            f.write(f"目标总时长: {total_target:.1f}ms\n")
-            f.write(f"时长差异: {total_adjusted - total_target:.1f}ms\n")
-            f.write("=" * 50 + "\n\n")
-        
-        return sentences
 
-    @worker_decorator(
-        input_queue_attr='mixing_queue',
-        worker_name='混音工作者'
-    )
-    async def _mixing_worker(self, sentences):
-        """混音工作者"""
-        if not sentences:
-            return None
-            
-        # 设置输出视频路径
-        output_path = self.task_state.task_paths.segments_dir / f"segment_{self.task_state.batch_counter}.mp4"
-        
-        if await self.mixer.mixed_media_maker(
-            sentences,
-            task_state=self.task_state,
-            output_path=str(output_path)
-        ):
-            await self.task_state.hls_manager.add_segment(str(output_path), self.task_state.batch_counter)
-            
-            # 如果是第一个segment的batch
-            if sentences[0].segment_index == 0:
-                self.task_state.first_segment_processed_count += 1
-                self.logger.info(f"第一个segment处理进度: {self.task_state.first_segment_processed_count}/{self.task_state.first_segment_batch_count}")
-                
-                # 当所有batch都处理完成时，发送完成信号
-                if (self.task_state.first_segment_processed_count >= self.task_state.first_segment_batch_count 
-                    and self.task_state.mixing_complete):
-                    self.logger.info("第一个segment的所有batch处理完成")
-                    await self.task_state.mixing_complete.put(True)
-            
-            self.task_state.batch_counter += 1
-            
-        return None
+        # 1) 构建 TaskState
+        task_state = TaskState(
+            task_id=task_id,
+            video_path=video_path,
+            task_paths=task_paths,
+            hls_manager=hls_manager,
+            target_language=target_language
+        )
 
-    @handle_errors(logger)
-    async def trans_video(self, video_path: str, task_id: str, task_paths, hls_manager: HLSManager, target_language: str = "zh") -> dict:
-        """视频翻译主函数"""
+        # 2) 创建 PipelineScheduler 并启动 Worker
+        pipeline = PipelineScheduler(
+            translator=self.translator,
+            model_in=self.model_in,
+            tts_token_generator=self.tts_generator,
+            duration_aligner=self.duration_aligner,
+            audio_generator=self.audio_generator,
+            timestamp_adjuster=self.timestamp_adjuster,
+            mixer=self.mixer,
+            config=self.config
+        )
+        await pipeline.start_workers(task_state)
+
         try:
-            # 初始化任务状态
-            self.task_state = TaskState(
-                task_id=task_id,
-                video_path=video_path,
-                task_paths=task_paths,
-                hls_manager=hls_manager,
-                target_language=target_language
-            )
-            
-            self.logger.info(f"开始处理视频，任务ID: {self.task_state.task_id}，目标语言: {self.task_state.target_language}")
-            
-            # 获取视频时长
-            duration = await self.media_utils.get_video_duration(self.task_state.video_path)
-            
-            # 获取音频分段
+            # 3) 分段
+            duration = await self.media_utils.get_video_duration(video_path)
             segments = await self.media_utils.get_audio_segments(duration)
-            self.logger.info(f"音频分段完成，共 {len(segments)} 个分段")
+            self.logger.info(f"总长度={duration:.2f}s, 分段数={len(segments)}, 任务ID={task_id}")
 
-            # 启动工作者
-            workers = [
-                asyncio.create_task(self._translation_worker()),
-                asyncio.create_task(self._modelin_worker()),
-                asyncio.create_task(self._tts_token_worker()),
-                asyncio.create_task(self._duration_align_worker()),
-                asyncio.create_task(self._audio_generation_worker()),
-                asyncio.create_task(self._mixing_worker())
-            ]
+            if not segments:
+                self.logger.warning(f"没有可用分段 -> 任务ID={task_id}")
+                await pipeline.stop_workers(task_state)
+                return {"status": "error", "message": "无法获取有效分段"}
 
-            try:
-                # 优先处理第一段
-                if segments:
-                    start, duration = segments[0]
-                    self.logger.info(f"开始处理第一段: start={start}, duration={duration}")
-                    await self._process_segment(0, start, duration, is_first=True)
-                    
-                    # 处理剩余分段
-                    for i, (start, duration) in enumerate(segments[1:], 1):
-                        self.logger.info(f"开始处理第 {i} 段: start={start}, duration={duration}")
-                        await self._process_segment(i, start, duration)
+            # 4) 先处理第一段
+            first_start, first_dur = segments[0]
+            await self._process_segment(pipeline, task_state, 0, first_start, first_dur, is_first_segment=True)
+            # 等第一段完成(如果需要)
+            await pipeline.wait_first_segment_done(task_state)
 
-            finally:
-                # 发送停止信号
-                await self.task_state.translation_queue.put(None)
-                # 等待所有工作者完成
-                await asyncio.gather(*workers, return_exceptions=True)
-                # 关闭翻译客户端session
-                if hasattr(self.translator.translation_client, 'close'):
-                    await self.translator.translation_client.close()
+            # 处理后续分段
+            for i, (seg_start, seg_dur) in enumerate(segments[1:], start=1):
+                await self._process_segment(pipeline, task_state, i, seg_start, seg_dur)
 
-            # 检查是否有成功处理的片段
-            if not self.task_state.hls_manager.has_segments:
-                self.logger.error("没有成功处理任何视频片段")
-                return {
-                    'status': 'error',
-                    'message': '视频处理失败：没有可用的音频片段'
-                }
+            # 5) 所有分段都投递后，停止 Worker
+            await pipeline.stop_workers(task_state)
 
-            # 标记播放列表为完成状态
-            await self.task_state.hls_manager.finalize_playlist()
-            return {'status': 'success'}
-
-        except Exception as e:
-            self.logger.error(f"视频处理失败: {str(e)}")
-            return {
-                'status': 'error',
-                'message': f'处理失败: {str(e)}',
-                'task_id': self.task_state.task_id
-            }
-
-    async def _process_segment(self, i: int, start: float, duration: float, is_first: bool = False, language:str="auto"):
-        """处理单个分段"""
-        try:
-            # 使用 TaskPaths 中定义的 segments_dir
-            segment_dir = self.task_state.task_paths.segments_dir / f"segment_{i}"
-            segment_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 分离当前分段的媒体文件并直接存储
-            self.task_state.segment_media_files[i] = await self.media_utils.extract_segment(
-                self.task_state.video_path,
-                start,
-                duration,
-                self.task_state.task_paths.media_dir,
-                i
-            )
-            
-            # 语音识别
-            sentences = self.sense_model.generate(
-                input=self.task_state.segment_media_files[i]['vocals'],
-                cache={},
-                language=language,
-                use_itn=True,
-                batch_size_s=60,
-                merge_vad=False
-            )
-
-            if not sentences:
-                self.logger.warning(f"分段 {i} 未识别到句子")
-                return
-
-            # 为每个句子设置 ID 和分段信息
-            for sentence in sentences:
-                sentence.sentence_id = self.task_state.sentence_counter
-                sentence.segment_index = i
-                sentence.segment_start = start
-                sentence.task_id = self.task_state.task_id
-                self.task_state.sentence_counter += 1
-            
-            self.logger.info(f"分段 {i} 语音识别完成，共 {len(sentences)} 个句子")
-
-            # 如果是第一段，计算总batch数
-            if is_first:
-                # 计算第一个segment的总batch数
-                translation_batch_size = self.config.TRANSLATION_BATCH_SIZE
-                modelin_batch_size = self.config.MODELIN_BATCH_SIZE
-                # 使用最小的batch_size来确保不会遗漏任何batch
-                min_batch_size = min(translation_batch_size, modelin_batch_size)
-                self.task_state.first_segment_batch_count = (len(sentences) - 1) // min_batch_size + 1
-                self.logger.info(f"第一个segment预计有 {self.task_state.first_segment_batch_count} 个batch")
-                self.task_state.mixing_complete = asyncio.Queue()
-                await self.task_state.translation_queue.put(sentences)
-                await self.task_state.mixing_complete.get()
-                self.task_state.mixing_complete = None
+            # 6) HLS
+            if hls_manager and hls_manager.has_segments:
+                await hls_manager.finalize_playlist()
+                self.logger.info(f"[trans_video] 任务ID={task_id} 完成并已生成HLS。")
+                return {"status": "success", "message": "视频翻译完成"}
             else:
-                await self.task_state.translation_queue.put(sentences)
-
+                self.logger.warning(f"任务ID={task_id} 没有可用片段写入HLS")
+                return {"status": "error", "message": "没有成功写入HLS片段"}
         except Exception as e:
-            self.logger.error(f"处理视频段落 {i} 失败: {str(e)}")
-            raise
+            self.logger.exception(f"[trans_video] 任务ID={task_id} 出错: {e}")
+            return {"status": "error", "message": str(e)}
 
-async def main():
-    vitrans = ViTranslator()
-    try:
-        video_path = "path/to/your/video.mp4"
-        await vitrans.trans_video(video_path)
-    except Exception as e:
-        logger.error(f"处理失败: {str(e)}")
+    async def _process_segment(
+        self,
+        pipeline: PipelineScheduler,
+        task_state: TaskState,
+        segment_index: int,
+        start: float,
+        seg_duration: float,
+        is_first_segment: bool = False
+    ):
+        """
+        处理单个分段: 提取 -> ASR -> 推到 pipeline
+        """
+        self.logger.info(
+            f"[_process_segment] 任务ID={task_state.task_id}, segment_index={segment_index}, start={start:.2f}, dur={seg_duration:.2f}"
+        )
+        media_files = await self.media_utils.extract_segment(
+            video_path=task_state.video_path,
+            start=start,
+            duration=seg_duration,
+            output_dir=task_state.task_paths.processing_dir,
+            segment_index=segment_index
+        )
+        task_state.segment_media_files[segment_index] = media_files
 
-if __name__ == "__main__":
-    asyncio.run(main())
+        # ASR
+        sentences = self.sense_model.generate(
+            input=media_files['vocals'],
+            cache={},
+            language="auto",
+            use_itn=True,
+            batch_size_s=60,
+            merge_vad=False
+        )
+        self.logger.info(f"[_process_segment] ASR识别到 {len(sentences)} 条句子, seg={segment_index}, TaskID={task_state.task_id}")
+        if not sentences:
+            return
+
+        # 设置附加属性
+        for s in sentences:
+            s.segment_index = segment_index
+            s.segment_start = start
+            s.task_id = task_state.task_id
+            s.sentence_id = task_state.sentence_counter
+            task_state.sentence_counter += 1
+
+        # 推送到 pipeline
+        await pipeline.push_sentences_to_pipeline(task_state, sentences, is_first_segment)

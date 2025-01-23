@@ -15,14 +15,14 @@ class DurationAligner:
         self._align_batch(sentences)
 
         # 查找超速句子
-        retry_sentences = [s for s in sentences if s.speed > self.max_speed]
-        if retry_sentences:
-            self.logger.info(f"{len(retry_sentences)} 个句子语速过快, 正在精简...")
-            success = await self._retry_sentences_batch(retry_sentences)
-            if success:
-                self._align_batch(sentences)
-            else:
-                self.logger.warning("精简过程失败, 保持原结果")
+        # retry_sentences = [s for s in sentences if s.speed > self.max_speed]
+        # if retry_sentences:
+        #     self.logger.info(f"{len(retry_sentences)} 个句子语速过快, 正在精简...")
+        #     success = await self._retry_sentences_batch(retry_sentences)
+        #     if success:
+        #         self._align_batch(sentences)
+        #     else:
+        #         self.logger.warning("精简过程失败, 保持原结果")
 
     def _align_batch(self, sentences):
         if not sentences:

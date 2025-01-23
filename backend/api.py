@@ -1,61 +1,72 @@
+# ================================
+# File: api.py
+# ================================
 import sys
-from config import get_config
+from pathlib import Path
+import logging
+import uuid
+import asyncio
+from typing import Dict
 
-config = get_config()
-sys.path.extend(config.SYSTEM_PATHS)
-
+import uvicorn
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form, BackgroundTasks
 from fastapi.responses import JSONResponse, FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
-from pathlib import Path
-import logging
-import uuid
-from video_translator import ViTranslator
-from core.hls_manager import HLSManager
-from utils.task_storage import TaskPaths
-import asyncio
-from typing import Dict
 from fastapi.staticfiles import StaticFiles
 import aiofiles
 
-app = FastAPI(debug=config.DEBUG)
+# 使用我们新的简化Config
+from config import Config
 
-# 初始化视频翻译器（全局单例）
-vi_translator = ViTranslator(config=config)
+# 初始化配置并创建必要目录
+config = Config()
+config.init_directories()
+
+# 将系统路径加入 sys.path
+sys.path.extend(config.SYSTEM_PATHS)
+
+# 在这里配置全局日志: 直接DEBUG级别
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(levelname)s | %(asctime)s | %(name)s | L%(lineno)d | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger(__name__)
+
+# 导入视频翻译器等模块
+from video_translator import ViTranslator
+from core.hls_manager import HLSManager
+from utils.task_storage import TaskPaths
+
+# 创建 FastAPI
+app = FastAPI(debug=True)
 
 # 添加 CORS 中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 在生产环境中应该设置为具体的域名
+    allow_origins=["*"],  # 在生产环境中应改为实际域名
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 配置日志
-logging.basicConfig(level=getattr(logging, config.LOG_LEVEL))
-logger = logging.getLogger(__name__)
-
-# 获取当前文件的目录
-current_dir = Path(__file__).parent
-
-# 初始化所有必要的目录
-config.init_directories()
-
 # 配置模板
+current_dir = Path(__file__).parent
 templates = Jinja2Templates(directory=str(current_dir / "templates"))
+
+# 初始化翻译器（全局单例）
+vi_translator = ViTranslator(config=config)
 
 # 存储任务结果
 task_results: Dict[str, dict] = {}
 
-# 挂载静态文件目录
-app.mount("/playlists", StaticFiles(directory=str(config.PUBLIC_DIR / "playlists")), name="playlists")
 
 @app.get("/")
 async def index(request: Request):
     """提供主页"""
     return templates.TemplateResponse("index.html", {"request": request})
+
 
 @app.post("/upload")
 async def upload_video(
@@ -83,9 +94,9 @@ async def upload_video(
         # 保存上传的文件
         video_path = task_paths.input_dir / f"original_{video.filename}"
         try:
-            with open(video_path, "wb") as f:
+            async with aiofiles.open(video_path, "wb") as f:
                 content = await video.read()
-                f.write(content)
+                await f.write(content)
         except Exception as e:
             logger.error(f"保存文件失败: {str(e)}")
             await task_paths.cleanup()
@@ -111,16 +122,16 @@ async def upload_video(
         }
         
         # 设置任务完成回调
-        async def on_task_complete(task):
+        async def on_task_complete(t):
             try:
-                result = await task
+                result = await t
                 if result.get('status') == 'success':
                     task_results[task_id].update({
                         "status": "success",
                         "message": "处理完成",
                         "progress": 100
                     })
-                    # 清理处理文件，保留输出
+                    # 清理处理文件，保留输出(如有需要可在这里做)
                     # await task_paths.cleanup(keep_output=True)
                 else:
                     task_results[task_id].update({
@@ -153,6 +164,7 @@ async def upload_video(
         logger.error(f"上传处理失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/task/{task_id}")
 async def get_task_status(task_id: str):
     """获取任务状态"""
@@ -164,6 +176,11 @@ async def get_task_status(task_id: str):
             "progress": 0
         }
     return result
+
+
+# 挂载静态文件目录 (播放列表)
+app.mount("/playlists", StaticFiles(directory=str(config.PUBLIC_DIR / "playlists")), name="playlists")
+
 
 @app.get("/playlists/{task_id}/{filename}")
 async def serve_playlist(task_id: str, filename: str):
@@ -179,13 +196,14 @@ async def serve_playlist(task_id: str, filename: str):
             str(playlist_path), 
             media_type='application/vnd.apple.mpegurl',
             headers={
-                "Cache-Control": "public, max-age=3600",  # 1小时的缓存时间
+                "Cache-Control": "public, max-age=3600",  # 1小时的缓存
                 "Access-Control-Allow-Origin": "*"
             }
         )
     except Exception as e:
         logger.error(f"服务播放列表失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/segments/{task_id}/{filename}")
 async def serve_segments(task_id: str, filename: str):
@@ -211,6 +229,13 @@ async def serve_segments(task_id: str, filename: str):
         logger.error(f"服务视频片段失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# 在本文件被直接运行时，用 uvicorn.run 启动服务
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host=config.SERVER_HOST, port=config.SERVER_PORT, log_level=config.LOG_LEVEL.lower())
+    uvicorn.run(
+        app,
+        host=config.SERVER_HOST,
+        port=config.SERVER_PORT,
+        # 强制 uvicorn 也用 debug 日志
+        log_level="debug"
+    )
