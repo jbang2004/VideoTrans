@@ -11,14 +11,13 @@ class GLM4Client:
         if not api_key:
             raise ValueError("API key must be provided")
         self.client = ZhipuAI(api_key=api_key)
+        logger.info("GLM-4 客户端初始化成功")
 
     async def translate(self, texts: dict) -> str:
         """调用 GLM-4 模型进行翻译，返回 JSON 字符串"""
         prompt = GLM4_TRANSLATION_PROMPT.format(json_content=json.dumps(texts, ensure_ascii=False, indent=2))
         try:
-            # 打印需要翻译的JSON
-            logger.info(f"需要翻译的JSON: {json.dumps(texts, ensure_ascii=False, indent=2)}")
-            # 发送API请求
+            logger.debug(f"需要翻译的JSON: {json.dumps(texts, ensure_ascii=False, indent=2)}")
             response = self.client.chat.completions.create(
                 model="glm-4-flash",
                 messages=[
@@ -29,7 +28,7 @@ class GLM4Client:
                 top_p=0.8
             )
             content = response.choices[0].message.content
-            logger.info(f"翻译结果: {content}")
+            logger.debug(f"翻译结果: {content}")
             return content
         except Exception as e:
             logger.error(f"GLM-4 翻译请求失败: {str(e)}")

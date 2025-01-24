@@ -19,12 +19,7 @@ class GeminiClient:
         logger.info("Gemini 客户端初始化成功")
 
     async def translate(self, texts: Dict[str, str], target_language: str = "zh") -> str:
-        """调用 Gemini 模型进行翻译，返回 JSON 字符串
-        
-        Args:
-            texts: 要翻译的文本字典
-            target_language: 目标语言代码 (zh/en/ja/ko)
-        """
+        """调用 Gemini 模型进行翻译，返回 JSON 字符串"""
         try:
             if target_language not in LANGUAGE_MAP:
                 raise ValueError(f"不支持的目标语言: {target_language}")
@@ -39,10 +34,10 @@ class GeminiClient:
                 [SYSTEM_PROMPT.format(target_language=LANGUAGE_MAP[target_language]), prompt],
                 generation_config=genai.types.GenerationConfig(temperature=0.3)
             )
-            logger.info(f"Gemini 翻译请求成功，目标语言: {LANGUAGE_MAP[target_language]}")
+            logger.debug(f"Gemini 翻译请求成功, 目标语言: {LANGUAGE_MAP[target_language]}")
             return response.text
         except Exception as e:
             logger.error(f"Gemini 翻译请求失败: {str(e)}")
             if "503" in str(e):
                 logger.error("连接错误：无法连接到 Gemini API，可能是代理或网络问题")
-            raise 
+            raise

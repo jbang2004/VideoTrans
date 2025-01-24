@@ -11,11 +11,9 @@ class TempFileManager:
         self.temp_files: Set[Path] = set()
     
     def add_file(self, file_path: Path) -> None:
-        """添加临时文件到管理器"""
         self.temp_files.add(Path(file_path))
     
     async def cleanup(self) -> None:
-        """清理所有临时文件"""
         for file_path in self.temp_files:
             try:
                 if file_path.exists():

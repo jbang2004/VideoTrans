@@ -75,4 +75,4 @@ class TimestampAdjuster:
                 self.logger.error(f"句子 {current.sentence_id} 的时长无效: {current.adjusted_duration:.2f}ms")
                 return False
                 
-        return True 
+        return True

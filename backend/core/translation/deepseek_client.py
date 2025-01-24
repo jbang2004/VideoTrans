@@ -20,14 +20,7 @@ class DeepSeekClient:
         logger.info("DeepSeek 客户端初始化成功")
 
     def _extract_output_content(self, text: str) -> str:
-        """从响应中提取 <OUTPUT> 标签中的内容
-        
-        Args:
-            text: 包含 <OUTPUT> 标签的文本
-            
-        Returns:
-            <OUTPUT> 标签中的内容
-        """
+        """从响应中提取 <OUTPUT> 标签中的内容"""
         pattern = r"<OUTPUT>(.*?)</OUTPUT>"
         match = re.search(pattern, text, re.DOTALL)
         if match:
@@ -41,16 +34,7 @@ class DeepSeekClient:
         system_prompt: str,
         user_prompt: str
     ) -> Dict[str, str]:
-        """调用 DeepSeek 模型进行处理
-        
-        Args:
-            texts: 要处理的文本字典
-            system_prompt: 系统提示词
-            user_prompt: 用户提示词
-            
-        Returns:
-            处理后的文本字典
-        """
+        """调用 DeepSeek 模型进行处理"""
         try:
             response = self.client.chat.completions.create(
                 model="deepseek-chat",
@@ -61,18 +45,18 @@ class DeepSeekClient:
             )
             
             result = response.choices[0].message.content
-            logger.info(f"DeepSeek 请求结果: {result}")
+            logger.debug(f"DeepSeek 请求结果: {result}")
             
             # 提取 <OUTPUT> 标签中的内容
             output_content = self._extract_output_content(result)
-            logger.info(f"提取的 OUTPUT 内容: {output_content}")
+            logger.debug(f"提取的 OUTPUT 内容: {output_content}")
             
             parsed_result = loads(output_content)
-            logger.info("DeepSeek 请求成功")
+            logger.debug("DeepSeek 请求成功")
             return parsed_result
             
         except Exception as e:
             logger.error(f"DeepSeek 请求失败: {str(e)}")
             if "503" in str(e):
                 logger.error("连接错误：无法连接到 DeepSeek API，可能是代理或网络问题")
-            raise 
+            raise

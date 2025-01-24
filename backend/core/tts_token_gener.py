@@ -15,11 +15,7 @@ class TTSTokenGenerator:
         self.logger = logging.getLogger(__name__)
 
     async def tts_token_maker(self, sentences, reuse_uuid=False):
-        """
-        并发为句子生成 TTS token。
-        :param reuse_uuid: 若为 True，则复用句子已有的 uuid；若没有，则自动生成。
-                           若为 False，则为每个句子生成新的 uuid。
-        """
+        """并发为句子生成 TTS token。"""
         try:
             if self.executor is None:
                 self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
@@ -43,7 +39,6 @@ class TTSTokenGenerator:
 
             processed = await asyncio.gather(*tasks)
 
-            # 检查生成结果
             for sen in processed:
                 if not sen.model_input.get('segment_speech_tokens'):
                     self.logger.error(f"TTS token 生成失败: {sen.trans_text}")
@@ -55,9 +50,6 @@ class TTSTokenGenerator:
             raise
 
     def _generate_tts_single(self, sentence, main_uuid):
-        """
-        同步方法, 生成分段 tokens, 计算时长
-        """
         model_input = sentence.model_input
         segment_tokens_list = []
         segment_uuids = []
@@ -73,7 +65,6 @@ class TTSTokenGenerator:
                         self.cosyvoice_model.mel_overlap_dict[seg_uuid] = None
                     self.cosyvoice_model.hift_cache_dict[seg_uuid] = None
 
-                # LLM job 生成 tokens
                 self.cosyvoice_model.llm_job(
                     text,
                     model_input.get('prompt_text', torch.zeros(1, 0, dtype=torch.int32)),
@@ -94,14 +85,13 @@ class TTSTokenGenerator:
             model_input['segment_uuids'] = segment_uuids
             model_input['uuid'] = main_uuid
 
-            self.logger.info(
+            self.logger.debug(
                 f"TTS token 生成完成 (UUID={main_uuid}, 时长={total_duration_s:.2f}s, 段数={len(segment_uuids)})"
             )
             return sentence
 
         except Exception as e:
             self.logger.error(f"生成失败 (UUID={main_uuid}): {e}")
-            # 失败时, 清理缓存
             with self.cosyvoice_model.lock:
                 for seg_uuid in segment_uuids:
                     self.cosyvoice_model.tts_speech_token_dict.pop(seg_uuid, None)

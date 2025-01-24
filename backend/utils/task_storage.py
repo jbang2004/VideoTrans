@@ -37,9 +37,6 @@ class TaskPaths:
             logger.debug(f"[TaskPaths] 创建目录: {d}")
 
     async def cleanup(self, keep_output: bool = False):
-        """
-        清理任务目录
-        """
         try:
             if keep_output:
                 logger.info(f"[TaskPaths] 保留输出目录, 即将清理输入/processing/segments")

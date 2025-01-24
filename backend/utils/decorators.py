@@ -17,11 +17,9 @@ def handle_errors(custom_logger: Optional[logging.Logger] = None) -> Callable:
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(*args, **kwargs) -> Any:
-            # 选用 custom_logger 或从 args[0].logger 获取
             actual_logger = custom_logger
             if not actual_logger and args and hasattr(args[0], 'logger'):
                 actual_logger = args[0].logger
-
             if not actual_logger:
                 actual_logger = logger
 
@@ -45,43 +43,33 @@ def worker_decorator(
     mode: WorkerMode = 'base'
 ) -> Callable:
     """
-    通用 Worker 装饰器，用于将一个异步函数变成“从指定队列读取数据 -> 处理 -> 放入下游队列”的流式流程。
-    新增更多日志输出，如队列长度、处理耗时等，以便在后台看到详细信息。
+    通用 Worker 装饰器
     """
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(self, task_state, *args, **kwargs):
-            """
-            self: 通常是 pipeline_scheduler.PipelineScheduler 实例
-            task_state: 每个任务独立的状态
-            *args, **kwargs: 可能的额外参数
-            """
             worker_display_name = worker_name or func.__name__
             wlogger = getattr(self, 'logger', logger)
 
-            # 队列引用
             input_queue = getattr(task_state, input_queue_attr)
             next_queue = getattr(task_state, next_queue_attr) if next_queue_attr else None
 
             wlogger.info(f"[{worker_display_name}] 启动 (TaskID={task_state.task_id}). "
                          f"输入队列: {input_queue_attr}, 下游队列: {next_queue_attr if next_queue_attr else '无'}")
 
-            processed_count = 0  # 记录本Worker已处理多少item
+            processed_count = 0
             try:
                 while True:
                     try:
                         queue_size_before = input_queue.qsize()
                         item = await input_queue.get()
                         if item is None:
-                            # 结束信号
                             if next_queue:
                                 await next_queue.put(None)
                             wlogger.info(f"[{worker_display_name}] 收到停止信号。已处理 {processed_count} 个item。")
                             break
 
-                        # 记录处理前队列长度
-                        wlogger.debug(f"[{worker_display_name}] 从 {input_queue_attr} 队列取出一个item. "
-                                      f"队列剩余: {queue_size_before} -> (处理中)")
+                        wlogger.debug(f"[{worker_display_name}] 从 {input_queue_attr} 取出一个item. 队列剩余: {queue_size_before}")
 
                         start_time = time.time()
                         if mode == 'stream':
@@ -107,7 +95,6 @@ def worker_decorator(
                     except Exception as e:
                         wlogger.error(f"[{worker_display_name}] 发生异常: {e} (TaskID={task_state.task_id}). "
                                       f"已处理 {processed_count} 个item", exc_info=True)
-                        # 出错后可选择是否结束下游
                         if next_queue:
                             await next_queue.put(None)
                         break

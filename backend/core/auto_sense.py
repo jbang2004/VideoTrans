@@ -19,15 +19,15 @@ from funasr.utils.load_utils import load_audio_text_image_video
 
 class SenseAutoModel(BaseAutoModel):
     def __init__(self, config, **kwargs):
-               
         super().__init__(**kwargs)
+        self.logger = logging.getLogger(__name__)
         self.config = config
         
         if self.spk_model is not None:
             self.cb_model = ClusterBackend().to(kwargs["device"])
             spk_mode = kwargs.get("spk_mode", "punc_segment")
             if spk_mode not in ["default", "vad_segment", "punc_segment"]:
-                logging.error("spk_mode 应该是 'default', 'vad_segment' 或 'punc_segment' 之一。")
+                self.logger.error("spk_mode 应该是 'default', 'vad_segment' 或 'punc_segment' 之一。")
             self.spk_mode = spk_mode
 
     def inference_with_vad(self, input, input_len=None, **cfg):
@@ -36,7 +36,6 @@ class SenseAutoModel(BaseAutoModel):
         deep_update(self.vad_kwargs, cfg)
         
         res = self.inference(input, input_len=input_len, model=self.vad_model, kwargs=self.vad_kwargs, **cfg)
-
         model = self.model
         deep_update(kwargs, cfg)
         kwargs["batch_size"] = max(int(kwargs.get("batch_size_s", 300)) * 1000, 1)
@@ -53,19 +52,20 @@ class SenseAutoModel(BaseAutoModel):
             fs = kwargs["frontend"].fs if hasattr(kwargs["frontend"], "fs") else 16000
             speech = load_audio_text_image_video(input_i, fs=fs, audio_fs=kwargs.get("fs", 16000))
             speech_lengths = len(speech)
-            print(f"##音频长度: {speech_lengths}")  # 添加此行
+            self.logger.debug(f"音频长度: {speech_lengths} 样本")  # 替换原先的 print
+
             if speech_lengths < 400:
-                print(f"警告：音频太短（{speech_lengths} 样本），可能导致处理错误")
+                self.logger.warning(f"音频太短（{speech_lengths} 样本），可能导致处理错误")
 
             sorted_data = sorted([(seg, idx) for idx, seg in enumerate(vadsegments)], key=lambda x: x[0][1] - x[0][0])
-
             if not sorted_data:
-                logging.info(f"解码, utt: {key}, 空语音")
+                self.logger.info(f"解码, utt: {key}, 空语音")
                 continue
 
             results_sorted = []
             all_segments = []
-            beg_idx, end_idx, max_len_in_batch = 0, 1, 0
+            beg_idx, end_idx = 0, 1
+            max_len_in_batch = 0
 
             for j in range(len(sorted_data)):
                 sample_length = sorted_data[j][0][1] - sorted_data[j][0][0]
@@ -94,7 +94,7 @@ class SenseAutoModel(BaseAutoModel):
                 results_sorted.extend(results)
 
             if len(results_sorted) != len(sorted_data):
-                logging.info(f"解码，utt: {key}，空结果")
+                self.logger.info(f"解码，utt: {key}，空结果")
                 continue
 
             restored_data = [0] * len(sorted_data)
@@ -110,7 +110,7 @@ class SenseAutoModel(BaseAutoModel):
                 sv_output = postprocess(all_segments, None, labels, spk_embedding.cpu())
 
                 if "timestamp" not in result:
-                    logging.error(f"speaker diarization 依赖于时间戳对于 utt: {key}")
+                    self.logger.error(f"speaker diarization 依赖于时间戳对于 utt: {key}")
                     sentence_list = []
                 else:
                     sentence_list = get_sentences(
@@ -122,7 +122,7 @@ class SenseAutoModel(BaseAutoModel):
                         sample_rate=fs,
                         config=self.config
                     )
-                    results_ret_list = sentence_list  # 直接添加 sentence_list 到结果列表
+                    results_ret_list = sentence_list
             else:
                 sentence_list = []
             pbar_total.update(1)
