@@ -54,60 +54,76 @@ class AudioGenerator:
             sentence.generated_audio = None
 
     def _generate_audio_single(self, sentence):
-        """生成单个音频"""
+        """生成单个音频或静音，并拼接必要的前后静音。"""
+
         model_input = sentence.model_input
         self.logger.debug(f"开始生成音频 (主UUID: {model_input.get('uuid', 'unknown')})")
-        
+
         try:
-            if not model_input.get('segment_speech_tokens') or not model_input.get('segment_uuids'):
-                self.logger.debug(f"空的语音标记，创建空音频 (UUID: {model_input.get('uuid', 'unknown')})")
-                return np.zeros(0)
-
             segment_audio_list = []
-            
-            for i, (tokens, segment_uuid) in enumerate(zip(model_input['segment_speech_tokens'], 
-                                                         model_input['segment_uuids'])):
-                if not tokens:
-                    continue
+
+            # 如果 tokens/uuids 为空，我们不直接 return，而是给出一个空数组让后续逻辑继续执行
+            tokens_list = model_input.get('segment_speech_tokens', [])
+            uuids_list = model_input.get('segment_uuids', [])
+
+            if not tokens_list or not uuids_list:
+                # 在这里仅记录日志，并在 segment_audio_list 放一个零长度数组
+                self.logger.debug(f"空的语音标记, 仅生成空波形，后续仍可添加静音 (UUID: {model_input.get('uuid', 'unknown')})")
+                segment_audio_list.append(np.zeros(0, dtype=np.float32))
+            else:
+                # 否则逐段生成音频
+                for i, (tokens, segment_uuid) in enumerate(zip(tokens_list, uuids_list)):
+                    if not tokens:
+                        # 如果某个段 token 为空，也放一个零长度数组占位
+                        segment_audio_list.append(np.zeros(0, dtype=np.float32))
+                        continue
+
+                    token2wav_kwargs = {
+                        'token': torch.tensor(tokens).unsqueeze(dim=0),
+                        'token_offset': 0,
+                        'finalize': True,
+                        'prompt_token': model_input.get('flow_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32)),
+                        'prompt_feat': model_input.get('prompt_speech_feat', torch.zeros(1, 0, 80)),
+                        'embedding': model_input.get('flow_embedding', torch.zeros(0)),
+                        'uuid': segment_uuid,
+                        'speed': sentence.speed if sentence.speed else 1.0
+                    }
+
+                    segment_output = self.cosyvoice_model.token2wav(**token2wav_kwargs)
+                    segment_audio = segment_output.cpu().numpy()
+
+                    # 如果是多通道，转单通道
+                    if segment_audio.ndim > 1:
+                        segment_audio = segment_audio.mean(axis=0)
                     
-                token2wav_kwargs = {
-                    'token': torch.tensor(tokens).unsqueeze(dim=0),
-                    'token_offset': 0,
-                    'finalize': True,
-                    'prompt_token': model_input.get('flow_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32)),
-                    'prompt_feat': model_input.get('prompt_speech_feat', torch.zeros(1, 0, 80)),
-                    'embedding': model_input.get('flow_embedding', torch.zeros(0)),
-                    'uuid': segment_uuid,
-                    'speed': sentence.speed if sentence.speed else 1.0
-                }
+                    segment_audio_list.append(segment_audio)
+                    self.logger.debug(
+                        f"段落 {i+1}/{len(uuids_list)} 生成完成，"
+                        f"时长: {len(segment_audio)/self.sample_rate:.2f}秒"
+                    )
 
-                segment_output = self.cosyvoice_model.token2wav(**token2wav_kwargs)
-                
-                segment_audio = segment_output.cpu().numpy()
-                if segment_audio.ndim > 1:
-                    segment_audio = segment_audio.mean(axis=0)
-                segment_audio_list.append(segment_audio)
-                
-                self.logger.debug(f"段落 {i+1}/{len(model_input['segment_uuids'])} 生成完成，"
-                                  f"时长: {len(segment_audio)/self.sample_rate:.2f}秒")
+            # 拼接所有段落
+            if segment_audio_list:
+                final_audio = np.concatenate(segment_audio_list)
+            else:
+                # 理论上不会出现，因为最少有一个空数组
+                final_audio = np.zeros(0, dtype=np.float32)
 
-            if not segment_audio_list:
-                return np.zeros(0)
-                
-            final_audio = np.concatenate(segment_audio_list)
-
+            # ----- 添加首句静音（若是本分段第一句且 start>0） -----
             if sentence.is_first and sentence.start > 0:
                 silence_samples = int(sentence.start * self.sample_rate / 1000)
-                final_audio = np.concatenate([np.zeros(silence_samples), final_audio])
+                final_audio = np.concatenate([np.zeros(silence_samples, dtype=np.float32), final_audio])
 
+            # ----- 添加尾部静音 -----
             if sentence.silence_duration > 0:
                 silence_samples = int(sentence.silence_duration * self.sample_rate / 1000)
-                final_audio = np.concatenate([final_audio, np.zeros(silence_samples)])
+                final_audio = np.concatenate([final_audio, np.zeros(silence_samples, dtype=np.float32)])
 
-            self.logger.debug(f"音频生成完成 (主UUID: {model_input.get('uuid', 'unknown')}, "
-                              f"段落数: {len(segment_audio_list)}, "
-                              f"总时长: {len(final_audio)/self.sample_rate:.2f}秒)")
-            
+            self.logger.debug(
+                f"音频生成完成 (UUID: {model_input.get('uuid', 'unknown')}, "
+                f"段落数: {len(segment_audio_list)}, 最终长度: {len(final_audio)/self.sample_rate:.2f}秒)"
+            )
+
             return final_audio
 
         except Exception as e:

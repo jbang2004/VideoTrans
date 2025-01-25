@@ -111,10 +111,12 @@ class ViTranslator:
                 await pipeline.stop_workers(task_state)
                 return {"status": "error", "message": "无法获取有效分段"}
 
+            # 先处理第0段
             first_start, first_dur = segments[0]
             await self._process_segment(pipeline, task_state, 0, first_start, first_dur, is_first_segment=True)
             await pipeline.wait_first_segment_done(task_state)
 
+            # 再处理后续分段
             for i, (seg_start, seg_dur) in enumerate(segments[1:], start=1):
                 await self._process_segment(pipeline, task_state, i, seg_start, seg_dur)
 
@@ -153,7 +155,8 @@ class ViTranslator:
         )
         task_state.segment_media_files[segment_index] = media_files
 
-        sentences = self.sense_model.generate(
+        # [MODIFIED] 这里改为异步调用 generate_async
+        sentences = await self.sense_model.generate_async(
             input=media_files['vocals'],
             cache={},
             language="auto",
@@ -172,4 +175,5 @@ class ViTranslator:
             s.sentence_id = task_state.sentence_counter
             task_state.sentence_counter += 1
 
+        # 将识别得到的句子推入后续流水线
         await pipeline.push_sentences_to_pipeline(task_state, sentences, is_first_segment)

@@ -17,7 +17,7 @@ class DurationAligner:
         # 第一次对齐
         self._align_batch(sentences)
 
-        # 查找“语速过快”的句子（speed > max_speed）
+        # 查找"语速过快"的句子（speed > max_speed）
         retry_sentences = [s for s in sentences if s.speed > self.max_speed]
         if retry_sentences:
             self.logger.info(f"{len(retry_sentences)} 个句子语速过快, 正在精简...")
@@ -29,7 +29,7 @@ class DurationAligner:
                 self.logger.warning("精简过程失败, 保持原结果")
 
     def _align_batch(self, sentences):
-        """同批次句子做“压缩/扩展”对齐"""
+        """同批次句子做"压缩/扩展"对齐"""
         if not sentences:
             return
 
@@ -57,7 +57,7 @@ class DurationAligner:
                 # 这里 speed/silence 已被上面重置为 1.0 / 0
 
             elif total_diff_to_adjust > 0:
-                # 批次整体“过长”，需要压缩
+                # 批次整体"过长"，需要压缩
                 positive_diff_sum = sum(x.diff for x in sentences if x.diff > 0)
                 if positive_diff_sum > 0 and diff > 0:
                     # 等比例压缩
@@ -78,7 +78,7 @@ class DurationAligner:
                     # speed = 1.0, silence_duration = 0.0 (已重置)
 
             else:
-                # total_diff_to_adjust < 0 => 整体“过短”，需要扩展
+                # total_diff_to_adjust < 0 => 整体"过短"，需要扩展
                 negative_diff_sum_abs = sum(abs(x.diff) for x in sentences if x.diff < 0)
                 if negative_diff_sum_abs > 0 and diff < 0:
                     # 等比例扩展
@@ -104,10 +104,12 @@ class DurationAligner:
                     s.speed = 1.0
                     s.silence_duration = 0.0
 
-                # “扩展”分支要及时更新 diff
+                # "扩展"分支要及时更新 diff
                 s.diff = s.duration - s.adjusted_duration
 
             current_time += s.adjusted_duration
+
+            self.logger.info(f"对齐后: {s.trans_text}, duration: {s.duration}, target_duration: {s.target_duration}, diff: {s.diff}, speed: {s.speed}, silence_duration: {s.silence_duration}")
 
     async def _retry_sentences_batch(self, sentences):
         """精简文本 + 再次生成 TTS token"""

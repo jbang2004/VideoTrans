@@ -14,8 +14,12 @@ from funasr.utils.misc import deep_update
 from funasr.models.campplus.utils import sv_chunk, postprocess
 from funasr.models.campplus.cluster_backend import ClusterBackend
 from .sentence_tools import get_sentences
-from funasr.utils.vad_utils import slice_padding_audio_samples, merge_vad
+from funasr.utils.vad_utils import slice_padding_audio_samples
 from funasr.utils.load_utils import load_audio_text_image_video
+
+# [MODIFIED] 新增以下导入，用于在 async 函数中包装同步调用
+import asyncio
+from functools import partial
 
 class SenseAutoModel(BaseAutoModel):
     def __init__(self, config, **kwargs):
@@ -52,7 +56,7 @@ class SenseAutoModel(BaseAutoModel):
             fs = kwargs["frontend"].fs if hasattr(kwargs["frontend"], "fs") else 16000
             speech = load_audio_text_image_video(input_i, fs=fs, audio_fs=kwargs.get("fs", 16000))
             speech_lengths = len(speech)
-            self.logger.debug(f"音频长度: {speech_lengths} 样本")  # 替换原先的 print
+            self.logger.debug(f"音频长度: {speech_lengths} 样本")
 
             if speech_lengths < 400:
                 self.logger.warning(f"音频太短（{speech_lengths} 样本），可能导致处理错误")
@@ -157,3 +161,15 @@ class SenseAutoModel(BaseAutoModel):
                     else:
                         result[k] += v
         return result
+
+    # ----------------------------- #
+    # [MODIFIED] 新增异步方法
+    # ----------------------------- #
+    async def generate_async(self, input, input_len=None, **cfg):
+        """
+        将原先 self.sense_model.generate(...) 的同步调用, 包装成异步:
+        在线程池中执行, 以防止阻塞事件循环.
+        """
+        loop = asyncio.get_running_loop()
+        func = partial(self.generate, input, input_len, **cfg)
+        return await loop.run_in_executor(None, func)

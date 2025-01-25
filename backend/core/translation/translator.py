@@ -84,7 +84,7 @@ class Translator:
                         current_batch_size = batch_size
                         success_count = 0
                 else:
-                    raise ValueError(f"简化结果不完整 (输入: {len(batch_texts)}, 输出: {len(batch_result)})")
+                    raise ValueError(f"简化结果不完整 (输入: {len(batch_texts)}, 内容: {batch_texts}, 输出: {len(batch_result)}, 内容: {batch_result})")
 
                 if i < len(keys):
                     await asyncio.sleep(0.1)
@@ -142,8 +142,9 @@ class Translator:
                     if len(translated) == len(texts):
                         success = True
                         success_count += 1
-                        self.logger.debug(f"翻译成功: {len(batch)}条文本, 连续成功: {success_count}次")
-                        
+                        self.logger.info(f"翻译成功: {len(batch)}条文本, 连续成功: {success_count}次")
+
+                        self.logger.debug(f"原文: {texts}，翻译结果: {translated}")
                         results = []
                         for j, sentence in enumerate(batch):
                             sentence.trans_text = translated[str(j)]
@@ -155,6 +156,7 @@ class Translator:
                         batch_size = max(batch_size // 2, 1)
                         success_count = 0
                         self.logger.warning(f"翻译不完整 (输入: {len(texts)}, 输出: {len(translated)}), 减小到: {batch_size}")
+                        self.logger.debug(f"原文: {texts}，翻译结果: {translated}")
                         continue
 
                     if i < len(sentences):

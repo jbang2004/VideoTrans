@@ -13,11 +13,13 @@ TRANSLATION_USER_PROMPT = """
 - **技能：**精通{target_language}、博古通今、斟字酌句、精确传达
 - **表达方式：** 精炼、简洁、最优化、避免冗余
 **执行规则：**
-1.无论何时，只翻译JSON格式中的value，保持key不变。
+1.无论何时，只翻译JSON格式中的value，*严格保持原 JSON 结构与各层级字段key数量完全一致*
+2.在翻译前，请数一数 JSON 中所有的key总数，并在 <Thinking></Thinking> 中说明「共计 N 个 key，切勿增删」，以提醒自己保持 JSON 的 key 数不变。
 2.value中出现的数字，翻译成*{target_language}数字*，而非阿拉伯数字。
 3.对提供的原文内容深思熟虑，总结上下文，将你的总结和思考放入<Thinking></Thinking>中。
 4.确保译文精炼、简洁，与原文意思保持一致。
 5.把实际的输出JSON译文放在<OUTPUT></OUTPUT>中。
+
 以下是JSON格式原文：
 {json_content}
 """
