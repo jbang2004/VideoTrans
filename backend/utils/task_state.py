@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Any
+from typing import Any, Dict
 import asyncio
 from utils.task_storage import TaskPaths
 
@@ -14,20 +14,22 @@ class TaskState:
     hls_manager: Any = None
     target_language: str = "zh"
 
+    # 已处理到的句子计数
     sentence_counter: int = 0
-    current_time: float = 0
-    batch_counter: int = 0
-    segment_media_files: dict = field(default_factory=dict)
 
-    # 每个任务的队列
+    # 时间戳记录
+    current_time: float = 0
+
+    # 第几个 HLS 批次 (混音后输出)
+    batch_counter: int = 0
+
+    # 每个分段对应的媒体文件信息
+    segment_media_files: Dict[int, Dict[str, Any]] = field(default_factory=dict)
+
+    # 各个异步队列 (翻译->模型输入->tts_token->时长对齐->音频生成->混音)
     translation_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     modelin_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     tts_token_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     duration_align_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     audio_gen_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     mixing_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-
-    # 第一段处理完成的同步
-    mixing_complete: asyncio.Queue = field(default_factory=asyncio.Queue)
-    first_segment_batch_count: int = 0
-    first_segment_processed_count: int = 0

@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class PipelineScheduler:
     """
-    多个Worker的调度器
+    多个Worker的调度器，负责翻译->model_in->tts_token->时长对齐->音频生成->混音 等流水线。
     """
 
     def __init__(
@@ -35,7 +35,7 @@ class PipelineScheduler:
 
         self._workers = []
 
-    async def start_workers(self, task_state: "TaskState"):
+    async def start_workers(self, task_state: TaskState):
         self.logger.info(f"[PipelineScheduler] start_workers -> TaskID={task_state.task_id}")
         self._workers = [
             asyncio.create_task(self._translation_worker(task_state)),
@@ -46,26 +46,23 @@ class PipelineScheduler:
             asyncio.create_task(self._mixing_worker(task_state))
         ]
 
-    async def stop_workers(self, task_state: "TaskState"):
+    async def stop_workers(self, task_state: TaskState):
         self.logger.info(f"[PipelineScheduler] stop_workers -> TaskID={task_state.task_id}")
+        # 向translation_queue发送None，让整条流水线停止
         await task_state.translation_queue.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self.logger.info(f"[PipelineScheduler] 所有Worker已结束 -> TaskID={task_state.task_id}")
 
-    async def push_sentences_to_pipeline(self, task_state: "TaskState", sentences: List[Sentence], is_first_segment=False):
-        if is_first_segment:
-            batch_size = self.config.TRANSLATION_BATCH_SIZE
-            total = len(sentences)
-            task_state.first_segment_batch_count = (total + batch_size - 1) // batch_size
-            self.logger.info(f"[push_sentences_to_pipeline] 第一段预估批次数: {task_state.first_segment_batch_count} (TaskID={task_state.task_id})")
-
+    async def push_sentences_to_pipeline(self, task_state: TaskState, sentences: List[Sentence]):
+        """
+        把新产生的一批句子放进翻译队列
+        """
         self.logger.debug(f"[push_sentences_to_pipeline] 放入 {len(sentences)} 个句子到 translation_queue, TaskID={task_state.task_id}")
         await task_state.translation_queue.put(sentences)
 
-    async def wait_first_segment_done(self, task_state: "TaskState"):
-        self.logger.info(f"等待第一段所有batch完成 -> TaskID={task_state.task_id}")
-        await task_state.mixing_complete.get()
-        self.logger.info(f"第一段完成 -> TaskID={task_state.task_id}")
+    # ------------------------------
+    # 以下是各个 Worker 的实现
+    # ------------------------------
 
     @worker_decorator(
         input_queue_attr='translation_queue',
@@ -73,7 +70,7 @@ class PipelineScheduler:
         worker_name='翻译Worker',
         mode='stream'
     )
-    async def _translation_worker(self, sentences_list: List[Sentence], task_state: "TaskState"):
+    async def _translation_worker(self, sentences_list: List[Sentence], task_state: TaskState):
         if not sentences_list:
             return
         self.logger.debug(f"[翻译Worker] 收到 {len(sentences_list)} 句子, TaskID={task_state.task_id}")
@@ -92,7 +89,7 @@ class PipelineScheduler:
         worker_name='模型输入Worker',
         mode='stream'
     )
-    async def _modelin_worker(self, sentences_batch: List[Sentence], task_state: "TaskState"):
+    async def _modelin_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
         if not sentences_batch:
             return
         self.logger.debug(f"[模型输入Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
@@ -111,7 +108,7 @@ class PipelineScheduler:
         next_queue_attr='duration_align_queue',
         worker_name='TTS Token生成Worker'
     )
-    async def _tts_token_worker(self, sentences_batch: List[Sentence], task_state: "TaskState"):
+    async def _tts_token_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
         if not sentences_batch:
             return
         self.logger.debug(f"[TTS Token生成Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
@@ -125,7 +122,7 @@ class PipelineScheduler:
         next_queue_attr='audio_gen_queue',
         worker_name='时长对齐Worker'
     )
-    async def _duration_align_worker(self, sentences_batch: List[Sentence], task_state: "TaskState"):
+    async def _duration_align_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
         if not sentences_batch:
             return
         self.logger.debug(f"[时长对齐Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
@@ -139,7 +136,7 @@ class PipelineScheduler:
         next_queue_attr='mixing_queue',
         worker_name='音频生成Worker'
     )
-    async def _audio_generation_worker(self, sentences_batch: List[Sentence], task_state: "TaskState"):
+    async def _audio_generation_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
         if not sentences_batch:
             return
         self.logger.debug(f"[音频生成Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
@@ -156,7 +153,7 @@ class PipelineScheduler:
         input_queue_attr='mixing_queue',
         worker_name='混音Worker'
     )
-    async def _mixing_worker(self, sentences_batch: List[Sentence], task_state: "TaskState"):
+    async def _mixing_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
         if not sentences_batch:
             return
         seg_index = sentences_batch[0].segment_index
@@ -174,16 +171,7 @@ class PipelineScheduler:
             await task_state.hls_manager.add_segment(str(output_path), task_state.batch_counter)
             self.logger.info(f"[混音Worker] 分段 {task_state.batch_counter} 已加入 HLS, TaskID={task_state.task_id}")
 
-        if seg_index == 0:
-            task_state.first_segment_processed_count += 1
-            self.logger.info(
-                f"[混音Worker] 第一段处理: {task_state.first_segment_processed_count}/"
-                f"{task_state.first_segment_batch_count}, TaskID={task_state.task_id}"
-            )
-            if (task_state.first_segment_processed_count >= task_state.first_segment_batch_count
-                and task_state.mixing_complete):
-                await task_state.mixing_complete.put(True)
-
+        # 批次计数自增
         task_state.batch_counter += 1
         self.logger.debug(f"[混音Worker] 本批次混音完成 -> batch_counter={task_state.batch_counter}, TaskID={task_state.task_id}")
         return None

@@ -1,9 +1,12 @@
+# =========================== deepseek_client.py ===========================
 import json
 import logging
 import re
 from openai import OpenAI
 from typing import Dict
 from json_repair import loads
+
+import asyncio  # [MODIFIED] 用于 asyncio.to_thread
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +37,13 @@ class DeepSeekClient:
         system_prompt: str,
         user_prompt: str
     ) -> Dict[str, str]:
-        """调用 DeepSeek 模型进行处理"""
+        """
+        将 sync 调用 self.client.chat.completions.create(...) 包装到线程池中执行，避免阻塞事件循环。
+        """
         try:
-            response = self.client.chat.completions.create(
+            # [MODIFIED] 在默认线程池执行同步请求
+            response = await asyncio.to_thread(
+                self.client.chat.completions.create,
                 model="deepseek-chat",
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -44,6 +51,7 @@ class DeepSeekClient:
                 ],
             )
             
+            # 同步部分结束后，继续解析结果
             result = response.choices[0].message.content
             logger.debug(f"DeepSeek 请求结果: {result}")
             

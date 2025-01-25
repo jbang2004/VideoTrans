@@ -1,6 +1,7 @@
 import logging
 from typing import List, Dict, Any
 from pathlib import Path
+
 from core.auto_sense import SenseAutoModel
 from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
 from core.translation.translator import Translator
@@ -32,7 +33,10 @@ class ViTranslator:
     def _init_global_models(self):
         self.logger.info("[ViTranslator] 初始化模型和工具...")
 
+        # 音频分离器
         self.audio_separator = ClearVoiceSeparator(model_name='MossFormer2_SE_48K')
+
+        # ASR + VAD + Speaker
         self.sense_model = SenseAutoModel(
             config=self.config,
             model="iic/SenseVoiceSmall",
@@ -44,20 +48,25 @@ class ViTranslator:
             disable_update=True,
             device="cuda"
         )
+
+        # TTS 模型
         self.cosyvoice_model = CosyVoice2("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
         self.target_sr = self.cosyvoice_model.sample_rate
 
+        # 媒体与管线相关工具
         self.media_utils = MediaUtils(config=self.config, audio_separator=self.audio_separator, target_sr=self.target_sr)
         self.model_in = ModelIn(self.cosyvoice_model)
         self.tts_generator = TTSTokenGenerator(self.cosyvoice_model, Hz=25)
         self.audio_generator = AudioGenerator(self.cosyvoice_model, sample_rate=self.target_sr)
 
+        # 翻译模型
         translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
         if translation_model == "deepseek":
             self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
         else:
             raise ValueError(f"不支持的翻译模型：{translation_model}")
 
+        # 其他处理
         self.duration_aligner = DurationAligner(
             model_in=self.model_in,
             simplifier=self.translator,
@@ -77,10 +86,14 @@ class ViTranslator:
         hls_manager=None,
         target_language="zh"
     ) -> Dict[str, Any]:
+        """
+        入口：对整段视频进行处理。包括分段、ASR、翻译、TTS、混音、生成 HLS 等。
+        """
         self.logger.info(
             f"[trans_video] 开始处理视频: {video_path}, task_id={task_id}, target_language={target_language}"
         )
 
+        # 初始化任务状态 + 管线
         task_state = TaskState(
             task_id=task_id,
             video_path=video_path,
@@ -102,7 +115,9 @@ class ViTranslator:
         await pipeline.start_workers(task_state)
 
         try:
+            # 1. 获取视频总时长
             duration = await self.media_utils.get_video_duration(video_path)
+            # 2. 划分分段
             segments = await self.media_utils.get_audio_segments(duration)
             self.logger.info(f"总长度={duration:.2f}s, 分段数={len(segments)}, 任务ID={task_id}")
 
@@ -111,17 +126,14 @@ class ViTranslator:
                 await pipeline.stop_workers(task_state)
                 return {"status": "error", "message": "无法获取有效分段"}
 
-            # 先处理第0段
-            first_start, first_dur = segments[0]
-            await self._process_segment(pipeline, task_state, 0, first_start, first_dur, is_first_segment=True)
-            await pipeline.wait_first_segment_done(task_state)
-
-            # 再处理后续分段
-            for i, (seg_start, seg_dur) in enumerate(segments[1:], start=1):
+            # 3. 遍历所有分段：提取、ASR、推送后续流水线
+            for i, (seg_start, seg_dur) in enumerate(segments):
                 await self._process_segment(pipeline, task_state, i, seg_start, seg_dur)
 
+            # 4. 所有段结束后，停止流水线
             await pipeline.stop_workers(task_state)
 
+            # 5. 如果有 HLS Manager，标记完成
             if hls_manager and hls_manager.has_segments:
                 await hls_manager.finalize_playlist()
                 self.logger.info(f"[trans_video] 任务ID={task_id} 完成并已生成HLS。")
@@ -129,6 +141,7 @@ class ViTranslator:
             else:
                 self.logger.warning(f"任务ID={task_id} 没有可用片段写入HLS")
                 return {"status": "error", "message": "没有成功写入HLS片段"}
+
         except Exception as e:
             self.logger.exception(f"[trans_video] 任务ID={task_id} 出错: {e}")
             return {"status": "error", "message": str(e)}
@@ -140,12 +153,15 @@ class ViTranslator:
         segment_index: int,
         start: float,
         seg_duration: float,
-        is_first_segment: bool = False
     ):
+        """
+        用于处理单个分段：提取音频/视频 -> ASR -> 推送后续翻译/合成的异步流水线
+        """
         self.logger.info(
             f"[_process_segment] 任务ID={task_state.task_id}, segment_index={segment_index}, "
             f"start={start:.2f}, dur={seg_duration:.2f}"
         )
+        # 1) 提取视频/音频/人声/背景音
         media_files = await self.media_utils.extract_segment(
             video_path=task_state.video_path,
             start=start,
@@ -155,7 +171,7 @@ class ViTranslator:
         )
         task_state.segment_media_files[segment_index] = media_files
 
-        # [MODIFIED] 这里改为异步调用 generate_async
+        # 2) 进行ASR（异步包装）
         sentences = await self.sense_model.generate_async(
             input=media_files['vocals'],
             cache={},
@@ -165,9 +181,11 @@ class ViTranslator:
             merge_vad=False
         )
         self.logger.info(f"[_process_segment] ASR识别到 {len(sentences)} 条句子, seg={segment_index}, TaskID={task_state.task_id}")
+
         if not sentences:
             return
 
+        # 3) 给每条句子打上分段相关信息，再放入后续流水线
         for s in sentences:
             s.segment_index = segment_index
             s.segment_start = start
@@ -175,5 +193,4 @@ class ViTranslator:
             s.sentence_id = task_state.sentence_counter
             task_state.sentence_counter += 1
 
-        # 将识别得到的句子推入后续流水线
-        await pipeline.push_sentences_to_pipeline(task_state, sentences, is_first_segment)
+        await pipeline.push_sentences_to_pipeline(task_state, sentences)
