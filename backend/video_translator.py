@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import List, Dict, Any
 from pathlib import Path
 
@@ -18,6 +19,8 @@ from core.model_in import ModelIn
 from utils.task_storage import TaskPaths
 from config import Config
 from utils.task_state import TaskState
+
+from utils.ffmpeg_utils import FFmpegTool  # 用于合并
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,8 @@ class ViTranslator:
         )
         self.timestamp_adjuster = TimestampAdjuster(sample_rate=self.target_sr)
         self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr)
+
+        self.ffmpeg_tool = FFmpegTool()
 
         self.logger.info("[ViTranslator] 初始化完成")
 
@@ -137,10 +142,20 @@ class ViTranslator:
             if hls_manager and hls_manager.has_segments:
                 await hls_manager.finalize_playlist()
                 self.logger.info(f"[trans_video] 任务ID={task_id} 完成并已生成HLS。")
-                return {"status": "success", "message": "视频翻译完成"}
+
+            # 6. 现在合并 `_mixing_worker` 产出的所有 segment_xxx.mp4
+            #    并在成功后自动删除它们
+            final_video_path = await self._concat_segment_mp4s(task_state)
+            if final_video_path is not None and final_video_path.exists():
+                self.logger.info(f"翻译后的完整视频已生成: {final_video_path}")
+                return {
+                    "status": "success",
+                    "message": "视频翻译完成",
+                    "final_video_path": str(final_video_path)
+                }
             else:
-                self.logger.warning(f"任务ID={task_id} 没有可用片段写入HLS")
-                return {"status": "error", "message": "没有成功写入HLS片段"}
+                self.logger.warning("无法合并生成最终MP4文件")
+                return {"status": "error", "message": "HLS完成，但无法合并出最终MP4"}
 
         except Exception as e:
             self.logger.exception(f"[trans_video] 任务ID={task_id} 出错: {e}")
@@ -154,14 +169,7 @@ class ViTranslator:
         start: float,
         seg_duration: float,
     ):
-        """
-        用于处理单个分段：提取音频/视频 -> ASR -> 推送后续翻译/合成的异步流水线
-        """
-        self.logger.info(
-            f"[_process_segment] 任务ID={task_state.task_id}, segment_index={segment_index}, "
-            f"start={start:.2f}, dur={seg_duration:.2f}"
-        )
-        # 1) 提取视频/音频/人声/背景音
+        # 1. 提取并分离人声/背景
         media_files = await self.media_utils.extract_segment(
             video_path=task_state.video_path,
             start=start,
@@ -171,7 +179,7 @@ class ViTranslator:
         )
         task_state.segment_media_files[segment_index] = media_files
 
-        # 2) 进行ASR（异步包装）
+        # 2. 进行ASR
         sentences = await self.sense_model.generate_async(
             input=media_files['vocals'],
             cache={},
@@ -185,7 +193,6 @@ class ViTranslator:
         if not sentences:
             return
 
-        # 3) 给每条句子打上分段相关信息，再放入后续流水线
         for s in sentences:
             s.segment_index = segment_index
             s.segment_start = start
@@ -194,3 +201,55 @@ class ViTranslator:
             task_state.sentence_counter += 1
 
         await pipeline.push_sentences_to_pipeline(task_state, sentences)
+
+    # ============== 新增：合并 + 删除 ==============
+    async def _concat_segment_mp4s(self, task_state: TaskState) -> Path:
+        """
+        把 pipeline_scheduler _mixing_worker 产出的所有 segment_xxx.mp4
+        用 ffmpeg concat 合并成 final_{task_id}.mp4
+        如果成功再删除这些小片段。
+        """
+        if not task_state.merged_segments:
+            self.logger.warning("无可合并的 segment MP4, 可能任务中断或没有生成混音段.")
+            return None
+
+        final_path = task_state.task_paths.output_dir / f"final_{task_state.task_id}.mp4"
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 1) 写出 concat 列表
+        list_txt = final_path.parent / f"concat_{task_state.task_id}.txt"
+        with open(list_txt, 'w', encoding='utf-8') as f:
+            for seg_mp4 in task_state.merged_segments:
+                abs_path = Path(seg_mp4).resolve()
+                f.write(f"file '{abs_path}'\n")
+
+        # 2) 调用 ffmpeg
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_txt),
+            "-c", "copy",
+            str(final_path)
+        ]
+        try:
+            self.logger.info(f"开始合并 {len(task_state.merged_segments)} 个MP4 -> {final_path}")
+            await self.ffmpeg_tool.run_command(cmd)
+            self.logger.info(f"合并完成: {final_path}")
+
+            # 3) 合并成功后，自动删除这些 segment
+            for seg_mp4 in task_state.merged_segments:
+                try:
+                    Path(seg_mp4).unlink(missing_ok=True)
+                    self.logger.debug(f"已删除分段文件: {seg_mp4}")
+                except Exception as ex:
+                    self.logger.warning(f"删除分段文件 {seg_mp4} 失败: {ex}")
+
+            return final_path
+        except Exception as e:
+            self.logger.error(f"ffmpeg concat 失败: {e}")
+            return None
+        finally:
+            # 临时文件可按需删除
+            if list_txt.exists():
+                list_txt.unlink()

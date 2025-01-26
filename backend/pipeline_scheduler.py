@@ -159,19 +159,25 @@ class PipelineScheduler:
         seg_index = sentences_batch[0].segment_index
         self.logger.debug(f"[混音Worker] 收到 {len(sentences_batch)} 句, segment={seg_index}, TaskID={task_state.task_id}")
 
+        # output_path: e.g. "storage/tasks/<task_id>/segments/segment_0.mp4"
         output_path = task_state.task_paths.segments_dir / f"segment_{task_state.batch_counter}.mp4"
 
+        # 调用 mixer 生成带音轨的 MP4
         success = await self.mixer.mixed_media_maker(
             sentences=sentences_batch,
             task_state=task_state,
             output_path=str(output_path)
         )
 
+        # 如果生成成功，则用于 HLS + 后续合并
         if success and task_state.hls_manager:
             await task_state.hls_manager.add_segment(str(output_path), task_state.batch_counter)
             self.logger.info(f"[混音Worker] 分段 {task_state.batch_counter} 已加入 HLS, TaskID={task_state.task_id}")
 
-        # 批次计数自增
+            # 关键：记录到 task_state.merged_segments
+            # 用于后面在翻译结束后 concat
+            task_state.merged_segments.append(str(output_path))
+
         task_state.batch_counter += 1
         self.logger.debug(f"[混音Worker] 本批次混音完成 -> batch_counter={task_state.batch_counter}, TaskID={task_state.task_id}")
         return None

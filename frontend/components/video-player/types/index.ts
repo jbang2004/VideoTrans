@@ -20,6 +20,9 @@ export interface TranslationState {
   selectedLanguage: string
   taskId: string | null
   selectedFile: File | null
+
+  // 新增: 是否已完成翻译
+  isCompleted: boolean
 }
 
 export interface TranslationControls {
@@ -35,4 +38,4 @@ export interface HLSInstance {
 
 export interface VideoPlayerProps {
   className?: string
-} 
+}

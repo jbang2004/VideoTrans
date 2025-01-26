@@ -156,7 +156,7 @@ class Translator:
                         batch_size = max(batch_size // 2, 1)
                         success_count = 0
                         self.logger.warning(f"翻译不完整 (输入: {len(texts)}, 输出: {len(translated)}), 减小到: {batch_size}")
-                        self.logger.debug(f"原文: {texts}，翻译结果: {translated}")
+                        self.logger.warning(f"原文: {texts}，翻译结果: {translated}")
                         continue
 
                     if i < len(sentences):

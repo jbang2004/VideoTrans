@@ -33,3 +33,5 @@ class TaskState:
     duration_align_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     audio_gen_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     mixing_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    # 新增：记录 _mixing_worker 产出的每个 segment_xxx.mp4
+    merged_segments: list = field(default_factory=list)

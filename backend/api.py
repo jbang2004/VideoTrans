@@ -77,7 +77,7 @@ async def upload_video(
                 await f.write(content)
         except Exception as e:
             logger.error(f"保存文件失败: {str(e)}")
-            await task_paths.cleanup()
+            # await task_paths.cleanup()
             raise HTTPException(status_code=500, detail="文件保存失败")
         
         hls_manager = HLSManager(config, task_id, task_paths)
@@ -111,7 +111,7 @@ async def upload_video(
                         "message": result.get('message', '处理失败'),
                         "progress": 0
                     })
-                    await task_paths.cleanup()
+                    # await task_paths.cleanup()
             except Exception as e:
                 logger.error(f"任务处理失败: {str(e)}")
                 task_results[task_id].update({
@@ -119,7 +119,7 @@ async def upload_video(
                     "message": str(e),
                     "progress": 0
                 })
-                await task_paths.cleanup()
+                # await task_paths.cleanup()
         
         task.add_done_callback(lambda t: asyncio.create_task(on_task_complete(t)))
         
@@ -190,6 +190,21 @@ async def serve_segments(task_id: str, filename: str):
     except Exception as e:
         logger.error(f"服务视频片段失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# =========================================
+# 新增：为最终合并后的MP4提供下载接口
+# =========================================
+@app.get("/download/{task_id}")
+async def download_translated_video(task_id: str):
+    # 在本示例中，最终合并的文件为: tasks/<task_id>/output/final_<task_id>.mp4
+    final_video_path = config.TASKS_DIR / task_id / "output" / f"final_{task_id}.mp4"
+    if not final_video_path.exists():
+        raise HTTPException(status_code=404, detail="最终视频文件尚未生成或已被删除")
+    return FileResponse(
+        str(final_video_path),
+        media_type='video/mp4',
+        filename=f"final_{task_id}.mp4",
+    )
 
 if __name__ == "__main__":
     uvicorn.run(

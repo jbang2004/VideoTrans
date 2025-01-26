@@ -11,7 +11,8 @@ export function useTranslation(onTaskIdChange: (taskId: string | null) => void) 
     isProcessing: false,
     selectedLanguage: '中文',
     taskId: null,
-    selectedFile: null
+    selectedFile: null,
+    isCompleted: false,
   })
 
   const pollIntervalRef = useRef<TimeoutHandle>()
@@ -30,7 +31,7 @@ export function useTranslation(onTaskIdChange: (taskId: string | null) => void) 
         return
       }
 
-      setState(prev => ({ ...prev, isProcessing: true }))
+      setState(prev => ({ ...prev, isProcessing: true, isCompleted: false }))
 
       const formData = new FormData()
       formData.append('video', state.selectedFile)
@@ -65,14 +66,19 @@ export function useTranslation(onTaskIdChange: (taskId: string | null) => void) 
             const statusData = await statusResponse.json()
             if (statusData.status === 'success') {
               toast.success('视频翻译完成')
-              setState(prev => ({ ...prev, isProcessing: false }))
+              setState(prev => ({
+                ...prev,
+                isProcessing: false,
+                isCompleted: true,        // <-- 在这里标记完成
+              }))
               stopPolling()
             } else if (statusData.status === 'error') {
               toast.error(statusData.message || '处理失败')
               setState(prev => ({
                 ...prev,
                 isTranslating: false,
-                isProcessing: false
+                isProcessing: false,
+                isCompleted: false
               }))
               stopPolling()
             }
@@ -92,7 +98,8 @@ export function useTranslation(onTaskIdChange: (taskId: string | null) => void) 
         ...prev,
         isTranslating: false,
         isProcessing: false,
-        taskId: null
+        taskId: null,
+        isCompleted: false
       }))
       onTaskIdChange(null)
       stopPolling()
@@ -109,4 +116,4 @@ export function useTranslation(onTaskIdChange: (taskId: string | null) => void) 
     setState,
     controls
   }
-} 
+}
