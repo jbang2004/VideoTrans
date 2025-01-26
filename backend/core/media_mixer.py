@@ -1,3 +1,4 @@
+# core/media_mixer.py
 import numpy as np
 import logging
 import soundfile as sf
@@ -9,6 +10,9 @@ from tempfile import NamedTemporaryFile
 from pathlib import Path
 from typing import Optional, List
 from utils.decorators import handle_errors
+
+# 引入统一的 FFmpegTool
+from utils.ffmpeg_utils import FFmpegTool
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +26,13 @@ class MediaMixer:
         self.background_volume = self.config.BACKGROUND_VOLUME
         self.full_audio_buffer = np.array([], dtype=np.float32)
 
+        # 新增 ffmpeg 工具类
+        self.ffmpeg_tool = FFmpegTool()
+
     @handle_errors(logger)
     async def mixed_media_maker(self, sentences, task_state=None, output_path=None):
         """
-        处理一批句子的音频和视频
+        处理一批句子的音频和视频，并最终生成一个带音频的分段 MP4。
         """
         if not sentences:
             logger.warning("接收到空的句子列表")
@@ -39,6 +46,7 @@ class MediaMixer:
             logger.error(f"找不到分段 {segment_index} 的媒体文件")
             return False
 
+        # 拼接所有句子的合成音频
         for sentence in sentences:
             if sentence.generated_audio is not None:
                 audio_data = np.asarray(sentence.generated_audio, dtype=np.float32)
@@ -55,6 +63,7 @@ class MediaMixer:
             logger.error("没有有效的音频数据")
             return False
 
+        # 计算分段内的起始时间 & 本批时长
         start_time = 0.0 if sentences[0].is_first else (sentences[0].adjusted_start - sentences[0].segment_start * 1000) / 1000.0
         duration = sum(s.adjusted_duration for s in sentences) / 1000.0
 
@@ -73,18 +82,18 @@ class MediaMixer:
         return False
 
     def _apply_fade_effect(self, audio_data: np.ndarray) -> np.ndarray:
-        """应用淡入淡出效果，自然处理重叠"""
+        """应用淡入淡出效果，用于自然衔接音频。"""
         if audio_data is None or len(audio_data) == 0:
             return np.array([], dtype=np.float32)
-        
+
         if len(audio_data) > self.overlap * 2:
             audio_data = audio_data.copy()
             fade_in = np.linspace(0, 1, self.overlap)
             fade_out = np.linspace(1, 0, self.overlap)
-            
+
             audio_data[:self.overlap] *= fade_in
             audio_data[-self.overlap:] *= fade_out
-            
+
             if len(self.full_audio_buffer) > 0:
                 overlap_region = self.full_audio_buffer[-self.overlap:]
                 audio_data[:self.overlap] = np.add(
@@ -97,27 +106,27 @@ class MediaMixer:
     def _mix_with_background(self, background_audio_path: str, start_time: float, duration: float, audio_data: np.ndarray) -> np.ndarray:
         background_audio, _ = sf.read(background_audio_path)
         background_audio = np.asarray(background_audio, dtype=np.float32)
-        
+
         target_length = int(duration * self.sample_rate)
         start_sample = int(start_time * self.sample_rate)
         end_sample = start_sample + target_length
         background_segment = background_audio[start_sample:end_sample] if end_sample <= len(background_audio) else background_audio[start_sample:]
-        
+
         result = np.zeros(target_length, dtype=np.float32)
         audio_length = min(len(audio_data), target_length)
         background_length = min(len(background_segment), target_length)
-        
+
         if audio_length > 0:
             result[:audio_length] = audio_data[:audio_length] * self.vocals_volume
         if background_length > 0:
             result[:background_length] += background_segment[:background_length] * self.background_volume
-        
+
         return result
 
     def _normalize_audio(self, audio_data: np.ndarray) -> np.ndarray:
         if audio_data is None or len(audio_data) == 0:
             return np.array([], dtype=np.float32)
-        
+
         max_val = np.abs(audio_data).max()
         if max_val > self.max_val:
             audio_data = audio_data * (self.max_val / max_val)
@@ -125,15 +134,15 @@ class MediaMixer:
 
     @handle_errors(logger)
     async def _add_video_segment(self, video_path: str, start_time: float, duration: float, audio_data: np.ndarray, output_path: str) -> None:
-        """添加视频片段"""
+        """切割出指定时段的视频片段，并与音频合并输出。"""
         if not os.path.exists(video_path):
             logger.error("视频文件不存在")
             raise FileNotFoundError("视频文件不存在")
-        
+
         if audio_data is None or len(audio_data) == 0:
             logger.error("无有效音频数据")
             raise ValueError("无有效音频数据")
-        
+
         if duration <= 0:
             logger.error("无效的持续时间")
             raise ValueError("无效的持续时间")
@@ -143,43 +152,24 @@ class MediaMixer:
             temp_audio = stack.enter_context(NamedTemporaryFile(suffix='.wav'))
 
             end_time = start_time + duration
-            
-            cmd = [
-                'ffmpeg', '-y',
-                '-i', video_path,
-                '-ss', str(start_time),
-                '-to', str(end_time),
-                '-c:v', 'libx264',
-                '-preset', 'superfast',
-                '-an',
-                '-vsync', 'vfr',
-                temp_video.name
-            ]
-            await self._run_ffmpeg_command(cmd)
 
+            # 1) 截取无声视频
+            await self.ffmpeg_tool.cut_video_track(
+                input_path=video_path,
+                output_path=temp_video.name,
+                start=start_time,
+                end=end_time
+            )
+
+            # 2) 将合成音频写入临时 wav
             await asyncio.to_thread(sf.write, temp_audio.name, audio_data, self.sample_rate)
 
-            cmd = [
-                'ffmpeg', '-y',
-                '-i', temp_video.name,
-                '-i', temp_audio.name,
-                '-c:v', 'copy',
-                '-c:a', 'aac',
-                output_path
-            ]
-            await self._run_ffmpeg_command(cmd)
-
-    @handle_errors(logger)
-    async def _run_ffmpeg_command(self, command: List[str]) -> None:
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode != 0:
-            raise RuntimeError(f"FFmpeg 命令执行失败: {stderr.decode()}")
+            # 3) 将无声视频和合成音轨合并
+            await self.ffmpeg_tool.cut_video_with_audio(
+                input_video_path=temp_video.name,
+                input_audio_path=temp_audio.name,
+                output_path=output_path
+            )
 
     async def reset(self):
         self.full_audio_buffer = np.array([], dtype=np.float32)
