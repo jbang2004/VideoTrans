@@ -1,13 +1,10 @@
-# core/media_mixer.py
 import numpy as np
 import logging
 import soundfile as sf
 import os
-import shutil
 import asyncio
 from contextlib import ExitStack
 from tempfile import NamedTemporaryFile
-from pathlib import Path
 from typing import Optional, List
 from utils.decorators import handle_errors
 
@@ -51,6 +48,7 @@ class MediaMixer:
             if sentence.generated_audio is not None:
                 audio_data = np.asarray(sentence.generated_audio, dtype=np.float32)
                 if len(full_audio) > 0:
+                    # 调用更高级的音频衔接方式
                     audio_data = self._apply_fade_effect(audio_data)
                 full_audio = np.concatenate((full_audio, audio_data))
             else:
@@ -82,25 +80,35 @@ class MediaMixer:
         return False
 
     def _apply_fade_effect(self, audio_data: np.ndarray) -> np.ndarray:
-        """应用淡入淡出效果，用于自然衔接音频。"""
+        """
+        使用“等功率（equal power）”交叉淡入淡出进行更高级的音频平滑衔接。
+        当存在已累积的 self.full_audio_buffer 时，取其中末尾 overlap 样本
+        与新 audio_data 的开头 overlap 样本作交叉融合。
+
+        Returns:
+            np.ndarray: 更新后的 new audio_data
+        """
         if audio_data is None or len(audio_data) == 0:
             return np.array([], dtype=np.float32)
 
-        if len(audio_data) > self.overlap * 2:
-            audio_data = audio_data.copy()
-            fade_in = np.linspace(0, 1, self.overlap)
-            fade_out = np.linspace(1, 0, self.overlap)
+        # 交叉区域长度取 self.overlap 与现有 buffer、新音频长度的最小值
+        cross_len = min(self.overlap, len(self.full_audio_buffer), len(audio_data))
+        if cross_len <= 0:
+            # 如果没有可交叉的长度，则直接返回原音频
+            return audio_data
 
-            audio_data[:self.overlap] *= fade_in
-            audio_data[-self.overlap:] *= fade_out
+        # 等功率淡入淡出系数
+        fade_out = np.sqrt(np.linspace(1.0, 0.0, cross_len, dtype=np.float32))
+        fade_in = np.sqrt(np.linspace(0.0, 1.0, cross_len, dtype=np.float32))
 
-            if len(self.full_audio_buffer) > 0:
-                overlap_region = self.full_audio_buffer[-self.overlap:]
-                audio_data[:self.overlap] = np.add(
-                    overlap_region,
-                    audio_data[:self.overlap],
-                    dtype=np.float32
-                )
+        audio_data = audio_data.copy()
+
+        # 取出 self.full_audio_buffer 末尾 cross_len 片段进行淡出
+        overlap_region = self.full_audio_buffer[-cross_len:]
+
+        # 在交叉区对新音频做淡入，对旧音频做淡出，再叠加
+        audio_data[:cross_len] = overlap_region * fade_out + audio_data[:cross_len] * fade_in
+
         return audio_data
 
     def _mix_with_background(self, background_audio_path: str, start_time: float, duration: float, audio_data: np.ndarray) -> np.ndarray:
