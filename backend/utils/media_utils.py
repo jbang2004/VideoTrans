@@ -8,7 +8,7 @@ import soundfile as sf
 from pathlib import Path
 from typing import List, Tuple, Dict, Union
 from utils.decorators import handle_errors
-from utils.temp_file_manager import TempFileManager
+from utils import concurrency
 
 logger = logging.getLogger(__name__)
 
@@ -226,23 +226,27 @@ class MediaUtils:
                 self.extract_video(video_path, silent_video, start, duration)
             )
             
-            # (2) 异步分离人声
-            vocals, background, sr = await asyncio.to_thread(
-                self.audio_separator.separate_audio,
-                full_audio
-            )
+            # [MODIFIED] 用 concurrency 代替 to_thread
+            # step (2) 分离人声
+            def do_separate():
+                return self.audio_separator.separate_audio(full_audio)
+            vocals, background, sr = await concurrency.run_sync(do_separate)
 
+            # step (3) 重采样
+            def do_resample():
+                return self.normalize_and_resample((sr, background), self.target_sr)
+            background = await concurrency.run_sync(do_resample)
 
-            # (3) 重采样 & 写文件，都用 to_thread 包装，避免阻塞事件循环
-            background = await asyncio.to_thread(
-                self.normalize_and_resample,
-                (sr, background),
-                self.target_sr
-            )
-            
-            await asyncio.to_thread(sf.write, vocals_audio, vocals, sr, subtype='FLOAT')
-            await asyncio.to_thread(sf.write, background_audio, background, self.target_sr, subtype='FLOAT')
-            
+            # 写文件
+            def write_vocals():
+                sf.write(vocals_audio, vocals, sr, subtype='FLOAT')
+
+            def write_bg():
+                sf.write(background_audio, background, self.target_sr, subtype='FLOAT')
+
+            await concurrency.run_sync(write_vocals)
+            await concurrency.run_sync(write_bg)
+                       
             segment_duration = len(vocals) / sr
 
             # optional: 删除完整音频

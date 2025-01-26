@@ -1,10 +1,9 @@
 import logging
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import torch
 import numpy as np
 import os
-import inspect
+from utils import concurrency
 
 class AudioGenerator:
     def __init__(self, cosyvoice_model, sample_rate: int = None, max_workers=None):
@@ -12,43 +11,28 @@ class AudioGenerator:
         Args:
             cosyvoice_model: CosyVoice模型
             sample_rate: 采样率，如果为None则使用cosyvoice_model的采样率
-            max_workers: 并行处理的最大工作线程数，默认为None（将根据CPU核心数自动设置）
         """
         self.cosyvoice_model = cosyvoice_model.model
         self.sample_rate = sample_rate or cosyvoice_model.sample_rate
-        cpu_count = os.cpu_count()
-        self.max_workers = min(max_workers or cpu_count, cpu_count)
-        self.executor = None
         self.logger = logging.getLogger(__name__)
 
     async def vocal_audio_maker(self, batch_sentences):
         """异步批量生成音频"""
+        tasks = []
+        for s in batch_sentences:
+            tasks.append(self._generate_single_async(s))
+
         try:
-            if self.executor is None:
-                self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
-                self.logger.debug(f"创建音频生成线程池，max_workers={self.max_workers}")
-            
-            tasks = [
-                self._generate_single_async(sentence)
-                for sentence in batch_sentences
-            ]
             await asyncio.gather(*tasks)
-            
         except Exception as e:
             self.logger.error(f"音频生成失败: {str(e)}")
             raise
 
     async def _generate_single_async(self, sentence):
-        """异步生成单个音频"""
-        loop = asyncio.get_event_loop()
+        """异步生成单个音频 (使用 run_sync 统一线程池)"""
         try:
-            audio_np = await loop.run_in_executor(
-                self.executor, 
-                self._generate_audio_single, 
-                sentence
-            )
+            audio_np = await concurrency.run_sync(self._generate_audio_single, sentence)
             sentence.generated_audio = audio_np
-            
         except Exception as e:
             self.logger.error(f"音频生成失败 (UUID: {sentence.model_input.get('uuid', 'unknown')}): {str(e)}")
             sentence.generated_audio = None

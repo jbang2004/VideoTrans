@@ -5,12 +5,20 @@ import numpy as np
 import librosa
 from typing import List, Optional
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+
+# [NEW] 统一使用 concurrency.run_sync
+from utils import concurrency
 
 class ModelIn:
     def __init__(self, cosy_model,
                  max_workers: Optional[int] = None,
                  max_concurrent_tasks: int = 4):
+        """
+        Args:
+            cosy_model: CosyVoice model wrapper
+            max_workers: (已废弃, 因为我们改用全局线程池)
+            max_concurrent_tasks: 同时处理多少 sentence
+        """
         self.cosy_frontend = cosy_model.frontend
         self.cosy_sample_rate = cosy_model.sample_rate
         self.logger = logging.getLogger(__name__)
@@ -18,14 +26,10 @@ class ModelIn:
         self.speaker_cache = {}
         self.max_val = 0.8
 
-        cpu_count = os.cpu_count() or 1
-        self.max_workers = min(max_workers or cpu_count, cpu_count)
-        self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
         self.semaphore = asyncio.Semaphore(max_concurrent_tasks)
 
         self.logger.info(
-            f"ModelIn initialized with max_workers={self.max_workers}, "
-            f"max_concurrent_tasks={max_concurrent_tasks}"
+            f"ModelIn initialized (max_concurrent_tasks={max_concurrent_tasks})"
         )
 
     def postprocess(self, speech, top_db=60, hop_length=220, win_length=440):
@@ -41,6 +45,9 @@ class ModelIn:
         return speech
 
     def _update_text_features_sync(self, sentence):
+        """
+        纯同步逻辑：文本正则化 + token 提取
+        """
         try:
             tts_text = sentence.trans_text
             normalized_segments = self.cosy_frontend.text_normalize(tts_text, split=True)
@@ -64,12 +71,16 @@ class ModelIn:
             raise
 
     def _process_sentence_sync(self, sentence, reuse_speaker=False, reuse_uuid=False):
+        """
+        纯同步实现：包含 speaker 处理、uuid处理、文本特征更新
+        """
         speaker_id = sentence.speaker_id
 
         # 1) Speaker处理
         if not reuse_speaker:
             if speaker_id not in self.speaker_cache:
                 processed_audio = self.postprocess(sentence.audio)
+                # 同步地调用 cosy_frontend
                 self.speaker_cache[speaker_id] = self.cosy_frontend.frontend_cross_lingual(
                     "",
                     processed_audio,
@@ -82,15 +93,16 @@ class ModelIn:
         if not reuse_uuid:
             sentence.model_input['uuid'] = ""
 
-        # 3) 更新文本特征
+        # 3) 文本特征更新 (同步)
         self._update_text_features_sync(sentence)
         return sentence
 
     async def _process_sentence_async(self, sentence, reuse_speaker=False, reuse_uuid=False):
-        loop = asyncio.get_event_loop()
+        """
+        在异步方法中，对单个 sentence 做同步处理 -> run_sync
+        """
         async with self.semaphore:
-            return await loop.run_in_executor(
-                self.executor,
+            return await concurrency.run_sync(
                 self._process_sentence_sync,
                 sentence,
                 reuse_speaker,
@@ -102,16 +114,20 @@ class ModelIn:
                             reuse_speaker=False,
                             reuse_uuid=False,
                             batch_size=3):
+        """
+        对一批 sentences 做 model_in 处理，分批 yield
+        """
         if not sentences:
             self.logger.warning("modelin_maker: 收到空的句子列表")
             return
 
-        tasks = [
-            asyncio.create_task(
-                self._process_sentence_async(s, reuse_speaker, reuse_uuid)
+        tasks = []
+        for s in sentences:
+            tasks.append(
+                asyncio.create_task(
+                    self._process_sentence_async(s, reuse_speaker, reuse_uuid)
+                )
             )
-            for s in sentences
-        ]
 
         try:
             results = []
@@ -131,6 +147,7 @@ class ModelIn:
             raise
 
         finally:
+            # 不复用speaker时，清空cache
             if not reuse_speaker:
                 self.speaker_cache.clear()
                 self.logger.debug("modelin_maker: 已清理 speaker_cache")

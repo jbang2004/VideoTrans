@@ -6,7 +6,8 @@ from openai import OpenAI
 from typing import Dict
 from json_repair import loads
 
-import asyncio  # [MODIFIED] 用于 asyncio.to_thread
+# [MODIFIED] 引入统一线程管理
+from utils import concurrency
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +39,10 @@ class DeepSeekClient:
         user_prompt: str
     ) -> Dict[str, str]:
         """
-        将 sync 调用 self.client.chat.completions.create(...) 包装到线程池中执行，避免阻塞事件循环。
+        将 sync 调用 self.client.chat.completions.create(...) 放到统一的线程池执行。
         """
         try:
-            # [MODIFIED] 在默认线程池执行同步请求
-            response = await asyncio.to_thread(
+            response = await concurrency.run_sync(
                 self.client.chat.completions.create,
                 model="deepseek-chat",
                 messages=[
@@ -50,8 +50,6 @@ class DeepSeekClient:
                     {"role": "user", "content": user_prompt}
                 ],
             )
-            
-            # 同步部分结束后，继续解析结果
             result = response.choices[0].message.content
             logger.debug(f"DeepSeek 请求结果: {result}")
             
