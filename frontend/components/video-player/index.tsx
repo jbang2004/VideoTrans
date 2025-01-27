@@ -1,3 +1,6 @@
+// ===============================================
+// frontend/components/video-player/index.tsx
+// ===============================================
 'use client'
 
 import React, { useRef, useState, useEffect } from 'react'
@@ -11,10 +14,14 @@ import { Sidebar } from './components/Sidebar'
 import { useVideoPlayer } from './hooks/useVideoPlayer'
 import { useHLSPlayer } from './hooks/useHLSPlayer'
 import { useTranslation } from './hooks/useTranslation'
-import type { VideoPlayerProps } from './types'
 
-export default function VideoPlayer({ className }: VideoPlayerProps) {
+export default function VideoPlayer() {
+  const containerRef = useRef<HTMLDivElement>(null)
   const { videoRef, state: playerState, controls: playerControls } = useVideoPlayer()
+  const [showControls, setShowControls] = useState(true)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+
+  // ========== 新增: 由useTranslation()管理字幕Wanted等 ==========
   const { state: translationState, setState: setTranslationState, controls: translationControls } = useTranslation((taskId) => {
     if (taskId) {
       hlsInstance.initHLS(taskId)
@@ -22,14 +29,11 @@ export default function VideoPlayer({ className }: VideoPlayerProps) {
       hlsInstance.destroyHLS()
     }
   })
+
   const hlsInstance = useHLSPlayer(videoRef, playerState.isPlaying)
-  const [showControls, setShowControls] = useState(true)
-  const [isFullscreen, setIsFullscreen] = useState(false)
   const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
-  const containerRef = useRef<HTMLDivElement>(null)
 
   const handleFileSelect = (file: File) => {
-    // 创建本地预览 URL
     const previewUrl = URL.createObjectURL(file)
     playerControls.setLocalVideoUrl(previewUrl)
     setTranslationState(prev => ({
@@ -37,13 +41,13 @@ export default function VideoPlayer({ className }: VideoPlayerProps) {
       selectedFile: file,
       isTranslating: false,
       isProcessing: false,
-      taskId: null
+      taskId: null,
+      isCompleted: false
     }))
   }
 
   const toggleFullscreen = () => {
     if (!containerRef.current) return
-
     if (!isFullscreen) {
       if (containerRef.current.requestFullscreen) {
         containerRef.current.requestFullscreen()
@@ -59,7 +63,6 @@ export default function VideoPlayer({ className }: VideoPlayerProps) {
     const handleFullscreenChange = () => {
       setIsFullscreen(document.fullscreenElement !== null)
     }
-
     document.addEventListener('fullscreenchange', handleFullscreenChange)
     return () => {
       document.removeEventListener('fullscreenchange', handleFullscreenChange)
@@ -67,10 +70,6 @@ export default function VideoPlayer({ className }: VideoPlayerProps) {
   }, [])
 
   const handleMouseMove = (e: React.MouseEvent) => {
-    // 检查鼠标是否在底栏区域内
-    const target = e.target as HTMLElement
-    if (target.closest('.control-bar')) return
-
     if (!playerState.localVideoUrl && !translationState.taskId) return
     setShowControls(true)
     if (controlsTimeoutRef.current) {
@@ -105,10 +104,10 @@ export default function VideoPlayer({ className }: VideoPlayerProps) {
 
   return (
     <div className="flex h-screen bg-gradient-to-br from-neutral-950 to-black text-white overflow-hidden">
-      {/* Sidebar */}
+      {/* 左侧Sidebar */}
       {!isFullscreen && <Sidebar />}
 
-      {/* Main Content - Video Player */}
+      {/* 主视频区域 */}
       <div 
         ref={containerRef}
         className={cn(
@@ -119,13 +118,14 @@ export default function VideoPlayer({ className }: VideoPlayerProps) {
       >
         <div className="absolute inset-0 flex items-center justify-center bg-black">
           <div className="relative w-full h-full max-h-screen">
+            {/* Video元素 */}
             <video
               ref={videoRef}
               className="absolute inset-0 w-full h-full object-contain"
               playsInline
             />
 
-            {/* Overlay Controls */}
+            {/* Overlay: 当没选视频时，中心显示Upload */}
             <div className="absolute inset-0 flex items-center justify-center">
               {(!playerState.localVideoUrl && !translationState.taskId) && (
                 <div className="flex items-center justify-center gap-8">
@@ -137,7 +137,7 @@ export default function VideoPlayer({ className }: VideoPlayerProps) {
               )}
             </div>
 
-            {/* Bottom Control Bar */}
+            {/* 底部控制栏 */}
             <div 
               className={cn(
                 "control-bar absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent pt-20 pb-6 px-4 transition-opacity duration-300",
@@ -176,11 +176,14 @@ export default function VideoPlayer({ className }: VideoPlayerProps) {
                       )}
                     </Button>
                   </div>
+
                   <div className="flex items-center gap-4">
+                    {/* 翻译相关操作(语言选、字幕开关、开始翻译/下载) */}
                     <TranslationControls
                       state={translationState}
                       controls={translationControls}
                     />
+
                     <Button 
                       size="icon" 
                       variant="ghost" 
@@ -204,9 +207,10 @@ export default function VideoPlayer({ className }: VideoPlayerProps) {
                 </div>
               </div>
             </div>
+            {/* 底部控制栏结束 */}
           </div>
         </div>
       </div>
     </div>
   )
-} 
+}

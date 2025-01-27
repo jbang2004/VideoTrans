@@ -1,3 +1,6 @@
+# ---------------------------------
+# backend/utils/task_state.py (完整可复制版本)
+# ---------------------------------
 from dataclasses import dataclass, field
 from typing import Any, Dict
 import asyncio
@@ -26,12 +29,17 @@ class TaskState:
     # 每个分段对应的媒体文件信息
     segment_media_files: Dict[int, Dict[str, Any]] = field(default_factory=dict)
 
-    # 各个异步队列 (翻译->模型输入->tts_token->时长对齐->音频生成->混音)
+    # 各个异步队列
     translation_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     modelin_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     tts_token_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     duration_align_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     audio_gen_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     mixing_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    # 新增：记录 _mixing_worker 产出的每个 segment_xxx.mp4
+
+    # 记录 mixing_worker 产出的每个 segment_xxx.mp4
     merged_segments: list = field(default_factory=list)
+
+    # =========== (新增) ===========
+    # 用户是否选择烧制字幕
+    generate_subtitle: bool = False

@@ -1,3 +1,6 @@
+# ---------------------------------
+# backend/video_translator.py (节选完整示例)
+# ---------------------------------
 import logging
 import os
 from typing import List, Dict, Any
@@ -20,13 +23,13 @@ from utils.task_storage import TaskPaths
 from config import Config
 from utils.task_state import TaskState
 
-from utils.ffmpeg_utils import FFmpegTool  # 用于合并
+from utils.ffmpeg_utils import FFmpegTool
 
 logger = logging.getLogger(__name__)
 
 class ViTranslator:
     """
-    全局持有大模型(ASR/TTS/翻译)对象, 每次 trans_video 时创建新的 TaskState + PipelineScheduler
+    全局持有大模型(ASR/TTS/翻译)对象, ...
     """
     def __init__(self, config: Config = None):
         self.logger = logger
@@ -35,10 +38,8 @@ class ViTranslator:
 
     def _init_global_models(self):
         self.logger.info("[ViTranslator] 初始化模型和工具...")
-
         # 音频分离器
         self.audio_separator = ClearVoiceSeparator(model_name='MossFormer2_SE_48K')
-
         # ASR + VAD + Speaker
         self.sense_model = SenseAutoModel(
             config=self.config,
@@ -51,25 +52,23 @@ class ViTranslator:
             disable_update=True,
             device="cuda"
         )
-
         # TTS 模型
         self.cosyvoice_model = CosyVoice2("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
         self.target_sr = self.cosyvoice_model.sample_rate
 
-        # 媒体与管线相关工具
+        # 其他核心工具
         self.media_utils = MediaUtils(config=self.config, audio_separator=self.audio_separator, target_sr=self.target_sr)
         self.model_in = ModelIn(self.cosyvoice_model)
         self.tts_generator = TTSTokenGenerator(self.cosyvoice_model, Hz=25)
         self.audio_generator = AudioGenerator(self.cosyvoice_model, sample_rate=self.target_sr)
 
-        # 翻译模型
+        # 翻译
         translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
         if translation_model == "deepseek":
             self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
         else:
             raise ValueError(f"不支持的翻译模型：{translation_model}")
 
-        # 其他处理
         self.duration_aligner = DurationAligner(
             model_in=self.model_in,
             simplifier=self.translator,
@@ -80,7 +79,6 @@ class ViTranslator:
         self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr)
 
         self.ffmpeg_tool = FFmpegTool()
-
         self.logger.info("[ViTranslator] 初始化完成")
 
     async def trans_video(
@@ -89,13 +87,16 @@ class ViTranslator:
         task_id: str,
         task_paths: TaskPaths,
         hls_manager=None,
-        target_language="zh"
+        target_language="zh",
+        # =========== (新增) ===========
+        generate_subtitle: bool = False,
     ) -> Dict[str, Any]:
         """
         入口：对整段视频进行处理。包括分段、ASR、翻译、TTS、混音、生成 HLS 等。
+        generate_subtitle: 是否需要在最终生成的视频里烧制字幕
         """
         self.logger.info(
-            f"[trans_video] 开始处理视频: {video_path}, task_id={task_id}, target_language={target_language}"
+            f"[trans_video] 开始处理视频: {video_path}, task_id={task_id}, target_language={target_language}, generate_subtitle={generate_subtitle}"
         )
 
         # 初始化任务状态 + 管线
@@ -104,7 +105,9 @@ class ViTranslator:
             video_path=video_path,
             task_paths=task_paths,
             hls_manager=hls_manager,
-            target_language=target_language
+            target_language=target_language,
+            # =========== (新增) ===========
+            generate_subtitle=generate_subtitle
         )
 
         pipeline = PipelineScheduler(
@@ -179,7 +182,7 @@ class ViTranslator:
         )
         task_state.segment_media_files[segment_index] = media_files
 
-        # 2. 进行ASR
+        # 2. ASR
         sentences = await self.sense_model.generate_async(
             input=media_files['vocals'],
             cache={},
@@ -202,11 +205,10 @@ class ViTranslator:
 
         await pipeline.push_sentences_to_pipeline(task_state, sentences)
 
-    # ============== 新增：合并 + 删除 ==============
     async def _concat_segment_mp4s(self, task_state: TaskState) -> Path:
         """
         把 pipeline_scheduler _mixing_worker 产出的所有 segment_xxx.mp4
-        用 ffmpeg concat 合并成 final_{task_id}.mp4
+        用 ffmpeg concat 合并成 final_{task_state.task_id}.mp4
         如果成功再删除这些小片段。
         """
         if not task_state.merged_segments:
@@ -216,14 +218,12 @@ class ViTranslator:
         final_path = task_state.task_paths.output_dir / f"final_{task_state.task_id}.mp4"
         final_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 1) 写出 concat 列表
         list_txt = final_path.parent / f"concat_{task_state.task_id}.txt"
         with open(list_txt, 'w', encoding='utf-8') as f:
             for seg_mp4 in task_state.merged_segments:
                 abs_path = Path(seg_mp4).resolve()
                 f.write(f"file '{abs_path}'\n")
 
-        # 2) 调用 ffmpeg
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat",
@@ -237,7 +237,7 @@ class ViTranslator:
             await self.ffmpeg_tool.run_command(cmd)
             self.logger.info(f"合并完成: {final_path}")
 
-            # 3) 合并成功后，自动删除这些 segment
+            # 合并成功后，自动删除这些 segment
             for seg_mp4 in task_state.merged_segments:
                 try:
                     Path(seg_mp4).unlink(missing_ok=True)
@@ -250,6 +250,5 @@ class ViTranslator:
             self.logger.error(f"ffmpeg concat 失败: {e}")
             return None
         finally:
-            # 临时文件可按需删除
             if list_txt.exists():
                 list_txt.unlink()

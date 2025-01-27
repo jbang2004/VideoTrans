@@ -1,3 +1,6 @@
+# ------------------------------
+# backend/api.py  (完整可复制版本)
+# ------------------------------
 import sys
 from pathlib import Path
 import logging
@@ -54,8 +57,14 @@ async def index(request: Request):
 @app.post("/upload")
 async def upload_video(
     video: UploadFile = File(...),
-    target_language: str = Form("zh")
+    target_language: str = Form("zh"),
+    # =============== (新增) ================
+    generate_subtitle: bool = Form(False),  # 是否烧制字幕
 ):
+    """
+    上传视频接口：
+    - generate_subtitle: 用户是否选择生成并烧制字幕
+    """
     try:
         if not video:
             raise HTTPException(status_code=400, detail="没有文件上传")
@@ -77,17 +86,20 @@ async def upload_video(
                 await f.write(content)
         except Exception as e:
             logger.error(f"保存文件失败: {str(e)}")
-            # await task_paths.cleanup()
             raise HTTPException(status_code=500, detail="文件保存失败")
         
         hls_manager = HLSManager(config, task_id, task_paths)
         
+        # ===================
+        # 在这里传递 generate_subtitle 给 translator
+        # ===================
         task = asyncio.create_task(vi_translator.trans_video(
             video_path=str(video_path),
             task_id=task_id,
             task_paths=task_paths,
             hls_manager=hls_manager,
-            target_language=target_language
+            target_language=target_language,
+            generate_subtitle=generate_subtitle,
         ))
         
         task_results[task_id] = {
@@ -111,7 +123,6 @@ async def upload_video(
                         "message": result.get('message', '处理失败'),
                         "progress": 0
                     })
-                    # await task_paths.cleanup()
             except Exception as e:
                 logger.error(f"任务处理失败: {str(e)}")
                 task_results[task_id].update({
@@ -119,7 +130,6 @@ async def upload_video(
                     "message": str(e),
                     "progress": 0
                 })
-                # await task_paths.cleanup()
         
         task.add_done_callback(lambda t: asyncio.create_task(on_task_complete(t)))
         
@@ -191,12 +201,8 @@ async def serve_segments(task_id: str, filename: str):
         logger.error(f"服务视频片段失败: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# =========================================
-# 新增：为最终合并后的MP4提供下载接口
-# =========================================
 @app.get("/download/{task_id}")
 async def download_translated_video(task_id: str):
-    # 在本示例中，最终合并的文件为: tasks/<task_id>/output/final_<task_id>.mp4
     final_video_path = config.TASKS_DIR / task_id / "output" / f"final_{task_id}.mp4"
     if not final_video_path.exists():
         raise HTTPException(status_code=404, detail="最终视频文件尚未生成或已被删除")

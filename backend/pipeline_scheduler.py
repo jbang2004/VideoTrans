@@ -1,3 +1,6 @@
+# -----------------------------------------
+# backend/pipeline_scheduler.py (节选完整示例)
+# -----------------------------------------
 import asyncio
 import logging
 from typing import List
@@ -9,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class PipelineScheduler:
     """
-    多个Worker的调度器，负责翻译->model_in->tts_token->时长对齐->音频生成->混音 等流水线。
+    多个Worker的调度器，负责翻译->model_in->tts_token->时长对齐->音频生成->混音 ...
     """
 
     def __init__(
@@ -54,14 +57,11 @@ class PipelineScheduler:
         self.logger.info(f"[PipelineScheduler] 所有Worker已结束 -> TaskID={task_state.task_id}")
 
     async def push_sentences_to_pipeline(self, task_state: TaskState, sentences: List[Sentence]):
-        """
-        把新产生的一批句子放进翻译队列
-        """
         self.logger.debug(f"[push_sentences_to_pipeline] 放入 {len(sentences)} 个句子到 translation_queue, TaskID={task_state.task_id}")
         await task_state.translation_queue.put(sentences)
 
     # ------------------------------
-    # 以下是各个 Worker 的实现
+    # 各 Worker 的实现
     # ------------------------------
 
     @worker_decorator(
@@ -80,7 +80,6 @@ class PipelineScheduler:
             batch_size=self.config.TRANSLATION_BATCH_SIZE,
             target_language=task_state.target_language
         ):
-            self.logger.debug(f"[翻译Worker] 翻译完成一批 -> size={len(translated_batch)}, TaskID={task_state.task_id}")
             yield translated_batch
 
     @worker_decorator(
@@ -100,7 +99,6 @@ class PipelineScheduler:
             reuse_uuid=False,
             batch_size=self.config.MODELIN_BATCH_SIZE
         ):
-            self.logger.debug(f"[模型输入Worker] 处理完成一批 -> size={len(updated_batch)}, TaskID={task_state.task_id}")
             yield updated_batch
 
     @worker_decorator(
@@ -114,7 +112,6 @@ class PipelineScheduler:
         self.logger.debug(f"[TTS Token生成Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
 
         await self.tts_token_generator.tts_token_maker(sentences_batch, reuse_uuid=False)
-        self.logger.debug(f"[TTS Token生成Worker] 已为本批次生成token -> size={len(sentences_batch)}, TaskID={task_state.task_id}")
         return sentences_batch
 
     @worker_decorator(
@@ -128,7 +125,6 @@ class PipelineScheduler:
         self.logger.debug(f"[时长对齐Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
 
         await self.duration_aligner.align_durations(sentences_batch)
-        self.logger.debug(f"[时长对齐Worker] 对齐完成 -> size={len(sentences_batch)}, TaskID={task_state.task_id}")
         return sentences_batch
 
     @worker_decorator(
@@ -143,10 +139,9 @@ class PipelineScheduler:
 
         await self.audio_generator.vocal_audio_maker(sentences_batch)
         task_state.current_time = self.timestamp_adjuster.update_timestamps(sentences_batch, start_time=task_state.current_time)
-        if not self.timestamp_adjuster.validate_timestamps(sentences_batch):
+        valid = self.timestamp_adjuster.validate_timestamps(sentences_batch)
+        if not valid:
             self.logger.warning(f"[音频生成Worker] 检测到时间戳不连续, TaskID={task_state.task_id}")
-
-        self.logger.debug(f"[音频生成Worker] 音频生成完成 -> size={len(sentences_batch)}, TaskID={task_state.task_id}")
         return sentences_batch
 
     @worker_decorator(
@@ -159,25 +154,22 @@ class PipelineScheduler:
         seg_index = sentences_batch[0].segment_index
         self.logger.debug(f"[混音Worker] 收到 {len(sentences_batch)} 句, segment={seg_index}, TaskID={task_state.task_id}")
 
-        # output_path: e.g. "storage/tasks/<task_id>/segments/segment_0.mp4"
         output_path = task_state.task_paths.segments_dir / f"segment_{task_state.batch_counter}.mp4"
 
-        # 调用 mixer 生成带音轨的 MP4
+        # ========== (修改) ============
+        # 将task_state.generate_subtitle 传给MediaMixer
         success = await self.mixer.mixed_media_maker(
             sentences=sentences_batch,
             task_state=task_state,
-            output_path=str(output_path)
+            output_path=str(output_path),
+            generate_subtitle=task_state.generate_subtitle
         )
 
-        # 如果生成成功，则用于 HLS + 后续合并
         if success and task_state.hls_manager:
             await task_state.hls_manager.add_segment(str(output_path), task_state.batch_counter)
             self.logger.info(f"[混音Worker] 分段 {task_state.batch_counter} 已加入 HLS, TaskID={task_state.task_id}")
 
-            # 关键：记录到 task_state.merged_segments
-            # 用于后面在翻译结束后 concat
             task_state.merged_segments.append(str(output_path))
 
         task_state.batch_counter += 1
-        self.logger.debug(f"[混音Worker] 本批次混音完成 -> batch_counter={task_state.batch_counter}, TaskID={task_state.task_id}")
         return None

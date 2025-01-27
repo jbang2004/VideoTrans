@@ -1,3 +1,6 @@
+// ===============================================
+// frontend/components/video-player/components/TranslationControls.tsx
+// ===============================================
 import React from "react"
 import { Button } from "../../ui/button"
 import { Popover, PopoverTrigger, PopoverContent } from "../../ui/popover"
@@ -18,16 +21,25 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
     isCompleted,
     selectedLanguage,
     selectedFile,
-    taskId
+    taskId,
+    // ============ (新增) ============
+    subtitleWanted,
   } = state
 
   const {
     startTranslation,
     stopTranslation,
-    setLanguage
+    setLanguage,
+    // ============ (新增) ============
+    toggleSubtitleWanted,
   } = controls
 
-  // 1) 根据当前状态确定按钮文字
+  // 语言选择 handle
+  const handleLanguageSelect = (language: string) => {
+    setLanguage(language)
+  }
+
+  // 主按钮
   let buttonText = "开始翻译"
   if (isCompleted) {
     buttonText = "下载"
@@ -35,25 +47,16 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
     buttonText = "翻译中"
   }
 
-  // 2) 主按钮点击逻辑
   const handleMainButtonClick = async () => {
-    // 若已完成翻译 => 点击则下载
     if (isCompleted && taskId) {
       window.open(`${API_BASE_URL}/download/${taskId}`, "_blank")
       return
     }
-    // 若正在翻译 => 点击则停止
     if (isTranslating) {
       stopTranslation()
       return
     }
-    // 否则 => 开始翻译
     await startTranslation()
-  }
-
-  // 3) 切换语言
-  const handleLanguageSelect = (language: string) => {
-    setLanguage(language)
   }
 
   return (
@@ -85,6 +88,17 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
         </PopoverContent>
       </Popover>
 
+      {/* ============== (新增) 字幕开关按钮 ============== */}
+      <Button
+        variant="ghost"
+        className="text-sm hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white"
+        // 一旦开始翻译 or 已完成，就不可再改
+        disabled={isTranslating || isCompleted || isProcessing}
+        onClick={() => toggleSubtitleWanted()}
+      >
+        {`字幕：${subtitleWanted ? '开' : '关'}`}
+      </Button>
+
       {/* 单个主按钮 => 开始翻译 / 翻译中 / 下载 */}
       <Button
         variant="ghost"
@@ -92,7 +106,7 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
           "text-sm hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white",
           (selectedFile || isTranslating || isCompleted) && "bg-white/10"
         )}
-        // 若正在处理且没到完成, 可以禁用以防误点; 根据需要可灵活调整
+        // 若正在处理且没到完成, 也可禁用
         disabled={isProcessing && !isCompleted}
         onClick={handleMainButtonClick}
       >

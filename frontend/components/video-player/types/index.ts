@@ -1,3 +1,6 @@
+// ==================================
+// frontend/components/video-player/types/index.ts
+// ==================================
 export interface PlayerState {
   isPlaying: boolean
   currentTime: number
@@ -14,21 +17,27 @@ export interface PlayerControls {
   setLocalVideoUrl: (url: string | null) => void
 }
 
+// ====================== (新增字段) ======================
 export interface TranslationState {
   isTranslating: boolean
   isProcessing: boolean
   selectedLanguage: string
   taskId: string | null
   selectedFile: File | null
-
-  // 新增: 是否已完成翻译
   isCompleted: boolean
+
+  // 是否“想要烧制字幕”
+  subtitleWanted: boolean
 }
 
+// ====================== (新增方法) ======================
 export interface TranslationControls {
   startTranslation: () => Promise<void>
   stopTranslation: () => void
   setLanguage: (language: string) => void
+
+  // 切换“字幕Wanted”的布尔值
+  toggleSubtitleWanted: () => void
 }
 
 export interface HLSInstance {

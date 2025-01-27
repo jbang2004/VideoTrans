@@ -1,3 +1,6 @@
+// ==================================
+// frontend/components/video-player/hooks/useTranslation.ts
+// ==================================
 import { useState, useRef } from 'react'
 import { toast } from 'sonner'
 import { API_BASE_URL, LANGUAGE_MAP } from '../utils/format'
@@ -6,6 +9,7 @@ import type { TranslationState, TranslationControls } from '../types'
 type TimeoutHandle = ReturnType<typeof setTimeout>
 
 export function useTranslation(onTaskIdChange: (taskId: string | null) => void) {
+  // ===================== (在这里初始化 subtitleWanted) =====================
   const [state, setState] = useState<TranslationState>({
     isTranslating: false,
     isProcessing: false,
@@ -13,6 +17,7 @@ export function useTranslation(onTaskIdChange: (taskId: string | null) => void) 
     taskId: null,
     selectedFile: null,
     isCompleted: false,
+    subtitleWanted: false, // 新增
   })
 
   const pollIntervalRef = useRef<TimeoutHandle>()
@@ -22,6 +27,11 @@ export function useTranslation(onTaskIdChange: (taskId: string | null) => void) 
       clearInterval(pollIntervalRef.current)
       pollIntervalRef.current = undefined
     }
+  }
+
+  // ================ (新增) 切换字幕Wanted状态 ==================
+  const toggleSubtitleWanted = () => {
+    setState(prev => ({ ...prev, subtitleWanted: !prev.subtitleWanted }))
   }
 
   const controls: TranslationControls = {
@@ -36,6 +46,8 @@ export function useTranslation(onTaskIdChange: (taskId: string | null) => void) 
       const formData = new FormData()
       formData.append('video', state.selectedFile)
       formData.append('target_language', LANGUAGE_MAP[state.selectedLanguage] || 'zh')
+      // =============== (关键) 传递 generate_subtitle = subtitleWanted ================
+      formData.append('generate_subtitle', state.subtitleWanted ? 'true' : 'false')
 
       try {
         const response = await fetch(`${API_BASE_URL}/upload`, {
@@ -69,7 +81,7 @@ export function useTranslation(onTaskIdChange: (taskId: string | null) => void) 
               setState(prev => ({
                 ...prev,
                 isProcessing: false,
-                isCompleted: true,        // <-- 在这里标记完成
+                isCompleted: true,
               }))
               stopPolling()
             } else if (statusData.status === 'error') {
@@ -108,7 +120,10 @@ export function useTranslation(onTaskIdChange: (taskId: string | null) => void) 
 
     setLanguage: (language: string) => {
       setState(prev => ({ ...prev, selectedLanguage: language }))
-    }
+    },
+
+    // ============== (新增) ==================
+    toggleSubtitleWanted,
   }
 
   return {
