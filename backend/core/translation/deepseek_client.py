@@ -49,6 +49,7 @@ class DeepSeekClient:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
+                temperature=1.3
             )
             result = response.choices[0].message.content
             logger.debug(f"DeepSeek 请求结果: {result}")
