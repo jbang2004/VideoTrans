@@ -1,5 +1,6 @@
 # --------------------------------------
-# utils/ffmpeg_utils.py (改进版, 完整可复制)
+# utils/ffmpeg_utils.py
+# 彻底移除 force_style, 仅使用 .ass 内部样式
 # --------------------------------------
 import asyncio
 import logging
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 class FFmpegTool:
     """
     统一封装 FFmpeg 常见用法的工具类。
-    异步方式调用 FFmpeg，并在出错时抛出异常。
+    通过异步方式执行 ffmpeg 命令，并在出错时抛出异常。
     """
 
     async def run_command(self, cmd: List[str]) -> Tuple[bytes, bytes]:
@@ -42,8 +43,8 @@ class FFmpegTool:
         duration: Optional[float] = None
     ) -> None:
         """
-        使用 ffmpeg 提取音频，可选指定起始时间与持续时长。
-        输出为 PCM float32 单声道格式。
+        提取音频，可选指定起始时间与持续时长。
+        输出为单声道 PCM float32 (48k/16k 视需求).
         """
         cmd = ["ffmpeg", "-y", "-i", input_path]
         if start > 0:
@@ -67,7 +68,7 @@ class FFmpegTool:
         duration: Optional[float] = None
     ) -> None:
         """
-        使用 ffmpeg 提取纯视频（去掉音轨），可选指定起始时间与持续时长。
+        提取纯视频（去掉音轨），可选指定起始时间与持续时长。
         """
         cmd = ["ffmpeg", "-y", "-i", input_path]
         if start > 0:
@@ -93,9 +94,9 @@ class FFmpegTool:
         hls_time: int = 10
     ) -> None:
         """
-        使用 ffmpeg 将输入文件切割为 HLS 片段。
-        segment_pattern 类似 "out%03d.ts"
-        playlist_path 类似 "playlist.m3u8"
+        将输入视频切割为 HLS 片段。
+        segment_pattern 形如 "out%03d.ts"
+        playlist_path   形如 "playlist.m3u8"
         """
         cmd = [
             "ffmpeg", "-y",
@@ -118,8 +119,7 @@ class FFmpegTool:
         end: float
     ) -> None:
         """
-        从输入文件截取一段 [start, end] 的视频片段（无音轨）。
-        end 是绝对时间(秒)，持续时长 = end - start。
+        截取 [start, end] 的无声视频段，end为绝对秒数。
         """
         duration = end - start
         if duration <= 0:
@@ -132,7 +132,7 @@ class FFmpegTool:
             "-t", str(duration),
             "-c:v", "libx264",
             "-preset", "superfast",
-            "-an",              # 去除音轨
+            "-an",  # 去除音轨
             "-vsync", "vfr",
             output_path
         ]
@@ -145,7 +145,7 @@ class FFmpegTool:
         output_path: str
     ) -> None:
         """
-        将"无声视频"与"音频"合并为一个新视频文件 (视频 copy，音频编码成 AAC)。
+        将无声视频与音频合并 (视频copy，音频AAC)。
         """
         cmd = [
             "ffmpeg", "-y",
@@ -162,48 +162,29 @@ class FFmpegTool:
         input_video_path: str,
         input_audio_path: str,
         subtitles_path: str,
-        output_path: str,
-        font_size: int = 24,
-        font_color: str = "white",
-        font_outline: int = 2,
-        position: str = "center"  # 可以是 "bottom" / "center" / "top"
+        output_path: str
     ) -> None:
         """
-        将"无声视频" + "音频" + "字幕"合成为含音轨并烧制好字幕的视频。
-
-        1. 主方式: 使用 ffmpeg 的 subtitles filter (例如: subtitles=xxx.ass)
-           并结合 force_style 指定字体大小、颜色、描边等。
-        2. 若失败，则尝试备用方案(-vf subtitles=...)。
-        3. 若仍失败，则仅合并视频和音频，跳过字幕。
+        将无声视频 + 音频 + .ass字幕 合并输出到 output_path。
+        (无 force_style, 由 .ass 内样式全权决定)
+        
+        若字幕渲染失败，则回退到仅合并音视频。
         """
-        # 确保这些文件都存在
+        # 检查输入文件是否存在
         for file_path in [input_video_path, input_audio_path, subtitles_path]:
             if not Path(file_path).exists():
                 raise FileNotFoundError(f"文件不存在: {file_path}")
 
-        # 准备 force_style，给 SRT/ASS 字幕设置基础样式
-        style_str = f"FontSize={font_size},PrimaryColour={font_color},Outline={font_outline}"
-        # 根据 position 控制margin
-        if position == "bottom":
-            margin_v = 20
-        elif position == "top":
-            margin_v = 10
-        else:
-            margin_v = 0
-
-        style_str = f"MarginV={margin_v}," + style_str
-
-        # 构建 filter
-        escaped_sub_path = subtitles_path.replace(':', r'\\:')
-        subtitles_filter = f"subtitles='{escaped_sub_path}':force_style='{style_str}'"
+        # 构建“subtitles”过滤器, 不带 force_style
+        escaped_path = subtitles_path.replace(':', r'\\:')
 
         try:
-            # 方式 1: 字幕过滤器
+            # 方式1: subtitles 滤镜
             cmd = [
                 "ffmpeg", "-y",
                 "-i", input_video_path,
                 "-i", input_audio_path,
-                "-filter_complex", f"[0:v]{subtitles_filter}[v]",
+                "-filter_complex", f"[0:v]subtitles='{escaped_path}'[v]",
                 "-map", "[v]",
                 "-map", "1:a",
                 "-c:v", "libx264",
@@ -214,34 +195,18 @@ class FFmpegTool:
             await self.run_command(cmd)
 
         except RuntimeError as e:
-            logger.warning(f"[FFmpegTool] 主字幕渲染方案失败: {str(e)}")
-            # 方式 2: 备用 -vf subtitles=
-            try:
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", input_video_path,
-                    "-i", input_audio_path,
-                    "-vf", f"subtitles='{subtitles_path}'",
-                    "-c:v", "libx264",
-                    "-preset", "superfast",
-                    "-c:a", "aac",
-                    output_path
-                ]
-                await self.run_command(cmd)
-
-            except RuntimeError as e2:
-                logger.error(f"[FFmpegTool] 字幕渲染完全失败: {str(e2)}")
-                # 方式 3: 最终回退 - 仅合并音视频
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-i", input_video_path,
-                    "-i", input_audio_path,
-                    "-c:v", "copy",
-                    "-c:a", "aac",
-                    output_path
-                ]
-                await self.run_command(cmd)
-                logger.warning("[FFmpegTool] 已跳过字幕, 仅合并音视频")
+            logger.warning(f"[FFmpegTool] subtitles滤镜方案失败: {str(e)}")
+            # 方式2: 最终回退 - 仅合并音视频
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", input_video_path,
+                "-i", input_audio_path,
+                "-c:v", "copy",
+                "-c:a", "aac",
+                output_path
+            ]
+            await self.run_command(cmd)
+            logger.warning("[FFmpegTool] 已跳过字幕，仅合并音视频")
 
     async def get_duration(self, input_path: str) -> float:
         """
