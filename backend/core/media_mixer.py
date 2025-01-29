@@ -9,6 +9,7 @@ import asyncio
 from contextlib import ExitStack
 from tempfile import NamedTemporaryFile
 from typing import List
+import shutil
 
 import pysubs2  # 用于简化字幕处理
 
@@ -262,10 +263,15 @@ class MediaMixer:
                 await asyncio.to_thread(
                     self._generate_subtitles_for_segment,
                     sentences,
-                    start_time * 1000.0,   # segment_start_ms
+                    start_time * 1000,   # segment_start_ms
                     temp_ass.name,
                     task_state.target_language  # 新增：把目标语言传进去
                 )
+
+                # 保存字幕文件的副本到本地
+                subtitle_output_path = output_path.rsplit('.', 1)[0] + '.ass'
+                shutil.copy2(temp_ass.name, subtitle_output_path)
+                logger.info(f"字幕文件已保存到: {subtitle_output_path}")
 
                 # 生成带字幕的视频
                 await self.ffmpeg_tool.cut_video_with_subtitles_and_audio(
@@ -308,16 +314,14 @@ class MediaMixer:
 
         for s in sentences:
             # 计算相对时间
-            start_local = s.adjusted_start - segment_start_ms
-            end_local   = (s.adjusted_start + s.adjusted_duration) - segment_start_ms
-            if end_local <= 0:
+            start_local = s.adjusted_start - segment_start_ms - s.segment_start * 1000
+
+            sub_text = (s.trans_text or s.raw_text or "").strip()
+            if not sub_text:
                 continue
 
-            raw_text = (s.trans_text or s.raw_text or "").strip()
-            if not raw_text:
-                continue
-
-            duration_ms = end_local - start_local
+            # 直接使用adjusted_duration作为duration_ms
+            duration_ms = s.duration / s.speed
             if duration_ms <= 0:
                 continue
 
@@ -326,7 +330,7 @@ class MediaMixer:
 
             # 拆分长句子 -> 多段 sequential
             blocks = self._split_long_text_to_sub_blocks(
-                text=raw_text,
+                text=sub_text,
                 start_ms=start_local,
                 duration_ms=duration_ms,
                 lang=lang
