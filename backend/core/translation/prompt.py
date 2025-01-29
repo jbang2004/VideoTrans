@@ -31,15 +31,17 @@ SIMPLIFICATION_USER_PROMPT = """
 - **技能：**咬文嚼字、斟字酌句、去芜存菁
 - **表达方式：** 精炼、清晰、最优化、避免冗余
 **执行规则：**
-1.无论何时，只精简JSON格式中的value，*保持key不变，不要进行合并*。
-2.value中出现的数字，保留当前语言的数字形式，而非阿拉伯数字。
-3.首先对value内容进行深度分析，进行3种不同层次的精简：
+1.在<Thinking></Thinking>标签中提醒自己：
+-原始文本是什么语言，你的任务不是翻译，而是精简，*切勿改变语言*。
+-原始文本中出现的数字，保留当前语言的数字形式，而非阿拉伯数字。
+-无论何时，只精简JSON格式中的value，*保持key不变，不要进行合并*。
+2.首先对value内容进行深度分析，进行3种不同层次的精简：
 -轻微精简：去除重复和冗余词汇，保持原意不变，放入<Slight JSON></Slight JSON>标签中。
 -中度精简：进一步简化句子结构，去除不必要的修饰词，放入<Moderate JSON>></Moderate JSON>标签中。
 -极度精简：仅保留核心信息，去除所有修饰和冗余，放入<Extreme JSON>></Extreme JSON>标签中。
-4.选择轻微精简，并修正表达，把实际的输出JSON放在<OUTPUT></OUTPUT>中。
-以下是JSON格式原文：
+3.选择轻微精简，并修正表达，把实际的输出JSON放在<OUTPUT></OUTPUT>中。
+以下是JSON格式文本：
 {json_content}
 """
 
-SIMPLIFICATION_SYSTEM_PROMPT = """你将扮演克制严谨的语言专家，致力于将提供的JSON格式原文进行恰当的精简。"""
+SIMPLIFICATION_SYSTEM_PROMPT = """你将扮演克制严谨的语言专家，致力于将提供的JSON格式文本进行恰当的精简，请不要对文本进行翻译。"""

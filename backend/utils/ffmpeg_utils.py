@@ -184,11 +184,13 @@ class FFmpegTool:
                 "ffmpeg", "-y",
                 "-i", input_video_path,
                 "-i", input_audio_path,
-                "-filter_complex", f"[0:v]subtitles='{escaped_path}'[v]",
+                "-filter_complex",
+                f"[0:v]scale=1920:1080:flags=lanczos,subtitles='{escaped_path}'[v]",  # 添加 scale 滤镜，使用 lanczos 缩放算法
                 "-map", "[v]",
                 "-map", "1:a",
                 "-c:v", "libx264",
                 "-preset", "superfast",
+                "-crf", "23",  # 建议添加 CRF 参数控制视频质量
                 "-c:a", "aac",
                 output_path
             ]

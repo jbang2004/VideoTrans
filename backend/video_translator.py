@@ -10,6 +10,7 @@ from core.auto_sense import SenseAutoModel
 from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
 from core.translation.translator import Translator
 from core.translation.deepseek_client import DeepSeekClient
+from core.translation.gemini_client import GeminiClient
 from core.tts_token_gener import TTSTokenGenerator
 from core.audio_gener import AudioGenerator
 from core.timeadjust.duration_aligner import DurationAligner
@@ -66,6 +67,8 @@ class ViTranslator:
         translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
         if translation_model == "deepseek":
             self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
+        elif translation_model == "gemini":
+            self.translator = Translator(GeminiClient(api_key=self.config.GEMINI_API_KEY))
         else:
             raise ValueError(f"不支持的翻译模型：{translation_model}")
 
