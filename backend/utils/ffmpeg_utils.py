@@ -175,17 +175,21 @@ class FFmpegTool:
             if not Path(file_path).exists():
                 raise FileNotFoundError(f"文件不存在: {file_path}")
 
-        # 构建“subtitles”过滤器, 不带 force_style
+        # 构建"subtitles"过滤器, 不带 force_style
         escaped_path = subtitles_path.replace(':', r'\\:')
 
         try:
             # 方式1: subtitles 滤镜
+            # 当前设置是合理的，但需要注意：
             cmd = [
                 "ffmpeg", "-y",
                 "-i", input_video_path,
                 "-i", input_audio_path,
                 "-filter_complex",
-                f"[0:v]scale=1920:1080:flags=lanczos,subtitles='{escaped_path}'[v]",  # 添加 scale 滤镜，使用 lanczos 缩放算法
+                f"[0:v]scale=1920:-2:flags=lanczos,subtitles='{escaped_path}'[v]",  # 修改点说明：
+                # 1. scale=1920:-2 保持宽高比，-2 保证高度为偶数（兼容编码要求）
+                # 2. flags=lanczos 使用高质量的缩放算法
+                # 3. 滤镜顺序：先缩放视频，再加字幕（确保字幕在缩放后的画面上）
                 "-map", "[v]",
                 "-map", "1:a",
                 "-c:v", "libx264",

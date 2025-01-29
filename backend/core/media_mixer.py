@@ -387,10 +387,10 @@ class MediaMixer:
         """
         # 1) 确定每行最大字符数
         recommended_max_chars = {
-            "zh": 25,
-            "ja": 25,
-            "ko": 25,
-            "en": 45
+            "zh": 20,
+            "ja": 20,
+            "ko": 20,
+            "en": 40
         }
         if lang not in recommended_max_chars:
             lang = "en"
