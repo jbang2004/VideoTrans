@@ -22,7 +22,7 @@ class GeminiClient:
 
         # 配置 Gemini
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp') # gemini-1.5-flash
+        self.model = genai.GenerativeModel('gemini-1.5-flash') # gemini-1.5-flash、gemini-2.0-flash-exp
         logger.info("Gemini 客户端初始化成功")
 
     def _extract_output_content(self, text: str) -> str:

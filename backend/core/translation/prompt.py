@@ -1,9 +1,9 @@
 # 支持的语言映射
 LANGUAGE_MAP = {
-    "zh": "Chinese",
-    "en": "English",
-    "ja": "Japanese",
-    "ko": "Korean"
+    "zh": "中文",
+    "en": "英文",
+    "ja": "日文",
+    "ko": "韩文"
 }
 
 TRANSLATION_USER_PROMPT = """

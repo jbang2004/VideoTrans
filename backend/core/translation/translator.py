@@ -2,7 +2,6 @@ import asyncio
 import logging
 from typing import Dict, List, AsyncGenerator, Protocol, TypeVar, Generic, Optional
 from dataclasses import dataclass
-from json_repair import loads
 from .prompt import (
     TRANSLATION_SYSTEM_PROMPT,
     TRANSLATION_USER_PROMPT,
@@ -38,7 +37,7 @@ class Translator:
         self.logger = logging.getLogger(__name__)
 
     async def translate(self, texts: Dict[str, str], target_language: str = "zh") -> Dict[str, str]:
-        """执行翻译并处理结果"""
+        """执行翻译并处理结果（字典形式）"""
         try:
             system_prompt = TRANSLATION_SYSTEM_PROMPT.format(
                 target_language=LANGUAGE_MAP.get(target_language, target_language)
@@ -56,12 +55,27 @@ class Translator:
             self.logger.error(f"翻译失败: {str(e)}")
             raise
 
+    async def simplify(self, texts: Dict[str, str]) -> Dict[str, str]:
+        """执行文本简化（字典形式）"""
+        try:
+            system_prompt = SIMPLIFICATION_SYSTEM_PROMPT
+            user_prompt = SIMPLIFICATION_USER_PROMPT.format(json_content=texts)
+            return await self.translation_client.translate(
+                texts=texts,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt
+            )
+        except Exception as e:
+            self.logger.error(f"简化失败: {str(e)}")
+            raise
+
     async def _process_batch(
         self,
         items: List[T],
         process_func: callable,
         config: BatchConfig,
-        error_handler: Optional[callable] = None
+        error_handler: Optional[callable] = None,
+        reduce_batch_on_error: bool = True  # <-- 新增参数
     ) -> AsyncGenerator[List[T], None]:
         """通用批处理逻辑"""
         if not items:
@@ -84,7 +98,8 @@ class Translator:
                     yield results
                     i += len(batch)
 
-                    if batch_size < config.initial_size and success_count >= config.required_successes:
+                    # 如果连续成功且当前批次小于初始大小，尝试恢复
+                    if reduce_batch_on_error and batch_size < config.initial_size and success_count >= config.required_successes:
                         self.logger.debug(f"连续成功{success_count}次，恢复到初始批次大小: {config.initial_size}")
                         batch_size = config.initial_size
                         success_count = 0
@@ -94,49 +109,17 @@ class Translator:
 
             except Exception as e:
                 self.logger.error(f"批处理失败: {str(e)}")
-                if batch_size > config.min_size:
+                if reduce_batch_on_error and batch_size > config.min_size:
+                    # 只有在 reduce_batch_on_error=True 时才减小批次大小
                     batch_size = max(batch_size // 2, config.min_size)
                     success_count = 0
                     self.logger.debug(f"出错后减小批次大小到: {batch_size}")
                     continue
                 else:
+                    # 出错但我们不打算减小批次大小，或者已经到达最小批次
                     if error_handler:
                         yield error_handler(batch)
                     i += len(batch)
-
-    async def simplify(self, texts: Dict[str, str], batch_size: int = 4) -> Dict[str, str]:
-        """执行文本简化并处理结果"""
-        if not texts:
-            return {}
-
-        config = BatchConfig(initial_size=batch_size, min_size=1, required_successes=2)
-        result = {}
-        keys = list(texts.keys())
-
-        async def process_batch(batch_keys: List[str]) -> Optional[Dict[str, str]]:
-            batch_texts = {k: texts[k] for k in batch_keys}
-            self.logger.debug(f"简化批次: {len(batch_texts)}条文本")
-            
-            batch_result = await self.translation_client.translate(
-                texts=batch_texts,
-                system_prompt=SIMPLIFICATION_SYSTEM_PROMPT,
-                user_prompt=SIMPLIFICATION_USER_PROMPT.format(json_content=batch_texts)
-            )
-            
-            if len(batch_result) == len(batch_texts):
-                result.update(batch_result)
-                return batch_result
-            return None
-
-        def handle_error(batch_keys: List[str]) -> Dict[str, str]:
-            error_result = {k: texts[k] for k in batch_keys}
-            result.update(error_result)
-            return error_result
-
-        async for _ in self._process_batch(keys, process_batch, config, handle_error):
-            pass
-
-        return result
 
     async def translate_sentences(
         self,
@@ -144,7 +127,7 @@ class Translator:
         batch_size: int = 100,
         target_language: str = "zh"
     ) -> AsyncGenerator[List, None]:
-        """批量翻译处理"""
+        """批量翻译处理，需要在出错时减小批次大小 -> reduce_batch_on_error=True"""
         if not sentences:
             self.logger.warning("收到空的句子列表")
             return
@@ -158,19 +141,66 @@ class Translator:
             translated = await self.translate(texts, target_language)
             
             if len(translated) == len(texts):
-                results = []
                 for j, sentence in enumerate(batch):
                     sentence.trans_text = translated[str(j)]
-                    results.append(sentence)
-                return results
+                return batch
             return None
 
         def handle_error(batch: List) -> List:
-            results = []
             for sentence in batch:
                 sentence.trans_text = sentence.raw_text
-                results.append(sentence)
-            return results
+            return batch
 
-        async for batch_result in self._process_batch(sentences, process_batch, config, handle_error):
+        # 这里保持默认或显式写出 reduce_batch_on_error=True
+        async for batch_result in self._process_batch(
+            sentences,
+            process_batch,
+            config,
+            error_handler=handle_error,
+            reduce_batch_on_error=True
+        ):
+            yield batch_result
+
+    async def simplify_sentences(
+        self,
+        sentences: List,
+        batch_size: int = 4
+    ) -> AsyncGenerator[List, None]:
+        """
+        执行文本简化并处理结果，与 translate_sentences 类似，但我们
+        不需要在出错时自动缩小批次大小 -> reduce_batch_on_error=False
+        """
+        if not sentences:
+            self.logger.warning("收到空的句子列表")
+            return
+
+        config = BatchConfig(initial_size=batch_size, min_size=1, required_successes=2)
+
+        async def process_batch(batch: List) -> Optional[List]:
+            texts = {str(i): s.trans_text for i, s in enumerate(batch)}
+            self.logger.debug(f"简化批次: {len(texts)}条文本")
+
+            batch_result = await self.simplify(texts)
+
+            if len(batch_result) == len(texts):
+                for i, s in enumerate(batch):
+                    old_text = s.trans_text
+                    new_text = batch_result[str(i)]
+                    s.trans_text = new_text
+                    self.logger.info(f"精简: {old_text} -> {new_text}")
+                return batch
+            return None
+
+        def handle_error(batch: List) -> List:
+            # 出错时，原样返回，不做任何更改
+            return batch
+
+        # 这里显式指定 reduce_batch_on_error=False
+        async for batch_result in self._process_batch(
+            sentences,
+            process_batch,
+            config,
+            error_handler=handle_error,
+            reduce_batch_on_error=False
+        ):
             yield batch_result

@@ -1,4 +1,3 @@
-# ===================== duration_aligner.py =====================
 import logging
 
 class DurationAligner:
@@ -84,30 +83,27 @@ class DurationAligner:
             s.diff = s.duration - s.adjusted_duration
             current_time += s.adjusted_duration
 
-            self.logger.info(f"对齐后: {s.trans_text}, duration: {s.duration}, target_duration: {s.target_duration}, diff: {s.diff}, speed: {s.speed}, silence_duration: {s.silence_duration}")
+            self.logger.info(
+                f"对齐后: {s.trans_text}, duration: {s.duration}, "
+                f"target_duration: {s.target_duration}, diff: {s.diff}, "
+                f"speed: {s.speed}, silence_duration: {s.silence_duration}"
+            )
 
     async def _retry_sentences_batch(self, sentences):
         """精简文本 + 再次生成 TTS token"""
         try:
-            # 1. 精简文本
-            texts_to_simplify = {str(i): s.trans_text for i, s in enumerate(sentences)}
-            simplified_texts = await self.simplifier.simplify(texts_to_simplify)
+            # 1. 精简文本（分批简化，直接传入句子列表）
+            async for _ in self.simplifier.simplify_sentences(sentences):
+                pass
 
-            # 2. 更新句子的文本
-            for i, s in enumerate(sentences):
-                new_text = simplified_texts.get(str(i))
-                if new_text:
-                    self.logger.info(f"精简: {s.trans_text} -> {new_text}")
-                    s.trans_text = new_text
-
-            # 3. 批量更新文本特征(复用 speaker+uuid)
+            # 2. 批量更新文本特征(复用 speaker + uuid)
             async for batch in self.model_in.modelin_maker(
                 sentences,
                 reuse_speaker=True,
                 reuse_uuid=True,
                 batch_size=3
             ):
-                # 4. 再生成 token (复用 uuid)
+                # 3. 再生成 token (复用 uuid)
                 updated_batch = await self.tts_token_gener.tts_token_maker(
                     batch, reuse_uuid=True
                 )
