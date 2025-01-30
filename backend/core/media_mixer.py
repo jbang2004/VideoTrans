@@ -9,7 +9,6 @@ import asyncio
 from contextlib import ExitStack
 from tempfile import NamedTemporaryFile
 from typing import List
-import shutil
 
 import pysubs2  # 用于简化字幕处理
 
@@ -267,11 +266,6 @@ class MediaMixer:
                     temp_ass.name,
                     task_state.target_language  # 新增：把目标语言传进去
                 )
-
-                # 保存字幕文件的副本到本地
-                subtitle_output_path = output_path.rsplit('.', 1)[0] + '.ass'
-                shutil.copy2(temp_ass.name, subtitle_output_path)
-                logger.info(f"字幕文件已保存到: {subtitle_output_path}")
 
                 # 生成带字幕的视频
                 await self.ffmpeg_tool.cut_video_with_subtitles_and_audio(

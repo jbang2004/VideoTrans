@@ -33,11 +33,14 @@ class DurationAligner:
         if not sentences:
             return
 
-        # 1) 计算每句与其 target_duration 的差值 diff
+        # 1) 预计算所需的各种总和
         for s in sentences:
             s.diff = s.duration - s.target_duration
-
+            
         total_diff_to_adjust = sum(s.diff for s in sentences)
+        positive_diff_sum = sum(x.diff for x in sentences if x.diff > 0)
+        negative_diff_sum_abs = sum(abs(x.diff) for x in sentences if x.diff < 0)
+        
         current_time = sentences[0].start
 
         # 2) 按照 total_diff_to_adjust 做统一对齐
@@ -45,68 +48,40 @@ class DurationAligner:
             s.adjusted_start = current_time
             diff = s.diff
 
-            # --- 统一先重置 speed 和 silence_duration ---
-            # 这样无论后面的分支怎么走，都不会遗留旧的值
+            # 重置速度和静音时长
             s.speed = 1.0
             s.silence_duration = 0.0
+            s.adjusted_duration = s.duration
 
-            if total_diff_to_adjust == 0:
-                # 批次总时长与目标一致，直接保持原时长
-                s.adjusted_duration = s.duration
-                s.diff = 0
-                # 这里 speed/silence 已被上面重置为 1.0 / 0
+            if total_diff_to_adjust != 0:
+                if total_diff_to_adjust > 0 and diff > 0:
+                    # 压缩模式
+                    if positive_diff_sum > 0:
+                        proportion = diff / positive_diff_sum
+                        adjustment = total_diff_to_adjust * proportion
+                        s.adjusted_duration = s.duration - adjustment
+                        s.speed = s.duration / max(s.adjusted_duration, 0.001)
+                        
+                elif total_diff_to_adjust < 0 and diff < 0:
+                    # 扩展模式
+                    if negative_diff_sum_abs > 0:
+                        proportion = abs(diff) / negative_diff_sum_abs
+                        total_needed = abs(total_diff_to_adjust) * proportion
+                        
+                        # 限制放慢幅度
+                        max_slowdown = s.duration * 0.07
+                        slowdown = min(total_needed, max_slowdown)
+                        
+                        s.adjusted_duration = s.duration + slowdown
+                        s.speed = s.duration / max(s.adjusted_duration, 0.001)
+                        
+                        # 剩余时间添加为静音
+                        s.silence_duration = total_needed - slowdown
+                        if s.silence_duration > 0:
+                            s.adjusted_duration += s.silence_duration
 
-            elif total_diff_to_adjust > 0:
-                # 批次整体"过长"，需要压缩
-                positive_diff_sum = sum(x.diff for x in sentences if x.diff > 0)
-                if positive_diff_sum > 0 and diff > 0:
-                    # 等比例压缩
-                    proportion = diff / positive_diff_sum
-                    adjustment = total_diff_to_adjust * proportion
-                    s.adjusted_duration = s.duration - adjustment
-                    s.diff = s.duration - s.adjusted_duration
-
-                    # speed = 压缩前长度 / 压缩后长度
-                    if s.adjusted_duration > 0:
-                        s.speed = s.duration / s.adjusted_duration
-                    else:
-                        s.speed = 1.0
-                else:
-                    # 句子本身 diff <= 0，无需再压，就保留原值
-                    s.adjusted_duration = s.duration
-                    s.diff = 0
-                    # speed = 1.0, silence_duration = 0.0 (已重置)
-
-            else:
-                # total_diff_to_adjust < 0 => 整体"过短"，需要扩展
-                negative_diff_sum_abs = sum(abs(x.diff) for x in sentences if x.diff < 0)
-                if negative_diff_sum_abs > 0 and diff < 0:
-                    # 等比例扩展
-                    proportion = abs(diff) / negative_diff_sum_abs
-                    total_needed = abs(total_diff_to_adjust) * proportion
-
-                    # 限制放慢，避免速度过低
-                    max_slowdown = s.duration * 0.1
-                    slowdown = min(total_needed, max_slowdown)
-
-                    s.adjusted_duration = s.duration + slowdown
-                    if s.adjusted_duration > 0:
-                        s.speed = s.duration / s.adjusted_duration
-                    else:
-                        s.speed = 1.0
-
-                    s.silence_duration = total_needed - slowdown
-                    if s.silence_duration > 0:
-                        s.adjusted_duration += s.silence_duration
-                else:
-                    # 句子本身 diff >= 0，无需扩展
-                    s.adjusted_duration = s.duration
-                    s.speed = 1.0
-                    s.silence_duration = 0.0
-
-                # "扩展"分支要及时更新 diff
-                s.diff = s.duration - s.adjusted_duration
-
+            # 更新差值和当前时间
+            s.diff = s.duration - s.adjusted_duration
             current_time += s.adjusted_duration
 
             self.logger.info(f"对齐后: {s.trans_text}, duration: {s.duration}, target_duration: {s.target_duration}, diff: {s.diff}, speed: {s.speed}, silence_duration: {s.silence_duration}")
