@@ -1,7 +1,6 @@
 # =========================== deepseek_client.py ===========================
 import json
 import logging
-import re
 from openai import OpenAI
 from typing import Dict
 from json_repair import loads
@@ -23,23 +22,13 @@ class DeepSeekClient:
         )
         logger.info("DeepSeek 客户端初始化成功")
 
-    def _extract_output_content(self, text: str) -> str:
-        """从响应中提取 <OUTPUT> 标签中的内容"""
-        pattern = r"<OUTPUT>(.*?)</OUTPUT>"
-        match = re.search(pattern, text, re.DOTALL)
-        if match:
-            return match.group(1).strip()
-        logger.warning("未找到 <OUTPUT> 标签，返回原始内容")
-        return text
-
     async def translate(
         self,
-        texts: Dict[str, str],
         system_prompt: str,
         user_prompt: str
     ) -> Dict[str, str]:
         """
-        将 sync 调用 self.client.chat.completions.create(...) 放到统一的线程池执行。
+        直接调用 DeepSeek API，要求返回 JSON 格式的内容。
         """
         try:
             response = await concurrency.run_sync(
@@ -52,14 +41,11 @@ class DeepSeekClient:
                 temperature=1.3
             )
             result = response.choices[0].message.content
-            logger.debug(f"DeepSeek 请求结果: {result}")
-            
-            # 提取 <OUTPUT> 标签中的内容
-            output_content = self._extract_output_content(result)
-            logger.debug(f"提取的 OUTPUT 内容: {output_content}")
-            
-            parsed_result = loads(output_content)
-            logger.debug("DeepSeek 请求成功")
+            logger.info(f"DeepSeek 原文请求内容:\n{user_prompt}")
+            logger.info(f"DeepSeek 原始返回内容:\n{result}")
+            # 直接解析返回的 JSON 格式文本
+            parsed_result = loads(result)
+            logger.debug("DeepSeek 请求成功，JSON 解析完成")
             return parsed_result
             
         except Exception as e:

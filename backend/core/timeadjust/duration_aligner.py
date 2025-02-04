@@ -2,6 +2,12 @@ import logging
 
 class DurationAligner:
     def __init__(self, model_in=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
+        """
+        model_in：生成模型接口，用于更新文本特征  
+        simplifier：简化处理接口（Translator）  
+        tts_token_gener：TTS token 生成接口  
+        max_speed：语速阈值，超过该速率的句子需要进行简化
+        """
         self.model_in = model_in
         self.simplifier = simplifier
         self.tts_token_gener = tts_token_gener
@@ -9,14 +15,16 @@ class DurationAligner:
         self.logger = logging.getLogger(__name__)
 
     async def align_durations(self, sentences):
-        """对整批句子进行时长对齐，并检查是否需要精简（语速过快）"""
+        """
+        对整批句子进行时长对齐，并检查是否需要精简（语速过快）。
+        """
         if not sentences:
             return
 
         # 第一次对齐
         self._align_batch(sentences)
 
-        # 查找"语速过快"的句子（speed > max_speed）
+        # 查找语速过快的句子（speed > max_speed）
         retry_sentences = [s for s in sentences if s.speed > self.max_speed]
         if retry_sentences:
             self.logger.info(f"{len(retry_sentences)} 个句子语速过快, 正在精简...")
@@ -28,58 +36,47 @@ class DurationAligner:
                 self.logger.warning("精简过程失败, 保持原结果")
 
     def _align_batch(self, sentences):
-        """同批次句子做"压缩/扩展"对齐"""
+        """
+        同批次句子进行时长对齐。
+        """
         if not sentences:
             return
 
-        # 1) 预计算所需的各种总和
+        # 计算每句需要调整的时间差
         for s in sentences:
             s.diff = s.duration - s.target_duration
-            
+
         total_diff_to_adjust = sum(s.diff for s in sentences)
         positive_diff_sum = sum(x.diff for x in sentences if x.diff > 0)
         negative_diff_sum_abs = sum(abs(x.diff) for x in sentences if x.diff < 0)
-        
         current_time = sentences[0].start
 
-        # 2) 按照 total_diff_to_adjust 做统一对齐
         for s in sentences:
             s.adjusted_start = current_time
             diff = s.diff
-
-            # 重置速度和静音时长
             s.speed = 1.0
             s.silence_duration = 0.0
             s.adjusted_duration = s.duration
 
             if total_diff_to_adjust != 0:
                 if total_diff_to_adjust > 0 and diff > 0:
-                    # 压缩模式
                     if positive_diff_sum > 0:
                         proportion = diff / positive_diff_sum
                         adjustment = total_diff_to_adjust * proportion
                         s.adjusted_duration = s.duration - adjustment
                         s.speed = s.duration / max(s.adjusted_duration, 0.001)
-                        
                 elif total_diff_to_adjust < 0 and diff < 0:
-                    # 扩展模式
                     if negative_diff_sum_abs > 0:
                         proportion = abs(diff) / negative_diff_sum_abs
                         total_needed = abs(total_diff_to_adjust) * proportion
-                        
-                        # 限制放慢幅度
                         max_slowdown = s.duration * 0.07
                         slowdown = min(total_needed, max_slowdown)
-                        
                         s.adjusted_duration = s.duration + slowdown
                         s.speed = s.duration / max(s.adjusted_duration, 0.001)
-                        
-                        # 剩余时间添加为静音
                         s.silence_duration = total_needed - slowdown
                         if s.silence_duration > 0:
                             s.adjusted_duration += s.silence_duration
 
-            # 更新差值和当前时间
             s.diff = s.duration - s.adjusted_duration
             current_time += s.adjusted_duration
 
@@ -90,26 +87,23 @@ class DurationAligner:
             )
 
     async def _retry_sentences_batch(self, sentences):
-        """精简文本 + 再次生成 TTS token"""
+        """
+        对语速过快的句子执行精简 + 更新 TTS token。
+        """
         try:
-            # 1. 精简文本（分批简化，直接传入句子列表）
-            async for _ in self.simplifier.simplify_sentences(sentences):
+            # 1. 分批对语速过快的句子进行精简
+            async for _ in self.simplifier.simplify_sentences(sentences, target_speed=self.max_speed):
                 pass
-
-            # 2. 批量更新文本特征(复用 speaker + uuid)
+            # 2. 批量更新文本特征（复用 speaker 与 uuid）
             async for batch in self.model_in.modelin_maker(
                 sentences,
                 reuse_speaker=True,
                 reuse_uuid=True,
                 batch_size=3
             ):
-                # 3. 再生成 token (复用 uuid)
-                updated_batch = await self.tts_token_gener.tts_token_maker(
-                    batch, reuse_uuid=True
-                )
-
+                # 3. 再生成 token（复用 uuid）
+                updated_batch = await self.tts_token_gener.tts_token_maker(batch, reuse_uuid=True)
             return True
-
         except Exception as e:
             self.logger.error(f"_retry_sentences_batch 出错: {e}")
             return False
