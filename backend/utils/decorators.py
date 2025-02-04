@@ -1,28 +1,21 @@
 import logging
 import functools
-from typing import Callable, Any, Optional, Coroutine, AsyncGenerator, TypeVar, Union, Literal
+from typing import Callable, Any, Optional, AsyncGenerator, TypeVar, Union, Literal
 import asyncio
 import time
 
 logger = logging.getLogger(__name__)
-
 T = TypeVar('T')
 WorkerResult = Union[T, AsyncGenerator[T, None]]
 WorkerMode = Literal['base', 'stream']
 
 def handle_errors(custom_logger: Optional[logging.Logger] = None) -> Callable:
-    """
-    错误处理装饰器。可应用于需要统一捕获日志的异步函数。
-    """
+    """错误处理装饰器。可应用于需要统一捕获日志的异步函数。"""
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(*args, **kwargs) -> Any:
-            actual_logger = custom_logger
-            if not actual_logger and args and hasattr(args[0], 'logger'):
-                actual_logger = args[0].logger
-            if not actual_logger:
-                actual_logger = logger
-
+            # 如果当前对象有 logger 属性则使用，否则用传入的或全局 logger
+            actual_logger = custom_logger if custom_logger else (getattr(args[0], 'logger', logger) if args else logger)
             start_time = time.time()
             try:
                 result = await func(*args, **kwargs)
@@ -42,9 +35,7 @@ def worker_decorator(
     worker_name: Optional[str] = None,
     mode: WorkerMode = 'base'
 ) -> Callable:
-    """
-    通用 Worker 装饰器
-    """
+    """通用 Worker 装饰器"""
     def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapper(self, task_state, *args, **kwargs):
@@ -100,5 +91,6 @@ def worker_decorator(
                         break
             finally:
                 wlogger.info(f"[{worker_display_name}] 结束 (TaskID={task_state.task_id}). 共处理 {processed_count} 个item.")
+
         return wrapper
     return decorator

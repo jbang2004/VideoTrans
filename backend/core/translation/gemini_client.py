@@ -37,11 +37,22 @@ class GeminiClient:
             )
             logger.info(f"Gemini 原文请求内容:\n{user_prompt}")
             result_text = response.text
-            logger.info(f"Gemini 原始返回内容:\n{result_text}")
-            # 直接解析返回的 JSON 格式文本
-            parsed_result = loads(result_text)
-            logger.debug("Gemini 请求成功，JSON 解析完成")
-            return parsed_result
+            logger.info(f"Gemini 原始返回内容 (长度: {len(result_text)}):\n{result_text!r}")
+            
+            if not result_text or not result_text.strip():
+                logger.error("Gemini 返回了空响应")
+                raise ValueError("Empty response from Gemini")
+                
+            # 尝试修复和解析 JSON
+            try:
+                parsed_result = loads(result_text)
+                logger.debug("Gemini 请求成功，JSON 解析完成")
+                return parsed_result
+            except Exception as json_error:
+                logger.error(f"JSON 解析失败，原始内容: {result_text!r}")
+                logger.error(f"JSON 解析错误详情: {str(json_error)}")
+                raise
+            
         except Exception as e:
             logger.error(f"Gemini 请求失败: {str(e)}")
             raise

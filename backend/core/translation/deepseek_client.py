@@ -42,11 +42,21 @@ class DeepSeekClient:
             )
             result = response.choices[0].message.content
             logger.info(f"DeepSeek 原文请求内容:\n{user_prompt}")
-            logger.info(f"DeepSeek 原始返回内容:\n{result}")
-            # 直接解析返回的 JSON 格式文本
-            parsed_result = loads(result)
-            logger.debug("DeepSeek 请求成功，JSON 解析完成")
-            return parsed_result
+            logger.info(f"DeepSeek 原始返回内容 (长度: {len(result)}):\n{result!r}")
+            
+            if not result or not result.strip():
+                logger.error("DeepSeek 返回了空响应")
+                raise ValueError("Empty response from DeepSeek")
+                
+            # 尝试修复和解析 JSON
+            try:
+                parsed_result = loads(result)
+                logger.debug("DeepSeek 请求成功，JSON 解析完成")
+                return parsed_result
+            except Exception as json_error:
+                logger.error(f"JSON 解析失败，原始内容: {result!r}")
+                logger.error(f"JSON 解析错误详情: {str(json_error)}")
+                raise
             
         except Exception as e:
             logger.error(f"DeepSeek 请求失败: {str(e)}")
