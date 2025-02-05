@@ -154,6 +154,17 @@ class ViTranslator:
             final_video_path = await self._concat_segment_mp4s(task_state)
             if final_video_path is not None and final_video_path.exists():
                 self.logger.info(f"翻译后的完整视频已生成: {final_video_path}")
+                
+                # 添加清理逻辑：
+                import torch
+                torch.cuda.empty_cache()
+                self.logger.info("调用 torch.cuda.empty_cache()，已释放未使用的 GPU 显存")
+                
+                # 如果有临时目录需要清理（例如 task_state.task_paths 里存放了临时文件），可以进行删除：
+                # import shutil
+                # shutil.rmtree(task_state.task_paths.temp_dir, ignore_errors=True)
+                # self.logger.info("已清理视频处理临时目录")
+
                 return {
                     "status": "success",
                     "message": "视频翻译完成",
