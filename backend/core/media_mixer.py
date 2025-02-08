@@ -313,21 +313,19 @@ class MediaMixer:
             sub_text = (s.trans_text or s.raw_text or "").strip()
             if not sub_text:
                 continue
-
-            # 直接使用adjusted_duration作为duration_ms
-            duration_ms = s.duration / s.speed
+            
+            # 这里使用 s.duration / s.speed 是为了获得实际语音部分的播放时长，
+            # 从而确保字幕与语音同步，不受前后添加的静音影响。
+            duration_ms = s.duration / (s.speed if s.speed else 1.0)
             if duration_ms <= 0:
                 continue
 
-            # 如果 Sentence 本身带 lang, 就优先使用 s.lang, 否则用 target_language
-            lang = target_language or "en"
-
-            # 拆分长句子 -> 多段 sequential
+            # 根据 target_language 拆分长句子
             blocks = self._split_long_text_to_sub_blocks(
                 text=sub_text,
                 start_ms=start_local,
                 duration_ms=duration_ms,
-                lang=lang
+                lang=target_language or "en"
             )
 
             for block in blocks:
@@ -338,8 +336,7 @@ class MediaMixer:
                 )
                 subs.append(evt)
 
-        # 设置"类YouTube"的默认样式
-        # 若 "Default" 不存在则创建
+        # 设置默认样式
         style = subs.styles.get("Default", pysubs2.SSAStyle())
 
         style.fontname = "Arial"             # 常见无衬线

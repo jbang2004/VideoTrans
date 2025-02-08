@@ -1,0 +1,161 @@
+version: '3.8'
+
+services:
+  rabbitmq:
+    image: rabbitmq:3.11-management
+    container_name: rabbitmq
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    ports:
+      - "5672:5672"
+      - "15672:15672"  # RabbitMQ管理UI
+    networks:
+      - microservices_net
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./logs/rabbitmq:/var/log/rabbitmq
+
+  api-gateway:
+    build: ./api-gateway
+    container_name: api-gateway
+    depends_on:
+      - rabbitmq
+    networks:
+      - microservices_net
+    volumes:
+      - ./shared:/app/shared
+      - ../storage:/app/storage
+      - ./logs/api-gateway:/app/logs
+    ports:
+      - "8000:8000"
+    environment:
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+
+  asr-service:
+    build:
+      context: .
+      dockerfile: asr-service/Dockerfile
+    container_name: asr-service
+    volumes:
+      - ./shared:/app/shared
+      - ../models/SenseVoice:/app/models/SenseVoice
+      - ../models/MossFormer:/app/models/MossFormer
+      - ${WORKSPACE_DIR:-../workspace}:/app/workspace
+      - ../storage:/app/storage
+      - ./logs/asr-service:/app/logs
+    environment:
+      - PYTHONPATH=/app
+      - CUDA_VISIBLE_DEVICES=0
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    depends_on:
+      - rabbitmq
+    networks:
+      - microservices_net
+
+  translation-service:
+    build: ./translation-service
+    container_name: translation-service
+    depends_on:
+      - rabbitmq
+    networks:
+      - microservices_net
+    volumes:
+      - ./shared:/app/shared
+      - ../storage:/app/storage
+      - ./logs/translation-service:/app/logs
+    environment:
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+
+  modelin-service:
+    build: ./modelin-service
+    container_name: modelin-service
+    depends_on:
+      - rabbitmq
+    networks:
+      - microservices_net
+    volumes:
+      - ./shared:/app/shared
+      - ../storage:/app/storage
+      - ./logs/modelin-service:/app/logs
+    environment:
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+
+  tts-service:
+    build: ./tts-service
+    container_name: tts-service
+    depends_on:
+      - rabbitmq
+    networks:
+      - microservices_net
+    volumes:
+      - ./shared:/app/shared
+      - ../storage:/app/storage
+      - ./logs/tts-service:/app/logs
+    environment:
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+
+  aligner-service:
+    build: ./aligner-service
+    container_name: aligner-service
+    depends_on:
+      - rabbitmq
+    networks:
+      - microservices_net
+    volumes:
+      - ./shared:/app/shared
+      - ../storage:/app/storage
+      - ./logs/aligner-service:/app/logs
+    environment:
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+
+  audio-gen-service:
+    build: ./audio-gen-service
+    container_name: audio-gen-service
+    depends_on:
+      - rabbitmq
+    networks:
+      - microservices_net
+    volumes:
+      - ./shared:/app/shared
+      - ../storage:/app/storage
+      - ./logs/audio-gen-service:/app/logs
+    environment:
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+
+  mixer-service:
+    build: ./mixer-service
+    container_name: mixer-service
+    depends_on:
+      - rabbitmq
+    networks:
+      - microservices_net
+    volumes:
+      - ./shared:/app/shared
+      - ../storage:/app/storage
+      - ./logs/mixer-service:/app/logs
+    environment:
+      - LOG_LEVEL=INFO
+      - LOG_FORMAT=json
+
+networks:
+  microservices_net:
+    driver: bridge
+
+volumes:
+  rabbitmq_data:
+    driver: local

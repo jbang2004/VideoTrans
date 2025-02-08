@@ -3,7 +3,7 @@
 # -----------------------------------------
 import asyncio
 import logging
-from typing import List
+from typing import List, Tuple
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
 from core.sentence_tools import Sentence
@@ -12,11 +12,14 @@ logger = logging.getLogger(__name__)
 
 class PipelineScheduler:
     """
-    多个Worker的调度器，负责翻译->model_in->tts_token->时长对齐->音频生成->混音 ...
+    多个Worker的调度器，负责整个处理流水线：
+    分段提取->ASR->翻译->model_in->tts_token->时长对齐->音频生成->混音
     """
 
     def __init__(
         self,
+        segment_worker,
+        asr_worker,
         translator,
         model_in,
         tts_token_generator,
@@ -27,6 +30,8 @@ class PipelineScheduler:
         config
     ):
         self.logger = logging.getLogger(__name__)
+        self.segment_worker = segment_worker
+        self.asr_worker = asr_worker
         self.translator = translator
         self.model_in = model_in
         self.tts_token_generator = tts_token_generator
@@ -41,6 +46,9 @@ class PipelineScheduler:
     async def start_workers(self, task_state: TaskState):
         self.logger.info(f"[PipelineScheduler] start_workers -> TaskID={task_state.task_id}")
         self._workers = [
+            asyncio.create_task(self.segment_worker.segment_init_maker(task_state)),
+            asyncio.create_task(self.segment_worker.segment_media_maker(task_state)),
+            asyncio.create_task(self.asr_worker.asr_maker(task_state)),
             asyncio.create_task(self._translation_worker(task_state)),
             asyncio.create_task(self._modelin_worker(task_state)),
             asyncio.create_task(self._tts_token_worker(task_state)),
@@ -51,14 +59,10 @@ class PipelineScheduler:
 
     async def stop_workers(self, task_state: TaskState):
         self.logger.info(f"[PipelineScheduler] stop_workers -> TaskID={task_state.task_id}")
-        # 向translation_queue发送None，让整条流水线停止
-        await task_state.translation_queue.put(None)
+        # 向segment_init_queue发送None，让整条流水线停止
+        await task_state.segment_init_queue.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self.logger.info(f"[PipelineScheduler] 所有Worker已结束 -> TaskID={task_state.task_id}")
-
-    async def push_sentences_to_pipeline(self, task_state: TaskState, sentences: List[Sentence]):
-        self.logger.debug(f"[push_sentences_to_pipeline] 放入 {len(sentences)} 个句子到 translation_queue, TaskID={task_state.task_id}")
-        await task_state.translation_queue.put(sentences)
 
     # ------------------------------
     # 各 Worker 的实现
