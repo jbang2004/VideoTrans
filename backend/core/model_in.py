@@ -150,4 +150,4 @@ class ModelIn:
             # 不复用speaker时，清空cache
             if not reuse_speaker:
                 self.speaker_cache.clear()
-                self.logger.debug("modelin_maker: 已清理 speaker_cache")
+                self.logger.debug("modelin_maker: 已清理 speaker_cache") 

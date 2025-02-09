@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import torch
 
 current_dir = Path(__file__).parent
 env_path = current_dir / '.env'
@@ -41,6 +42,31 @@ class Config:
     ]
 
     MODEL_DIR = project_dir / "models"
+
+    # =========== 全局音频配置 ===========
+    SAMPLE_RATE = 24000  # 全局采样率，从 CosyVoice 模型加载后会被更新
+    VAD_SR = 16000
+    VOCALS_VOLUME = 0.7
+    BACKGROUND_VOLUME = 0.3
+    AUDIO_OVERLAP = 1024
+    NORMALIZATION_THRESHOLD = 0.9
+
+    # =========== ASR 模型相关配置 ===========
+    ASR_MODEL_DIR = MODEL_DIR / "SenseVoice"
+    ASR_MODEL_NAME = "iic/SenseVoiceSmall"
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # ASR 模型的其他参数
+    ASR_MODEL_KWARGS = {
+        "model": "iic/SenseVoiceSmall",
+        "remote_code": "./models/SenseVoice/model.py",
+        "vad_model": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        "vad_kwargs": {"max_single_segment_time": 30000},
+        "spk_model": "cam++",
+        "trust_remote_code": True,
+        "disable_update": True,
+        "device": "cuda" if torch.cuda.is_available() else "cpu"
+    }
 
     @property
     def MODEL_PATH(self) -> Path:

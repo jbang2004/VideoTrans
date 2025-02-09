@@ -3,177 +3,57 @@
 # -----------------------------------------
 import asyncio
 import logging
-from typing import List, Tuple
-from utils.decorators import worker_decorator
 from utils.task_state import TaskState
-from core.sentence_tools import Sentence
 
 logger = logging.getLogger(__name__)
 
 class PipelineScheduler:
     """
-    多个Worker的调度器，负责整个处理流水线：
-    分段提取->ASR->翻译->model_in->tts_token->时长对齐->音频生成->混音
+    流水线调度器：负责协调各个 Worker 阶段，通过各个队列传递数据，
+    启动所有 worker 长循环任务，然后在停止时发送终止信号。
     """
 
     def __init__(
         self,
-        segment_worker,
-        asr_worker,
-        translator,
-        model_in,
-        tts_token_generator,
-        duration_aligner,
-        audio_generator,
-        timestamp_adjuster,
-        mixer,
+        segment_worker,    # workers.segment_worker.Worker 实例
+        asr_worker,        # workers.asr_worker.Worker 实例
+        translation_worker,# workers.translation_worker.Worker 实例
+        modelin_worker,    # workers.modelin_worker.Worker 实例
+        tts_token_worker,  # workers.tts_worker.Worker 实例
+        duration_worker,   # workers.duration_worker.Worker 实例
+        audio_gen_worker,  # workers.audio_gen_worker.Worker 实例
+        mixer_worker,      # workers.mixer_worker.Worker 实例
         config
     ):
         self.logger = logging.getLogger(__name__)
         self.segment_worker = segment_worker
         self.asr_worker = asr_worker
-        self.translator = translator
-        self.model_in = model_in
-        self.tts_token_generator = tts_token_generator
-        self.duration_aligner = duration_aligner
-        self.audio_generator = audio_generator
-        self.timestamp_adjuster = timestamp_adjuster
-        self.mixer = mixer
+        self.translation_worker = translation_worker
+        self.modelin_worker = modelin_worker
+        self.tts_token_worker = tts_token_worker
+        self.duration_worker = duration_worker
+        self.audio_gen_worker = audio_gen_worker
+        self.mixer_worker = mixer_worker
         self.config = config
-
         self._workers = []
 
     async def start_workers(self, task_state: TaskState):
-        self.logger.info(f"[PipelineScheduler] start_workers -> TaskID={task_state.task_id}")
+        self.logger.info(f"[PipelineScheduler] 启动所有 Worker -> TaskID={task_state.task_id}")
         self._workers = [
-            asyncio.create_task(self.segment_worker.segment_init_maker(task_state)),
-            asyncio.create_task(self.segment_worker.segment_media_maker(task_state)),
-            asyncio.create_task(self.asr_worker.asr_maker(task_state)),
-            asyncio.create_task(self._translation_worker(task_state)),
-            asyncio.create_task(self._modelin_worker(task_state)),
-            asyncio.create_task(self._tts_token_worker(task_state)),
-            asyncio.create_task(self._duration_align_worker(task_state)),
-            asyncio.create_task(self._audio_generation_worker(task_state)),
-            asyncio.create_task(self._mixing_worker(task_state))
+            asyncio.create_task(self.segment_worker.run_init(task_state)),
+            asyncio.create_task(self.segment_worker.run_extract(task_state)),
+            asyncio.create_task(self.asr_worker.run(task_state)),
+            asyncio.create_task(self.translation_worker.run(task_state)),
+            asyncio.create_task(self.modelin_worker.run(task_state)),
+            asyncio.create_task(self.tts_token_worker.run(task_state)),
+            asyncio.create_task(self.duration_worker.run(task_state)),
+            asyncio.create_task(self.audio_gen_worker.run(task_state)),
+            asyncio.create_task(self.mixer_worker.run(task_state))
         ]
 
     async def stop_workers(self, task_state: TaskState):
-        self.logger.info(f"[PipelineScheduler] stop_workers -> TaskID={task_state.task_id}")
-        # 向segment_init_queue发送None，让整条流水线停止
+        self.logger.info(f"[PipelineScheduler] 停止所有 Worker -> TaskID={task_state.task_id}")
+        # 发送终止信号（在最上游队列中发送 None）
         await task_state.segment_init_queue.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
-        self.logger.info(f"[PipelineScheduler] 所有Worker已结束 -> TaskID={task_state.task_id}")
-
-    # ------------------------------
-    # 各 Worker 的实现
-    # ------------------------------
-
-    @worker_decorator(
-        input_queue_attr='translation_queue',
-        next_queue_attr='modelin_queue',
-        worker_name='翻译Worker',
-        mode='stream'
-    )
-    async def _translation_worker(self, sentences_list: List[Sentence], task_state: TaskState):
-        if not sentences_list:
-            return
-        self.logger.debug(f"[翻译Worker] 收到 {len(sentences_list)} 句子, TaskID={task_state.task_id}")
-
-        async for translated_batch in self.translator.translate_sentences(
-            sentences_list,
-            batch_size=self.config.TRANSLATION_BATCH_SIZE,
-            target_language=task_state.target_language
-        ):
-            yield translated_batch
-
-    @worker_decorator(
-        input_queue_attr='modelin_queue',
-        next_queue_attr='tts_token_queue',
-        worker_name='模型输入Worker',
-        mode='stream'
-    )
-    async def _modelin_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
-        if not sentences_batch:
-            return
-        self.logger.debug(f"[模型输入Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
-
-        async for updated_batch in self.model_in.modelin_maker(
-            sentences_batch,
-            reuse_speaker=False,
-            reuse_uuid=False,
-            batch_size=self.config.MODELIN_BATCH_SIZE
-        ):
-            yield updated_batch
-
-    @worker_decorator(
-        input_queue_attr='tts_token_queue',
-        next_queue_attr='duration_align_queue',
-        worker_name='TTS Token生成Worker'
-    )
-    async def _tts_token_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
-        if not sentences_batch:
-            return
-        self.logger.debug(f"[TTS Token生成Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
-
-        await self.tts_token_generator.tts_token_maker(sentences_batch, reuse_uuid=False)
-        return sentences_batch
-
-    @worker_decorator(
-        input_queue_attr='duration_align_queue',
-        next_queue_attr='audio_gen_queue',
-        worker_name='时长对齐Worker'
-    )
-    async def _duration_align_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
-        if not sentences_batch:
-            return
-        self.logger.debug(f"[时长对齐Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
-
-        await self.duration_aligner.align_durations(sentences_batch)
-        return sentences_batch
-
-    @worker_decorator(
-        input_queue_attr='audio_gen_queue',
-        next_queue_attr='mixing_queue',
-        worker_name='音频生成Worker'
-    )
-    async def _audio_generation_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
-        if not sentences_batch:
-            return
-        self.logger.debug(f"[音频生成Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
-
-        await self.audio_generator.vocal_audio_maker(sentences_batch)
-        task_state.current_time = self.timestamp_adjuster.update_timestamps(sentences_batch, start_time=task_state.current_time)
-        valid = self.timestamp_adjuster.validate_timestamps(sentences_batch)
-        if not valid:
-            self.logger.warning(f"[音频生成Worker] 检测到时间戳不连续, TaskID={task_state.task_id}")
-        return sentences_batch
-
-    @worker_decorator(
-        input_queue_attr='mixing_queue',
-        worker_name='混音Worker'
-    )
-    async def _mixing_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
-        if not sentences_batch:
-            return
-        seg_index = sentences_batch[0].segment_index
-        self.logger.debug(f"[混音Worker] 收到 {len(sentences_batch)} 句, segment={seg_index}, TaskID={task_state.task_id}")
-
-        output_path = task_state.task_paths.segments_dir / f"segment_{task_state.batch_counter}.mp4"
-
-        # ========== (修改) ============
-        # 将task_state.generate_subtitle 传给MediaMixer
-        success = await self.mixer.mixed_media_maker(
-            sentences=sentences_batch,
-            task_state=task_state,
-            output_path=str(output_path),
-            generate_subtitle=task_state.generate_subtitle
-        )
-
-        if success and task_state.hls_manager:
-            await task_state.hls_manager.add_segment(str(output_path), task_state.batch_counter)
-            self.logger.info(f"[混音Worker] 分段 {task_state.batch_counter} 已加入 HLS, TaskID={task_state.task_id}")
-
-            task_state.merged_segments.append(str(output_path))
-
-        task_state.batch_counter += 1
-        return None
+        self.logger.info(f"[PipelineScheduler] 所有 Worker 已结束 -> TaskID={task_state.task_id}")

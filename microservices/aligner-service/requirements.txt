@@ -1,3 +1,0 @@
-aio-pika
-numpy
-json-repair

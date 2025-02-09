@@ -112,4 +112,4 @@ class AudioGenerator:
 
         except Exception as e:
             self.logger.error(f"音频生成失败 (UUID: {model_input.get('uuid', 'unknown')}): {str(e)}")
-            raise
+            raise 

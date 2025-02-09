@@ -109,4 +109,4 @@ class TTSTokenGenerator:
                     self.cosyvoice_model.hift_cache_dict.pop(seg_uuid, None)
                     if hasattr(self.cosyvoice_model, 'mel_overlap_dict'):
                         self.cosyvoice_model.mel_overlap_dict.pop(seg_uuid, None)
-            raise
+            raise 

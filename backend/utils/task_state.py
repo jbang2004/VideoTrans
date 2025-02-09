@@ -12,7 +12,6 @@ class TaskState:
     每个任务的独立状态：包括队列、处理进度、分段信息等
     """
     task_id: str
-    video_path: str
     task_paths: TaskPaths
     hls_manager: Any = None
     target_language: str = "zh"

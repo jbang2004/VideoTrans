@@ -2,38 +2,32 @@
 # backend/video_translator.py (节选完整示例)
 # ---------------------------------
 import logging
-import os
-from typing import List, Dict, Any
+from typing import Dict, Any
 from pathlib import Path
 
-from core.auto_sense import SenseAutoModel
-from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
-from core.translation.translator import Translator
-from core.translation.deepseek_client import DeepSeekClient
-from core.translation.gemini_client import GeminiClient
-from core.tts_token_gener import TTSTokenGenerator
-from core.audio_gener import AudioGenerator
-from core.timeadjust.duration_aligner import DurationAligner
-from core.timeadjust.timestamp_adjuster import TimestampAdjuster
-from core.media_mixer import MediaMixer
 from pipeline_scheduler import PipelineScheduler
-from core.audio_separator import ClearVoiceSeparator
-from core.model_in import ModelIn
 from utils.task_storage import TaskPaths
 from config import Config
 from utils.task_state import TaskState
-
 from utils.ffmpeg_utils import FFmpegTool
-from core.segment_worker import SegmentWorker
-from core.asr_worker import ASRWorker
-from core.video_segmenter import VideoSegmenter
+
+# 从各 worker 文件夹导入 Worker 类
+from workers.asr_worker.worker import ASRWorker
+from workers.segment_worker.worker import SegmentWorker
+from workers.audio_gen_worker.worker import AudioGenWorker
+from workers.mixer_worker.worker import MixerWorker
+from workers.translation_worker.worker import TranslationWorker
+from workers.modelin_worker.worker import ModelInWorker
+from workers.tts_worker.worker import TTSTokenWorker
+from workers.duration_worker.worker import DurationWorker
 
 logger = logging.getLogger(__name__)
 
 class ViTranslator:
     """
-    全局持有大模型(ASR/TTS/翻译)对象, ...
+    视频翻译器：初始化所有模型、工具以及各个 Worker，通过 PipelineScheduler 协调整个处理流程。
     """
+
     def __init__(self, config: Config = None):
         self.logger = logger
         self.config = config or Config()
@@ -41,58 +35,16 @@ class ViTranslator:
 
     def _init_global_models(self):
         self.logger.info("[ViTranslator] 初始化模型和工具...")
-        # 音频分离器
-        self.audio_separator = ClearVoiceSeparator(model_name='MossFormer2_SE_48K')
-        # ASR + VAD + Speaker
-        self.sense_model = SenseAutoModel(
-            config=self.config,
-            model="iic/SenseVoiceSmall",
-            remote_code="./models/SenseVoice/model.py",
-            vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-            vad_kwargs={"max_single_segment_time": 30000},
-            spk_model="cam++",
-            trust_remote_code=True,
-            disable_update=True,
-            device="cuda"
-        )
-        # TTS 模型
-        self.cosyvoice_model = CosyVoice2("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
-        self.target_sr = self.cosyvoice_model.sample_rate
-
-        # 初始化工具类
-        self.ffmpeg_tool = FFmpegTool()
-        self.video_segmenter = VideoSegmenter(config=self.config, ffmpeg_tool=self.ffmpeg_tool)
-
-        # 初始化各个Worker
-        self.segment_worker = SegmentWorker(
-            config=self.config,
-            audio_separator=self.audio_separator,
-            video_segmenter=self.video_segmenter,
-            ffmpeg_tool=self.ffmpeg_tool,
-            target_sr=self.target_sr
-        )
-        self.asr_worker = ASRWorker(sense_model=self.sense_model)
-        self.model_in = ModelIn(self.cosyvoice_model)
-        self.tts_generator = TTSTokenGenerator(self.cosyvoice_model, Hz=25)
-        self.audio_generator = AudioGenerator(self.cosyvoice_model, sample_rate=self.target_sr)
-
-        # 翻译
-        translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
-        if translation_model == "deepseek":
-            self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
-        elif translation_model == "gemini":
-            self.translator = Translator(GeminiClient(api_key=self.config.GEMINI_API_KEY))
-        else:
-            raise ValueError(f"不支持的翻译模型：{translation_model}")
-
-        self.duration_aligner = DurationAligner(
-            model_in=self.model_in,
-            simplifier=self.translator,
-            tts_token_gener=self.tts_generator,
-            max_speed=1.2
-        )
-        self.timestamp_adjuster = TimestampAdjuster(sample_rate=self.target_sr)
-        self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr)
+        
+        # 初始化各 Worker 实例
+        self.segment_worker = SegmentWorker(config=self.config)
+        self.asr_worker = ASRWorker(config=self.config)
+        self.translation_worker = TranslationWorker(config=self.config)
+        self.modelin_worker = ModelInWorker(config=self.config)
+        self.tts_token_worker = TTSTokenWorker(config=self.config)
+        self.duration_worker = DurationWorker(config=self.config)
+        self.audio_gen_worker = AudioGenWorker(config=self.config)
+        self.mixer_worker = MixerWorker(config=self.config)
 
         self.logger.info("[ViTranslator] 初始化完成")
 
@@ -116,7 +68,6 @@ class ViTranslator:
         # 初始化任务状态
         task_state = TaskState(
             task_id=task_id,
-            video_path=video_path,
             task_paths=task_paths,
             hls_manager=hls_manager,
             target_language=target_language,
@@ -127,13 +78,12 @@ class ViTranslator:
         pipeline = PipelineScheduler(
             segment_worker=self.segment_worker,
             asr_worker=self.asr_worker,
-            translator=self.translator,
-            model_in=self.model_in,
-            tts_token_generator=self.tts_generator,
-            duration_aligner=self.duration_aligner,
-            audio_generator=self.audio_generator,
-            timestamp_adjuster=self.timestamp_adjuster,
-            mixer=self.mixer,
+            translation_worker=self.translation_worker,
+            modelin_worker=self.modelin_worker,
+            tts_token_worker=self.tts_token_worker,
+            duration_worker=self.duration_worker,
+            audio_gen_worker=self.audio_gen_worker,
+            mixer_worker=self.mixer_worker,
             config=self.config
         )
 
@@ -161,7 +111,7 @@ class ViTranslator:
                 await hls_manager.finalize_playlist()
                 self.logger.info(f"[trans_video] HLS生成完成 -> TaskID={task_id}")
 
-            # 6. 合并所有segment MP4
+            # 6. 合并所有segment MP4s
             final_video_path = await self._concat_segment_mp4s(task_state)
             if final_video_path is not None and final_video_path.exists():
                 self.logger.info(f"翻译后的完整视频已生成: {final_video_path}")
@@ -198,7 +148,7 @@ class ViTranslator:
         如果成功再删除这些小片段。
         """
         if not task_state.merged_segments:
-            self.logger.warning("无可合并的 segment MP4, 可能任务中断或没有生成混音段.")
+            self.logger.warning("无可合并的 segment MP4，可能任务中断或没有生成混音段.")
             return None
 
         final_path = task_state.task_paths.output_dir / f"final_{task_state.task_id}.mp4"
@@ -219,11 +169,12 @@ class ViTranslator:
             str(final_path)
         ]
         try:
-            self.logger.info(f"开始合并 {len(task_state.merged_segments)} 个MP4 -> {final_path}")
-            await self.ffmpeg_tool.run_command(cmd)
+            self.logger.info(f"开始合并 {len(task_state.merged_segments)} 个 MP4 -> {final_path}")
+            # 使用 FFmpegTool 实例
+            ffmpeg_tool = FFmpegTool()
+            await ffmpeg_tool.run_command(cmd)
             self.logger.info(f"合并完成: {final_path}")
 
-            # 合并成功后，自动删除这些 segment
             for seg_mp4 in task_state.merged_segments:
                 try:
                     Path(seg_mp4).unlink(missing_ok=True)
@@ -238,3 +189,6 @@ class ViTranslator:
         finally:
             if list_txt.exists():
                 list_txt.unlink()
+
+if __name__ == '__main__':
+    print("ViTranslator 模块加载成功")

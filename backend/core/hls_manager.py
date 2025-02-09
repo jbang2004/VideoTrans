@@ -1,4 +1,3 @@
-# core/hls_manager.py
 import logging
 import asyncio
 from pathlib import Path
@@ -102,4 +101,4 @@ class HLSManager:
             self._save_playlist()
             self.logger.info("播放列表已保存，并标记为完成状态")
         else:
-            self.logger.warning("播放列表为空，不标记为结束状态")
+            self.logger.warning("播放列表为空，不标记为结束状态") 
