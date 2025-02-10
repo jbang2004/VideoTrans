@@ -30,7 +30,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from video_translator import ViTranslator
-from core.hls_manager import HLSManager
 from utils.task_storage import TaskPaths
 from fastapi import BackgroundTasks
 
@@ -47,7 +46,9 @@ app.add_middleware(
 current_dir = Path(__file__).parent
 templates = Jinja2Templates(directory=str(current_dir / "templates"))
 
+# 初始化服务
 vi_translator = ViTranslator(config=config)
+
 task_results: Dict[str, dict] = {}
 
 @app.get("/")
@@ -58,13 +59,8 @@ async def index(request: Request):
 async def upload_video(
     video: UploadFile = File(...),
     target_language: str = Form("zh"),
-    # =============== (新增) ================
-    generate_subtitle: bool = Form(False),  # 是否烧制字幕
+    generate_subtitle: bool = Form(False),
 ):
-    """
-    上传视频接口：
-    - generate_subtitle: 用户是否选择生成并烧制字幕
-    """
     try:
         if not video:
             raise HTTPException(status_code=400, detail="没有文件上传")
@@ -87,17 +83,13 @@ async def upload_video(
         except Exception as e:
             logger.error(f"保存文件失败: {str(e)}")
             raise HTTPException(status_code=500, detail="文件保存失败")
-        
-        hls_manager = HLSManager(config, task_id, task_paths)
-        
-        # ===================
-        # 在这里传递 generate_subtitle 给 translator
-        # ===================
-        task = asyncio.create_task(vi_translator.trans_video(
+
+        # 创建新的事件循环来处理视频转换
+        loop = asyncio.get_event_loop()
+        task = loop.create_task(vi_translator.trans_video(
             video_path=str(video_path),
             task_id=task_id,
             task_paths=task_paths,
-            hls_manager=hls_manager,
             target_language=target_language,
             generate_subtitle=generate_subtitle,
         ))
@@ -155,51 +147,9 @@ async def get_task_status(task_id: str):
         }
     return result
 
+# 挂载静态文件服务
 app.mount("/playlists", StaticFiles(directory=str(config.PUBLIC_DIR / "playlists")), name="playlists")
-
-@app.get("/playlists/{task_id}/{filename}")
-async def serve_playlist(task_id: str, filename: str):
-    try:
-        playlist_path = config.PUBLIC_DIR / "playlists" / filename
-        if not playlist_path.exists():
-            logger.error(f"播放列表未找到: {playlist_path}")
-            raise HTTPException(status_code=404, detail="播放列表未找到")
-        
-        logger.info(f"提供播放列表: {playlist_path}")
-        return FileResponse(
-            str(playlist_path), 
-            media_type='application/vnd.apple.mpegurl',
-            headers={
-                "Cache-Control": "public, max-age=3600",
-                "Access-Control-Allow-Origin": "*"
-            }
-        )
-    except Exception as e:
-        logger.error(f"服务播放列表失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/segments/{task_id}/{filename}")
-async def serve_segments(task_id: str, filename: str):
-    try:
-        segment_path = config.PUBLIC_DIR / "segments" / task_id / filename
-        if not segment_path.exists():
-            logger.error(f"片段文件未找到: {segment_path}")
-            raise HTTPException(status_code=404, detail="片段文件未找到")
-        
-        logger.debug(f"提供视频片段: {segment_path}")
-        return FileResponse(
-            str(segment_path),
-            media_type='video/MP2T',
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-                "Access-Control-Allow-Origin": "*"
-            }
-        )
-    except Exception as e:
-        logger.error(f"服务视频片段失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+app.mount("/segments", StaticFiles(directory=str(config.PUBLIC_DIR / "segments")), name="segments")
 
 @app.get("/download/{task_id}")
 async def download_translated_video(task_id: str):

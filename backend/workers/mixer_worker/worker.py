@@ -4,6 +4,7 @@ from pathlib import Path
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
 from .media_mixer import MediaMixer
+from services.hls import HLSClient
 
 logger = logging.getLogger(__name__)
 
@@ -12,9 +13,10 @@ class MixerWorker:
     混音 Worker：调用 MediaMixer 将生成的音频与视频混合，生成最终输出段视频。
     """
 
-    def __init__(self, config):
+    def __init__(self, config, hls_service: HLSClient):
         """初始化 MixerWorker"""
         self.config = config
+        self.hls_service = hls_service
         self.logger = logger
         
         # 直接实例化 MediaMixer
@@ -39,10 +41,18 @@ class MixerWorker:
             generate_subtitle=task_state.generate_subtitle
         )
 
-        if success and task_state.hls_manager:
-            await task_state.hls_manager.add_segment(str(output_path), task_state.batch_counter)
-            self.logger.info(f"[混音 Worker] 分段 {task_state.batch_counter} 已加入 HLS, TaskID={task_state.task_id}")
-            task_state.merged_segments.append(str(output_path))
+        if success:
+            # 使用 HLS 服务
+            added = await self.hls_service.add_segment(
+                task_state.task_id,
+                output_path,
+                task_state.batch_counter
+            )
+            if added:
+                self.logger.info(f"[混音 Worker] 分段 {task_state.batch_counter} 已加入 HLS, TaskID={task_state.task_id}")
+                task_state.merged_segments.append(str(output_path))
+            else:
+                self.logger.error(f"[混音 Worker] 分段 {task_state.batch_counter} 添加到 HLS 流失败, TaskID={task_state.task_id}")
 
         task_state.batch_counter += 1
         return None

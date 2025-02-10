@@ -91,12 +91,17 @@ class FFmpegTool:
         input_path: str,
         segment_pattern: str,
         playlist_path: str,
-        hls_time: int = 10
+        hls_time: int = 10,
+        hls_flags: str = "independent_segments"
     ) -> None:
         """
-        将输入视频切割为 HLS 片段。
-        segment_pattern 形如 "out%03d.ts"
-        playlist_path   形如 "playlist.m3u8"
+        将输入视频切分成HLS分片
+        Args:
+            input_path: 输入视频路径
+            segment_pattern: 分片文件名模式
+            playlist_path: 临时m3u8文件路径
+            hls_time: 每个分片的目标时长(秒)
+            hls_flags: HLS特殊标志
         """
         cmd = [
             "ffmpeg", "-y",
@@ -104,11 +109,11 @@ class FFmpegTool:
             "-c", "copy",
             "-f", "hls",
             "-hls_time", str(hls_time),
-            "-hls_list_size", "0",
-            "-hls_segment_type", "mpegts",
+            "-hls_flags", hls_flags,
             "-hls_segment_filename", segment_pattern,
             playlist_path
         ]
+        
         await self.run_command(cmd)
 
     async def cut_video_track(

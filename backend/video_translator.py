@@ -10,6 +10,7 @@ from utils.task_storage import TaskPaths
 from config import Config
 from utils.task_state import TaskState
 from utils.ffmpeg_utils import FFmpegTool
+from services.hls import HLSClient
 
 # 从各 worker 文件夹导入 Worker 类
 from workers.asr_worker.worker import ASRWorker
@@ -28,13 +29,15 @@ class ViTranslator:
     视频翻译器：初始化所有模型、工具以及各个 Worker，通过 PipelineScheduler 协调整个处理流程。
     """
 
-    def __init__(self, config: Config = None):
+    def __init__(self, config: Config):
+        self.config = config
+        self.hls_client = None  # 将在 trans_video 中异步初始化
         self.logger = logger
-        self.config = config or Config()
         self._init_global_models()
 
     def _init_global_models(self):
-        self.logger.info("[ViTranslator] 初始化模型和工具...")
+        """初始化所有需要的模型，只在第一次调用时加载"""
+        self.logger.info("开始初始化模型...")
         
         # 初始化各 Worker 实例
         self.segment_worker = SegmentWorker(config=self.config)
@@ -44,17 +47,16 @@ class ViTranslator:
         self.tts_token_worker = TTSTokenWorker(config=self.config)
         self.duration_worker = DurationWorker(config=self.config)
         self.audio_gen_worker = AudioGenWorker(config=self.config)
-        self.mixer_worker = MixerWorker(config=self.config)
+        self.mixer_worker = None  # 将在 trans_video 中初始化
 
-        self.logger.info("[ViTranslator] 初始化完成")
+        self.logger.info("初始化完成")
 
     async def trans_video(
         self,
         video_path: str,
         task_id: str,
         task_paths: TaskPaths,
-        hls_manager=None,
-        target_language="zh",
+        target_language: str = "zh",
         generate_subtitle: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -65,29 +67,37 @@ class ViTranslator:
             f"target_language={target_language}, generate_subtitle={generate_subtitle}"
         )
 
-        # 初始化任务状态
-        task_state = TaskState(
-            task_id=task_id,
-            task_paths=task_paths,
-            hls_manager=hls_manager,
-            target_language=target_language,
-            generate_subtitle=generate_subtitle
-        )
-
-        # 初始化流水线
-        pipeline = PipelineScheduler(
-            segment_worker=self.segment_worker,
-            asr_worker=self.asr_worker,
-            translation_worker=self.translation_worker,
-            modelin_worker=self.modelin_worker,
-            tts_token_worker=self.tts_token_worker,
-            duration_worker=self.duration_worker,
-            audio_gen_worker=self.audio_gen_worker,
-            mixer_worker=self.mixer_worker,
-            config=self.config
-        )
-
         try:
+            # 异步初始化 HLS 客户端
+            self.hls_client = await HLSClient.create(self.config)
+            # 初始化依赖 HLS 客户端的 mixer_worker
+            self.mixer_worker = MixerWorker(config=self.config, hls_service=self.hls_client)
+
+            # 初始化任务状态
+            task_state = TaskState(
+                task_id=task_id,
+                task_paths=task_paths,
+                target_language=target_language,
+                generate_subtitle=generate_subtitle
+            )
+
+            # 初始化流水线
+            pipeline = PipelineScheduler(
+                segment_worker=self.segment_worker,
+                asr_worker=self.asr_worker,
+                translation_worker=self.translation_worker,
+                modelin_worker=self.modelin_worker,
+                tts_token_worker=self.tts_token_worker,
+                duration_worker=self.duration_worker,
+                audio_gen_worker=self.audio_gen_worker,
+                mixer_worker=self.mixer_worker,
+                config=self.config
+            )
+
+            # 初始化HLS
+            if not await self.hls_client.init_task(task_id):
+                raise RuntimeError("HLS任务初始化失败")
+            
             # 1. 启动所有worker
             await pipeline.start_workers(task_state)
 
@@ -102,14 +112,16 @@ class ViTranslator:
 
             # 4. 检查是否有错误
             if task_state.errors:
+                # 如果有错误，清理HLS资源
+                await self.hls_client.cleanup_task(task_id)
                 error_msg = f"处理过程中发生 {len(task_state.errors)} 个错误"
                 self.logger.error(f"{error_msg} -> TaskID={task_id}")
                 return {"status": "error", "message": error_msg, "errors": task_state.errors}
 
-            # 5. 如果有HLS Manager，标记完成
-            if hls_manager and hls_manager.has_segments:
-                await hls_manager.finalize_playlist()
-                self.logger.info(f"[trans_video] HLS生成完成 -> TaskID={task_id}")
+            # 5. 完成HLS流
+            if not await self.hls_client.finalize_task(task_id):
+                raise RuntimeError("HLS任务完成失败")
+            self.logger.info(f"[trans_video] HLS生成完成 -> TaskID={task_id}")
 
             # 6. 合并所有segment MP4s
             final_video_path = await self._concat_segment_mp4s(task_state)
@@ -134,12 +146,17 @@ class ViTranslator:
 
         except Exception as e:
             self.logger.exception(f"[trans_video] 处理失败: {e} -> TaskID={task_id}")
+            # 确保清理HLS资源
+            if self.hls_client:
+                await self.hls_client.cleanup_task(task_id)
             return {"status": "error", "message": str(e)}
 
         finally:
             # 确保清理资源
             if 'pipeline' in locals():
                 await pipeline.stop_workers(task_state)
+            if self.hls_client:
+                await self.hls_client.close()
 
     async def _concat_segment_mp4s(self, task_state: TaskState) -> Path:
         """
