@@ -92,7 +92,7 @@ class FFmpegTool:
         segment_pattern: str,
         playlist_path: str,
         hls_time: int = 10,
-        hls_flags: str = "independent_segments"
+        hls_flags: str = "independent_segments",
     ) -> None:
         """
         将输入视频切分成HLS分片
@@ -102,6 +102,7 @@ class FFmpegTool:
             playlist_path: 临时m3u8文件路径
             hls_time: 每个分片的目标时长(秒)
             hls_flags: HLS特殊标志
+            extra_options: 额外的 FFmpeg 选项
         """
         cmd = [
             "ffmpeg", "-y",
@@ -109,7 +110,8 @@ class FFmpegTool:
             "-c", "copy",
             "-f", "hls",
             "-hls_time", str(hls_time),
-            "-hls_flags", hls_flags,
+            "-hls_list_size", "0",
+            "-hls_segment_type", "mpegts",
             "-hls_segment_filename", segment_pattern,
             playlist_path
         ]

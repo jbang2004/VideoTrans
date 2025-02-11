@@ -45,13 +45,12 @@ class HLSService:
             segment_pattern = str(target_dir / segment_filename)
             temp_playlist_path = target_dir / f'temp_{segment_index}.m3u8'
 
-            # 调用 FFmpeg 进行分段
+            # 调用 FFmpeg 进行分段，添加更多参数以确保准确切片
             await self.ffmpeg_tool.hls_segment(
-                input_path=str(segment_path),
+                input_path=str(segment_path),               
+                hls_time=self.config.HLS_TIME,
                 segment_pattern=segment_pattern,
                 playlist_path=str(temp_playlist_path),
-                hls_time=self.config.HLS_TIME,
-                hls_flags=self.config.HLS_FLAGS
             )
 
             # 2. 读取临时播放列表并更新主播放列表
