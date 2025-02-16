@@ -122,3 +122,7 @@ class Config:
     # HLS服务地址(供客户端使用)
     HLS_SERVICE_HOST = os.getenv("HLS_SERVICE_HOST", "localhost")
     HLS_SERVICE_PORT = int(os.getenv("HLS_SERVICE_PORT", "50051"))
+
+    # CosyVoice 服务配置
+    COSYVOICE_SERVICE_HOST = os.getenv("COSYVOICE_SERVICE_HOST", "localhost")
+    COSYVOICE_SERVICE_PORT = int(os.getenv("COSYVOICE_SERVICE_PORT", "50052"))

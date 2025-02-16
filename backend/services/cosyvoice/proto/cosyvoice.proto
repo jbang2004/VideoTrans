@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package cosyvoice;
+
+// CosyVoice 服务接口
+service CosyVoiceService {
+  // 文本归一化（预处理），返回拆分后的文本段及 token 信息
+  rpc NormalizeText(NormalizeTextRequest) returns (NormalizeTextResponse);
+  // 根据输入文本生成 TTS token（同时返回 token 总数和生成的语音时长）
+  rpc GenerateTTSTokens(GenerateTTSTokensRequest) returns (GenerateTTSTokensResponse);
+  // 根据 TTS token 生成音频波形
+  rpc Token2Wav(Token2WavRequest) returns (Token2WavResponse);
+  // 提取 speaker 特征
+  rpc ExtractSpeakerFeatures(ExtractSpeakerFeaturesRequest) returns (ExtractSpeakerFeaturesResponse);
+}
+
+// 基础特征消息定义
+message Features {
+  // 说话人embedding向量，形状 [192]
+  repeated float embedding = 1;
+  // 语音特征，形状 [1, N, 80] 展平为 [N*80]
+  repeated float prompt_speech_feat = 2;
+  // 语音token序列，形状 [1, T] 展平为 [T]
+  repeated int32 prompt_speech_token = 3;
+  // 语音特征长度 N
+  int32 prompt_speech_feat_len = 4;
+  // token序列长度 T
+  int32 prompt_speech_token_len = 5;
+}
+
+// 文本标准化
+message NormalizeTextRequest {
+  string text = 1;
+}
+
+message NormalizeTextResponse {
+  message Segment {
+    string text = 1;
+    repeated int32 tokens = 2;
+    int32 length = 3;  // token长度
+  }
+  repeated Segment segments = 1;
+}
+
+// TTS Token生成
+message GenerateTTSTokensRequest {
+  message TTSTokenContext {
+    repeated int32 prompt_text = 1;
+    int32 prompt_text_len = 2;
+    Features features = 3;  // 使用Features消息类型
+  }
+  
+  string uuid = 1;
+  repeated string text_segments = 2;
+  TTSTokenContext tts_token_context = 3;
+}
+
+message GenerateTTSTokensResponse {
+  message Segment {
+    string uuid = 1;
+    repeated int32 tokens = 2;
+  }
+  repeated Segment segments = 1;
+  float duration_ms = 2;
+}
+
+// 音频生成
+message Token2WavRequest {
+  message SpeakerInfo {
+    repeated int32 prompt_token = 1;
+    repeated float prompt_feat = 2;
+    repeated float embedding = 3;
+  }
+  repeated int32 tokens_list = 1;
+  repeated string uuids_list = 2;
+  float speed = 3;
+  SpeakerInfo speaker = 4;
+}
+
+message Token2WavResponse {
+  bytes audio = 1;
+  float duration_sec = 2;
+}
+
+// 说话人特征提取
+message ExtractSpeakerFeaturesRequest {
+  bytes audio = 1;
+  int32 sample_rate = 2;
+}
+
+message ExtractSpeakerFeaturesResponse {
+  Features features = 1;  // 使用Features消息类型
+} 

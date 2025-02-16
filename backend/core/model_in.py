@@ -1,26 +1,24 @@
-import os
 import logging
+import asyncio
 import torch
 import numpy as np
 import librosa
 from typing import List, Optional
-import asyncio
 
-# [NEW] 统一使用 concurrency.run_sync
+# 用于在异步方法中调用同步函数
 from utils import concurrency
 
 class ModelIn:
-    def __init__(self, cosy_model,
-                 max_workers: Optional[int] = None,
-                 max_concurrent_tasks: int = 4):
+    def __init__(self, cosyvoice_client, max_concurrent_tasks: int = 4):
         """
         Args:
-            cosy_model: CosyVoice model wrapper
-            max_workers: (已废弃, 因为我们改用全局线程池)
-            max_concurrent_tasks: 同时处理多少 sentence
+            cosyvoice_client: 连接 gRPC 的客户端封装 (CosyVoiceClient)
+            max_concurrent_tasks: 同时处理多少个 sentence
         """
-        self.cosy_frontend = cosy_model.frontend
-        self.cosy_sample_rate = cosy_model.sample_rate
+        self.cosyvoice_client = cosyvoice_client
+        # 这里可从 client 或者自行固定
+        self.cosy_sample_rate = 24000
+
         self.logger = logging.getLogger(__name__)
 
         self.speaker_cache = {}
@@ -33,6 +31,9 @@ class ModelIn:
         )
 
     def postprocess(self, speech, top_db=60, hop_length=220, win_length=440):
+        """
+        与原先相同，对音频进行trim和幅度归一化，并在结尾加0.2s静音
+        """
         speech, _ = librosa.effects.trim(
             speech, top_db=top_db,
             frame_length=win_length,
@@ -40,73 +41,79 @@ class ModelIn:
         )
         if speech.abs().max() > self.max_val:
             speech = speech / speech.abs().max() * self.max_val
-        
-        speech = torch.concat([speech, torch.zeros(1, int(self.cosy_sample_rate * 0.2))], dim=1)
+
+        # 结尾添加0.2s静音
+        pad_samples = int(self.cosy_sample_rate * 0.2)
+        # 这里 speech 可能是 2D Tensor: shape=[1, time]
+        # 如果是一维，可以先确保维度
+        if speech.ndim == 1:
+            speech = speech.unsqueeze(0)
+        speech = torch.cat([speech, torch.zeros((1, pad_samples), dtype=speech.dtype)], dim=1)
+
         return speech
 
     def _update_text_features_sync(self, sentence):
-        """
-        纯同步逻辑：文本正则化 + token 提取
-        """
+        """同步：调用gRPC的normalize_text，更新sentence.model_input"""
         try:
             tts_text = sentence.trans_text
-            normalized_segments = self.cosy_frontend.text_normalize(tts_text, split=True)
+            result = self.cosyvoice_client.normalize_text(tts_text)
 
-            segment_tokens = []
-            segment_token_lens = []
+            # 直接更新model_input，client已经处理好了数据格式
+            sentence.model_input.update(result)
 
-            for seg in normalized_segments:
-                txt, txt_len = self.cosy_frontend._extract_text_token(seg)
-                segment_tokens.append(txt)
-                segment_token_lens.append(txt_len)
-
-            sentence.model_input['text'] = segment_tokens
-            sentence.model_input['text_len'] = segment_token_lens
-            sentence.model_input['normalized_text_segments'] = normalized_segments
-
-            self.logger.debug(f"成功更新文本特征: {normalized_segments}")
+            self.logger.debug(f"成功更新文本特征: {sentence.model_input['normalized_text_segments']}")
             return sentence
         except Exception as e:
             self.logger.error(f"更新文本特征失败: {str(e)}")
             raise
 
     def _process_sentence_sync(self, sentence, reuse_speaker=False, reuse_uuid=False):
-        """
-        纯同步实现：包含 speaker 处理、uuid处理、文本特征更新
-        """
+        """同步处理单个sentence的speaker特征和文本特征"""
         speaker_id = sentence.speaker_id
 
-        # 1) Speaker处理
+        # 1) 处理speaker特征
         if not reuse_speaker:
             if speaker_id not in self.speaker_cache:
-                processed_audio = self.postprocess(sentence.audio)
-                # 同步地调用 cosy_frontend
-                self.speaker_cache[speaker_id] = self.cosy_frontend.frontend_cross_lingual(
-                    "",
-                    processed_audio,
-                    self.cosy_sample_rate
-                )
-            speaker_features = self.speaker_cache[speaker_id].copy()
-            sentence.model_input = speaker_features
+                try:
+                    # 音频预处理
+                    processed_audio = self.postprocess(sentence.audio)
+                    
+                    # 提取特征 - 直接使用原始特征
+                    features = self.cosyvoice_client.extract_speaker_features(processed_audio)
+                    self.speaker_cache[speaker_id] = features
+                    
+                except Exception as e:
+                    self.logger.error(f"处理说话人特征失败 (speaker_id={speaker_id}): {str(e)}")
+                    raise
 
-        # 2) UUID处理
+            speaker_features = self.speaker_cache[speaker_id]
+            
+            # 直接使用原始特征
+            sentence.model_input.update(speaker_features)
+            
+            # 准备prompt_text (空)
+            sentence.model_input['prompt_text'] = []
+            sentence.model_input['prompt_text_len'] = 0
+            
+            self.logger.debug(f"成功更新speaker特征")
+
+        # 2) 处理uuid
         if not reuse_uuid:
             sentence.model_input['uuid'] = ""
 
-        # 3) 文本特征更新 (同步)
-        self._update_text_features_sync(sentence)
+        # 3) 文本特征更新 - 使用_update_text_features_sync
+        sentence = self._update_text_features_sync(sentence)
+        
         return sentence
 
     async def _process_sentence_async(self, sentence, reuse_speaker=False, reuse_uuid=False):
         """
-        在异步方法中，对单个 sentence 做同步处理 -> run_sync
+        在异步场景下，对单个 sentence 做同步处理 => concurrency.run_sync
         """
         async with self.semaphore:
             return await concurrency.run_sync(
                 self._process_sentence_sync,
-                sentence,
-                reuse_speaker,
-                reuse_uuid
+                sentence, reuse_speaker, reuse_uuid
             )
 
     async def modelin_maker(self,
@@ -115,7 +122,7 @@ class ModelIn:
                             reuse_uuid=False,
                             batch_size=3):
         """
-        对一批 sentences 做 model_in 处理，分批 yield
+        对一批 sentences 进行 model_in 处理（文本+speaker），分批 yield
         """
         if not sentences:
             self.logger.warning("modelin_maker: 收到空的句子列表")
@@ -123,11 +130,10 @@ class ModelIn:
 
         tasks = []
         for s in sentences:
-            tasks.append(
-                asyncio.create_task(
-                    self._process_sentence_async(s, reuse_speaker, reuse_uuid)
-                )
+            task = asyncio.create_task(
+                self._process_sentence_async(s, reuse_speaker, reuse_uuid)
             )
+            tasks.append(task)
 
         try:
             results = []
@@ -145,9 +151,8 @@ class ModelIn:
         except Exception as e:
             self.logger.error(f"modelin_maker处理失败: {str(e)}")
             raise
-
         finally:
-            # 不复用speaker时，清空cache
+            # 若不复用speaker，则最后清理缓存
             if not reuse_speaker:
                 self.speaker_cache.clear()
-                self.logger.debug("modelin_maker: 已清理 speaker_cache") 
+                self.logger.debug("modelin_maker: 已清理 speaker_cache")
