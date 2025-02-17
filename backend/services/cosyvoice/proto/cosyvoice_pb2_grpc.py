@@ -6,7 +6,7 @@ from . import cosyvoice_pb2 as cosyvoice__pb2
 
 
 class CosyVoiceServiceStub(object):
-    """CosyVoice 服务接口
+    """========== Service 定义 ==========
     """
 
     def __init__(self, channel):
@@ -20,6 +20,11 @@ class CosyVoiceServiceStub(object):
                 request_serializer=cosyvoice__pb2.NormalizeTextRequest.SerializeToString,
                 response_deserializer=cosyvoice__pb2.NormalizeTextResponse.FromString,
                 )
+        self.ExtractSpeakerFeatures = channel.unary_unary(
+                '/cosyvoice.CosyVoiceService/ExtractSpeakerFeatures',
+                request_serializer=cosyvoice__pb2.ExtractSpeakerFeaturesRequest.SerializeToString,
+                response_deserializer=cosyvoice__pb2.ExtractSpeakerFeaturesResponse.FromString,
+                )
         self.GenerateTTSTokens = channel.unary_unary(
                 '/cosyvoice.CosyVoiceService/GenerateTTSTokens',
                 request_serializer=cosyvoice__pb2.GenerateTTSTokensRequest.SerializeToString,
@@ -30,41 +35,32 @@ class CosyVoiceServiceStub(object):
                 request_serializer=cosyvoice__pb2.Token2WavRequest.SerializeToString,
                 response_deserializer=cosyvoice__pb2.Token2WavResponse.FromString,
                 )
-        self.ExtractSpeakerFeatures = channel.unary_unary(
-                '/cosyvoice.CosyVoiceService/ExtractSpeakerFeatures',
-                request_serializer=cosyvoice__pb2.ExtractSpeakerFeaturesRequest.SerializeToString,
-                response_deserializer=cosyvoice__pb2.ExtractSpeakerFeaturesResponse.FromString,
-                )
 
 
 class CosyVoiceServiceServicer(object):
-    """CosyVoice 服务接口
+    """========== Service 定义 ==========
     """
 
     def NormalizeText(self, request, context):
-        """文本归一化（预处理），返回拆分后的文本段及 token 信息
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def GenerateTTSTokens(self, request, context):
-        """根据输入文本生成 TTS token（同时返回 token 总数和生成的语音时长）
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-    def Token2Wav(self, request, context):
-        """根据 TTS token 生成音频波形
-        """
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
     def ExtractSpeakerFeatures(self, request, context):
-        """提取 speaker 特征
-        """
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GenerateTTSTokens(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def Token2Wav(self, request, context):
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -77,6 +73,11 @@ def add_CosyVoiceServiceServicer_to_server(servicer, server):
                     request_deserializer=cosyvoice__pb2.NormalizeTextRequest.FromString,
                     response_serializer=cosyvoice__pb2.NormalizeTextResponse.SerializeToString,
             ),
+            'ExtractSpeakerFeatures': grpc.unary_unary_rpc_method_handler(
+                    servicer.ExtractSpeakerFeatures,
+                    request_deserializer=cosyvoice__pb2.ExtractSpeakerFeaturesRequest.FromString,
+                    response_serializer=cosyvoice__pb2.ExtractSpeakerFeaturesResponse.SerializeToString,
+            ),
             'GenerateTTSTokens': grpc.unary_unary_rpc_method_handler(
                     servicer.GenerateTTSTokens,
                     request_deserializer=cosyvoice__pb2.GenerateTTSTokensRequest.FromString,
@@ -87,11 +88,6 @@ def add_CosyVoiceServiceServicer_to_server(servicer, server):
                     request_deserializer=cosyvoice__pb2.Token2WavRequest.FromString,
                     response_serializer=cosyvoice__pb2.Token2WavResponse.SerializeToString,
             ),
-            'ExtractSpeakerFeatures': grpc.unary_unary_rpc_method_handler(
-                    servicer.ExtractSpeakerFeatures,
-                    request_deserializer=cosyvoice__pb2.ExtractSpeakerFeaturesRequest.FromString,
-                    response_serializer=cosyvoice__pb2.ExtractSpeakerFeaturesResponse.SerializeToString,
-            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
             'cosyvoice.CosyVoiceService', rpc_method_handlers)
@@ -100,7 +96,7 @@ def add_CosyVoiceServiceServicer_to_server(servicer, server):
 
  # This class is part of an EXPERIMENTAL API.
 class CosyVoiceService(object):
-    """CosyVoice 服务接口
+    """========== Service 定义 ==========
     """
 
     @staticmethod
@@ -117,6 +113,23 @@ class CosyVoiceService(object):
         return grpc.experimental.unary_unary(request, target, '/cosyvoice.CosyVoiceService/NormalizeText',
             cosyvoice__pb2.NormalizeTextRequest.SerializeToString,
             cosyvoice__pb2.NormalizeTextResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def ExtractSpeakerFeatures(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/cosyvoice.CosyVoiceService/ExtractSpeakerFeatures',
+            cosyvoice__pb2.ExtractSpeakerFeaturesRequest.SerializeToString,
+            cosyvoice__pb2.ExtractSpeakerFeaturesResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
@@ -151,22 +164,5 @@ class CosyVoiceService(object):
         return grpc.experimental.unary_unary(request, target, '/cosyvoice.CosyVoiceService/Token2Wav',
             cosyvoice__pb2.Token2WavRequest.SerializeToString,
             cosyvoice__pb2.Token2WavResponse.FromString,
-            options, channel_credentials,
-            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
-
-    @staticmethod
-    def ExtractSpeakerFeatures(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/cosyvoice.CosyVoiceService/ExtractSpeakerFeatures',
-            cosyvoice__pb2.ExtractSpeakerFeaturesRequest.SerializeToString,
-            cosyvoice__pb2.ExtractSpeakerFeaturesResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
