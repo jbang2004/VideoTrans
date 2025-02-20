@@ -20,7 +20,7 @@ message TextSegment {
 // 每段 TTS tokens 及其段 uuid
 message TTSOneSegment {
   string uuid = 1;          // 分段的uuid
-  repeated int32 tokens = 2; // 该段对应的TTS tokens
+  repeated int64 tokens = 2; // 该段对应的TTS tokens
 }
 
 // ========== Features: 在RPC中传递的核心对象 ==========
@@ -53,7 +53,7 @@ message NormalizeTextResponse {
 
 // 2) ExtractSpeakerFeatures
 message ExtractSpeakerFeaturesRequest {
-  bytes audio = 1;       // int16格式音频
+  bytes audio = 1;       // 音频数据
   int32 sample_rate = 2; // 采样率
 }
 

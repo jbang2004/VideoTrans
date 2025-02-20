@@ -26,10 +26,10 @@ class CosyVoiceClient:
     def extract_speaker_features(self, audio_tensor: torch.Tensor, sr=24000):
         """提取说话人特征"""
         try:
+            # 保持原始格式，直接转换为numpy数组并转为二进制
             audio_np = audio_tensor.squeeze(0).cpu().numpy()
-            audio_int16 = (audio_np * (2**15)).astype(np.int16).tobytes()
             req = cosyvoice_pb2.ExtractSpeakerFeaturesRequest(
-                audio=audio_int16,
+                audio=audio_np.tobytes(),
                 sample_rate=sr
             )
             resp = self.stub.ExtractSpeakerFeatures(req)
