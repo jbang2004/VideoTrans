@@ -3,6 +3,7 @@
 import logging
 import asyncio
 import numpy as np
+from typing import List
 from services.cosyvoice.client import CosyVoiceClient
 from utils import concurrency
 
@@ -12,9 +13,21 @@ class AudioGenerator:
         self.sample_rate = sample_rate
         self.logger = logging.getLogger(__name__)
 
-    async def vocal_audio_maker(self, sentences):
+    async def vocal_audio_maker(self, sentences: List):
+        """
+        并发生成音频
+        """
         tasks = []
         for s in sentences:
+            if 'uuid' not in s.model_input:
+                self.logger.warning("句子缺少UUID，无法生成音频")
+                continue
+            
+            uuid = s.model_input.get('uuid')
+            if not uuid:
+                self.logger.warning("句子的UUID为空，无法生成音频")
+                continue
+
             tasks.append(self._generate_single_async(s))
 
         try:
@@ -38,16 +51,15 @@ class AudioGenerator:
 
     def _generate_audio_single(self, sentence):
         """
-        直接使用 'tts_tokens_features' 来 token2wav
+        使用UUID从服务端获取音频
         """
-        if 'tts_tokens_features' not in sentence.model_input:
-            self.logger.warning("没有 tts_tokens_features，无法合成音频")
+        uuid = sentence.model_input.get('uuid')
+        if not uuid:
+            self.logger.warning("没有UUID，无法生成音频")
             return np.zeros(0, dtype=np.float32)
 
-        model_input = sentence.model_input['tts_tokens_features']
         speed = getattr(sentence, 'speed', 1.0) or 1.0
-
-        audio_np, dur_sec = self.cosyvoice_client.token2wav(model_input, speed=speed)
+        audio_np, dur_sec = self.cosyvoice_client.token2wav(uuid, speed=speed)
 
         # 首段静音
         if getattr(sentence, 'is_first', False) and getattr(sentence, 'start', 0) > 0:
@@ -66,7 +78,7 @@ class AudioGenerator:
             ])
 
         self.logger.debug(
-            f"音频生成完成 (UUID: {sentence.model_input.get('uuid', 'unknown')}), "
+            f"音频生成完成 (UUID: {uuid}), "
             f"长度={len(audio_np)/self.sample_rate:.2f}s"
         )
         return audio_np

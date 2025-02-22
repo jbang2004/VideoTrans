@@ -36,7 +36,7 @@ Notes:
 ------
 - Some files may have been excluded based on .gitignore rules and Repomix's configuration
 - Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
-- Only files matching these patterns are included: core/*.py, services/cosyvoice/*.py, services/cosyvoice/*.proto
+- Only files matching these patterns are included: core/*.py, services/cosyvoice/*.py, services/cosyvoice/proto/*.proto
 - Files matching patterns in .gitignore are excluded
 - Files matching default ignore patterns are excluded
 
@@ -53,6 +53,9 @@ core/
   tts_token_gener.py
 services/
   cosyvoice/
+    proto/
+      cosyvoice.proto
+    cache.py
     client.py
     service.py
 
@@ -73,6 +76,7 @@ File: core/audio_gener.py
 import logging
 import asyncio
 import numpy as np
+from typing import List
 from services.cosyvoice.client import CosyVoiceClient
 from utils import concurrency
 
@@ -82,9 +86,21 @@ class AudioGenerator:
         self.sample_rate = sample_rate
         self.logger = logging.getLogger(__name__)
 
-    async def vocal_audio_maker(self, sentences):
+    async def vocal_audio_maker(self, sentences: List):
+        """
+        并发生成音频
+        """
         tasks = []
         for s in sentences:
+            if 'uuid' not in s.model_input:
+                self.logger.warning("句子缺少UUID，无法生成音频")
+                continue
+            
+            uuid = s.model_input.get('uuid')
+            if not uuid:
+                self.logger.warning("句子的UUID为空，无法生成音频")
+                continue
+
             tasks.append(self._generate_single_async(s))
 
         try:
@@ -108,16 +124,15 @@ class AudioGenerator:
 
     def _generate_audio_single(self, sentence):
         """
-        直接使用 'tts_tokens_features' 来 token2wav
+        使用UUID从服务端获取音频
         """
-        if 'tts_tokens_features' not in sentence.model_input:
-            self.logger.warning("没有 tts_tokens_features，无法合成音频")
+        uuid = sentence.model_input.get('uuid')
+        if not uuid:
+            self.logger.warning("没有UUID，无法生成音频")
             return np.zeros(0, dtype=np.float32)
 
-        model_input = sentence.model_input['tts_tokens_features']
         speed = getattr(sentence, 'speed', 1.0) or 1.0
-
-        audio_np, dur_sec = self.cosyvoice_client.token2wav(model_input, speed=speed)
+        audio_np, dur_sec = self.cosyvoice_client.token2wav(uuid, speed=speed)
 
         # 首段静音
         if getattr(sentence, 'is_first', False) and getattr(sentence, 'start', 0) > 0:
@@ -136,7 +151,7 @@ class AudioGenerator:
             ])
 
         self.logger.debug(
-            f"音频生成完成 (UUID: {sentence.model_input.get('uuid', 'unknown')}), "
+            f"音频生成完成 (UUID: {uuid}), "
             f"长度={len(audio_np)/self.sample_rate:.2f}s"
         )
         return audio_np
@@ -149,7 +164,7 @@ import asyncio
 import torch
 import numpy as np
 import librosa
-from typing import List
+from typing import List, Dict
 import os
 import uuid
 import soundfile as sf
@@ -162,7 +177,7 @@ class ModelIn:
         self.logger = logging.getLogger(__name__)
         self.semaphore = asyncio.Semaphore(max_concurrent_tasks)
         # 缓存 speaker 特征提取任务，确保同一 speaker 只处理一次
-        self.speaker_cache = {}  # speaker_id -> asyncio.Task
+        self.speaker_cache: Dict[str, asyncio.Task] = {}  # speaker_id -> asyncio.Task
         self.max_val = 0.8
         self.cosy_sample_rate = 24000
 
@@ -184,15 +199,15 @@ class ModelIn:
         speech = np.concatenate([speech, np.zeros(pad_samples, dtype=speech.dtype)])
         return speech
 
-    async def get_speaker_features(self, speaker_id, sentence):
+    async def get_speaker_features(self, speaker_id: str, sentence) -> str:
         """
         异步提取 speaker 特征，并将任务缓存，
-        确保同一 speaker 只处理一次。
+        确保同一 speaker 只处理一次。返回UUID。
         """
         if speaker_id in self.speaker_cache:
             return await self.speaker_cache[speaker_id]
 
-        async def extract_features():
+        async def extract_features() -> str:
             # 获取音频数据
             audio_np = (
                 sentence.audio.squeeze(0).cpu().numpy()
@@ -200,44 +215,48 @@ class ModelIn:
                 else sentence.audio
             )
             postprocessed_audio = self.postprocess(audio_np)
-
-            # 保存音频到本地（阻塞操作放入线程中执行）
-            # save_dir = "debug_audio"
-            # os.makedirs(save_dir, exist_ok=True)
-            # file_id = str(uuid.uuid4())[:8]
-            # audio_path = os.path.join(save_dir, f"{file_id}_speaker{speaker_id}.wav")
-            # await asyncio.to_thread(sf.write, audio_path, processed, 16000)
-
             postprocessed_tensor = torch.from_numpy(postprocessed_audio).unsqueeze(0)
-            # 提取 speaker 特征（阻塞操作放入线程中执行）
-            speaker_feats = await asyncio.to_thread(self.cosyvoice_client.extract_speaker_features, postprocessed_tensor)
-            return speaker_feats
+
+            # 获取UUID并提取特征
+            uuid = await asyncio.to_thread(
+                self.cosyvoice_client.normalize_text,
+                ""  # 空文本，只用于获取UUID
+            )
+            success = await asyncio.to_thread(
+                self.cosyvoice_client.extract_speaker_features,
+                uuid,
+                postprocessed_tensor,
+                self.cosy_sample_rate
+            )
+            if not success:
+                raise Exception("提取说话人特征失败")
+            return uuid
 
         task = asyncio.create_task(extract_features())
         self.speaker_cache[speaker_id] = task
         return await task
 
-    async def _process_one_sentence_async(self, sentence, reuse_speaker, reuse_uuid):
+    async def _process_one_sentence_async(self, sentence, reuse_speaker: bool, reuse_uuid: bool):
         async with self.semaphore:
             speaker_id = getattr(sentence, 'speaker_id', None)
+            
+            # 处理UUID
+            if not reuse_uuid:
+                # 获取新的UUID
+                uuid = await asyncio.to_thread(
+                    self.cosyvoice_client.normalize_text,
+                    sentence.trans_text or ""
+                )
+                sentence.model_input['uuid'] = uuid
+            
             # speaker 特征提取
             if speaker_id is not None and not reuse_speaker:
-                speaker_feats = await self.get_speaker_features(speaker_id, sentence)
-                sentence.model_input['speaker_features'] = speaker_feats
-            # 若 reuse_speaker 为 True 或 speaker_id 为 None，则跳过提取
-
-            # uuid 处理
-            if not reuse_uuid:
-                sentence.model_input['uuid'] = ""
-
-            # 文本特征提取
-            if 'text_features' not in sentence.model_input or reuse_uuid:
-                text_feats = await asyncio.to_thread(self.cosyvoice_client.normalize_text, sentence.trans_text or "")
-                sentence.model_input['text_features'] = text_feats
+                speaker_uuid = await self.get_speaker_features(speaker_id, sentence)
+                sentence.model_input['speaker_uuid'] = speaker_uuid
 
             return sentence
 
-    async def modelin_maker(self, sentences: List, reuse_speaker=False, reuse_uuid=False, batch_size=3):
+    async def modelin_maker(self, sentences: List, reuse_speaker: bool = False, reuse_uuid: bool = False, batch_size: int = 3):
         """
         对一批 sentence 进行文本与 speaker 特征提取，
         并按 batch_size 分批 yield 结果。
@@ -276,7 +295,7 @@ File: core/tts_token_gener.py
 
 import logging
 import asyncio
-import uuid
+from typing import List
 from services.cosyvoice.client import CosyVoiceClient
 from utils import concurrency
 
@@ -285,43 +304,43 @@ class TTSTokenGenerator:
         self.cosyvoice_client = cosyvoice_client
         self.logger = logging.getLogger(__name__)
 
-    async def tts_token_maker(self, sentences, reuse_uuid=False):
+    async def tts_token_maker(self, sentences: List, reuse_uuid: bool = False):
         """
-        并发生成TTS tokens, 直接存到 sentence.model_input['tts_tokens_features']
+        并发生成TTS tokens，并存储预估时长
         """
         if not sentences:
             return []
 
         tasks = []
         for s in sentences:
-            if reuse_uuid and 'uuid' in s.model_input and s.model_input['uuid']:
-                u = s.model_input['uuid']
-            else:
-                u = str(uuid.uuid1())
-                s.model_input['uuid'] = u
+            if not reuse_uuid and 'uuid' not in s.model_input:
+                self.logger.warning("句子缺少UUID，无法生成TTS tokens")
+                continue
+            
+            uuid = s.model_input.get('uuid')
+            if not uuid:
+                self.logger.warning("句子的UUID为空，无法生成TTS tokens")
+                continue
 
-            tasks.append(asyncio.create_task(self._generate_tts_single_async(s, u)))
+            tasks.append(asyncio.create_task(self._generate_tts_single_async(s, uuid)))
 
         processed = await asyncio.gather(*tasks)
         return processed
 
-    async def _generate_tts_single_async(self, sentence, main_uuid):
+    async def _generate_tts_single_async(self, sentence, uuid: str):
         return await concurrency.run_sync(
-            self._generate_tts_single, sentence, main_uuid
+            self._generate_tts_single, sentence, uuid
         )
 
-    def _generate_tts_single(self, sentence, main_uuid):
-        text_f = sentence.model_input.get('text_features')
-        speaker_f = sentence.model_input.get('speaker_features')
+    def _generate_tts_single(self, sentence, uuid: str):
+        # 生成TTS tokens并获取时长
+        duration_ms, success = self.cosyvoice_client.generate_tts_tokens(uuid)
+        if not success:
+            self.logger.error(f"生成TTS tokens失败 (UUID={uuid})")
+            return sentence
 
-        merged_f = self._merge_features(text_f, speaker_f)
-        out_features, duration_ms = self.cosyvoice_client.generate_tts_tokens(merged_f, main_uuid)
         sentence.duration = duration_ms
-
-        # 直接存储到 'tts_tokens_features'
-        sentence.model_input['tts_tokens_features'] = out_features
-
-        self.logger.debug(f"[TTS Token] (UUID={main_uuid}) 生成完毕 => 估计时长 {duration_ms}ms")
+        self.logger.debug(f"[TTS Token] (UUID={uuid}) 生成完毕 => 估计时长 {duration_ms}ms")
         return sentence
 
     def _merge_features(self, text_f, speaker_f):
@@ -343,12 +362,172 @@ class TTSTokenGenerator:
         return merged
 
 ================
+File: services/cosyvoice/proto/cosyvoice.proto
+================
+syntax = "proto3";
+
+package cosyvoice;
+
+// ========== Service 定义 ==========
+service CosyVoiceService {
+  rpc NormalizeText (NormalizeTextRequest) returns (NormalizeTextResponse);
+  rpc ExtractSpeakerFeatures (ExtractSpeakerFeaturesRequest) returns (ExtractSpeakerFeaturesResponse);
+  rpc GenerateTTSTokens (GenerateTTSTokensRequest) returns (GenerateTTSTokensResponse);
+  rpc Token2Wav (Token2WavRequest) returns (Token2WavResponse);
+  rpc Cleanup (CleanupRequest) returns (CleanupResponse);
+}
+
+// ========== RPC 请求与响应 ==========
+
+// 1) NormalizeText
+message NormalizeTextRequest {
+  string text = 1;
+}
+
+message NormalizeTextResponse {
+  string uuid = 1;      // 返回生成的UUID
+}
+
+// 2) ExtractSpeakerFeatures
+message ExtractSpeakerFeaturesRequest {
+  string uuid = 1;      // 目标UUID
+  bytes audio = 2;      // 音频数据
+  int32 sample_rate = 3;
+}
+
+message ExtractSpeakerFeaturesResponse {
+  bool success = 1;
+}
+
+// 3) GenerateTTSTokens
+message GenerateTTSTokensRequest {
+  string uuid = 1;      // 目标UUID
+}
+
+message GenerateTTSTokensResponse {
+  int32 duration_ms = 1;
+  bool success = 2;
+}
+
+// 4) Token2Wav
+message Token2WavRequest {
+  string uuid = 1;      // 目标UUID
+  float speed = 2;
+}
+
+message Token2WavResponse {
+  bytes audio = 1;
+  float duration_sec = 2;
+}
+
+// 5) Cleanup
+message CleanupRequest {
+  string uuid = 1;      // 要清理的UUID
+}
+
+message CleanupResponse {
+  bool success = 1;
+}
+
+================
+File: services/cosyvoice/cache.py
+================
+import threading
+from typing import Dict, Optional, List
+import torch
+
+class FeatureData:
+    """服务端特征数据存储结构，直接存储模型输出的数据，保持原有维度"""
+    def __init__(self):
+        # 文本相关
+        self.normalized_texts: List[str] = []
+        self.text_tokens: List[torch.Tensor] = []  # [batch_size, seq_len]
+        
+        # 说话人相关 - 保持原有维度
+        self.embedding: Optional[torch.Tensor] = None  # [1, embedding_dim]
+        self.prompt_speech_feat: Optional[torch.Tensor] = None  # [1, time, 80]
+        self.prompt_speech_feat_len: int = 0
+        self.prompt_speech_token: Optional[torch.Tensor] = None  # [1, seq_len]
+        self.prompt_speech_token_len: int = 0
+        
+        # TTS tokens
+        self.tts_tokens: List[List[int]] = []  # 直接存储模型生成的token列表
+        self.tts_segment_uuids: List[str] = []
+
+class FeaturesCache:
+    def __init__(self):
+        self._cache: Dict[str, FeatureData] = {}
+        self._lock = threading.Lock()
+    
+    def get(self, uuid: str) -> Optional[FeatureData]:
+        """获取特征数据"""
+        with self._lock:
+            return self._cache.get(uuid)
+    
+    def set(self, uuid: str, data: FeatureData) -> None:
+        """设置特征数据"""
+        with self._lock:
+            self._cache[uuid] = data
+    
+    def update_text_features(self, uuid: str, normalized_texts: List[str], text_tokens: List[torch.Tensor]) -> bool:
+        """更新文本特征，text_tokens应该已经是正确的维度 [batch_size, seq_len]"""
+        with self._lock:
+            if uuid not in self._cache:
+                data = FeatureData()
+                data.normalized_texts = normalized_texts
+                data.text_tokens = text_tokens
+                self._cache[uuid] = data
+            else:
+                self._cache[uuid].normalized_texts = normalized_texts
+                self._cache[uuid].text_tokens = text_tokens
+            return True
+    
+    def update_speaker_features(self, uuid: str, 
+                              embedding: torch.Tensor,  # [1, embedding_dim]
+                              prompt_feat: torch.Tensor,  # [1, time, 80]
+                              prompt_feat_len: int,
+                              prompt_token: torch.Tensor,  # [1, seq_len]
+                              prompt_token_len: int) -> bool:
+        """更新说话人特征，保持输入tensor的原有维度"""
+        with self._lock:
+            if uuid not in self._cache:
+                return False
+            data = self._cache[uuid]
+            data.embedding = embedding
+            data.prompt_speech_feat = prompt_feat
+            data.prompt_speech_feat_len = prompt_feat_len
+            data.prompt_speech_token = prompt_token
+            data.prompt_speech_token_len = prompt_token_len
+            return True
+    
+    def update_tts_tokens(self, uuid: str, tokens: List[List[int]], segment_uuids: List[str]) -> bool:
+        """更新TTS tokens"""
+        with self._lock:
+            if uuid not in self._cache:
+                return False
+            data = self._cache[uuid]
+            data.tts_tokens = tokens
+            data.tts_segment_uuids = segment_uuids
+            return True
+    
+    def delete(self, uuid: str) -> None:
+        """删除特征数据"""
+        with self._lock:
+            self._cache.pop(uuid, None)
+    
+    def exists(self, uuid: str) -> bool:
+        """检查UUID是否存在"""
+        with self._lock:
+            return uuid in self._cache
+
+================
 File: services/cosyvoice/client.py
 ================
 import grpc
 import numpy as np
 import torch
 import logging
+from typing import Tuple, Optional
 
 from .proto import cosyvoice_pb2
 from .proto import cosyvoice_pb2_grpc
@@ -360,50 +539,70 @@ class CosyVoiceClient:
         self.channel = grpc.insecure_channel(address)
         self.stub = cosyvoice_pb2_grpc.CosyVoiceServiceStub(self.channel)
 
-    def normalize_text(self, text: str):
-        """文本标准化"""
+    def normalize_text(self, text: str) -> str:
+        """
+        文本标准化，返回UUID
+        """
         try:
             req = cosyvoice_pb2.NormalizeTextRequest(text=text)
             resp = self.stub.NormalizeText(req)
-            return resp.features
+            return resp.uuid
         except Exception as e:
             logger.error(f"NormalizeText调用失败: {e}")
             raise
 
-    def extract_speaker_features(self, audio_tensor: torch.Tensor, sr=24000):
-        """提取说话人特征"""
+    def extract_speaker_features(self, uuid: str, audio_tensor: torch.Tensor, sr: int = 24000) -> bool:
+        """
+        提取说话人特征并更新服务端缓存
+        """
         try:
-            # 保持原始格式，直接转换为numpy数组并转为二进制
             audio_np = audio_tensor.squeeze(0).cpu().numpy()
             req = cosyvoice_pb2.ExtractSpeakerFeaturesRequest(
+                uuid=uuid,
                 audio=audio_np.tobytes(),
                 sample_rate=sr
             )
             resp = self.stub.ExtractSpeakerFeatures(req)
-            return resp.features
+            return resp.success
         except Exception as e:
             logger.error(f"ExtractSpeakerFeatures调用失败: {e}")
             raise
 
-    def generate_tts_tokens(self, features, uuid=""):
-        """生成TTS tokens(分段)"""
+    def generate_tts_tokens(self, uuid: str) -> Tuple[int, bool]:
+        """
+        生成TTS tokens并返回预估时长
+        """
         try:
-            req = cosyvoice_pb2.GenerateTTSTokensRequest(features=features, uuid=uuid)
+            req = cosyvoice_pb2.GenerateTTSTokensRequest(uuid=uuid)
             resp = self.stub.GenerateTTSTokens(req)
-            return resp.features, resp.duration_ms
+            return resp.duration_ms, resp.success
         except Exception as e:
             logger.error(f"GenerateTTSTokens调用失败: {e}")
             raise
 
-    def token2wav(self, features, speed=1.0):
-        """tokens 转音频"""
+    def token2wav(self, uuid: str, speed: float = 1.0) -> Tuple[np.ndarray, float]:
+        """
+        将TTS tokens转换为音频
+        """
         try:
-            req = cosyvoice_pb2.Token2WavRequest(features=features, speed=speed)
+            req = cosyvoice_pb2.Token2WavRequest(uuid=uuid, speed=speed)
             resp = self.stub.Token2Wav(req)
             audio_np = np.frombuffer(resp.audio, dtype=np.int16).astype(np.float32) / (2**15)
             return audio_np, resp.duration_sec
         except Exception as e:
             logger.error(f"Token2Wav调用失败: {e}")
+            raise
+
+    def cleanup(self, uuid: str) -> bool:
+        """
+        清理服务端缓存
+        """
+        try:
+            req = cosyvoice_pb2.CleanupRequest(uuid=uuid)
+            resp = self.stub.Cleanup(req)
+            return resp.success
+        except Exception as e:
+            logger.error(f"Cleanup调用失败: {e}")
             raise
 
 ================
@@ -416,10 +615,11 @@ import numpy as np
 import torch
 import grpc
 from concurrent import futures
-import threading  # 导入 threading 模块
+import uuid
 
 from .proto import cosyvoice_pb2
 from .proto import cosyvoice_pb2_grpc
+from .cache import FeaturesCache, FeatureData
 
 # 假设我们使用 CosyVoice2 作为模型
 from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
@@ -433,201 +633,190 @@ class CosyVoiceServiceServicer(cosyvoice_pb2_grpc.CosyVoiceServiceServicer):
             self.frontend = self.cosyvoice.frontend
             self.model = self.cosyvoice.model
             self.sample_rate = self.cosyvoice.sample_rate
-            self.lock = threading.Lock()  # 创建锁
+            self.cache = FeaturesCache()
             logger.info('CosyVoice服务初始化成功')
         except Exception as e:
             logger.error(f'CosyVoice服务初始化失败: {e}')
             raise
 
-    # ========== 1) NormalizeText ==========
+    def _generate_uuid(self) -> str:
+        """生成唯一的UUID"""
+        return str(uuid.uuid4())
+
     def NormalizeText(self, request, context):
         """
-        执行文本标准化
+        文本标准化，生成特征数据并缓存
         """
         try:
             text = request.text or ""
             normalized_texts = self.frontend.text_normalize(text, split=True, text_frontend=True)
-
-            text_features_msg = cosyvoice_pb2.Features()
+            text_tokens = []
+            
+            # 提取文本tokens，保持原有维度
             for seg in normalized_texts:
-                text_features_msg.normalized_text_segments.append(seg)
-                # 用模型的分词器抽取 tokens
-                tokens, token_len = self.frontend._extract_text_token(seg)
-                # 这里每段 tokens 存到一个 TextSegment
-                text_seg_msg = text_features_msg.text_segments.add()
-                text_seg_msg.tokens.extend(tokens.reshape(-1).tolist())
+                tokens, _ = self.frontend._extract_text_token(seg)  # 已经是 [batch_size, seq_len]
+                text_tokens.append(tokens)
 
-            return cosyvoice_pb2.NormalizeTextResponse(features=text_features_msg)
+            # 生成UUID并缓存特征
+            new_uuid = self._generate_uuid()
+            self.cache.update_text_features(new_uuid, normalized_texts, text_tokens)
+
+            return cosyvoice_pb2.NormalizeTextResponse(uuid=new_uuid)
         except Exception as e:
             logger.error(f"NormalizeText失败: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return cosyvoice_pb2.NormalizeTextResponse()
 
-    # ========== 2) ExtractSpeakerFeatures ==========
     def ExtractSpeakerFeatures(self, request, context):
         """
-        接收音频并提取说话人相关的特征 (embedding、prompt_speech_feat、prompt_speech_token 等)
+        提取说话人特征并更新缓存
         """
         try:
-            # 创建一个可写的数组副本
+            uuid = request.uuid
+            if not self.cache.exists(uuid):
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details(f"UUID {uuid} 不存在")
+                return cosyvoice_pb2.ExtractSpeakerFeaturesResponse()
+
+            # 处理音频数据
             audio_np = np.frombuffer(request.audio, dtype=np.float32).copy()
-            audio = torch.from_numpy(audio_np).unsqueeze(0)
+            audio = torch.from_numpy(audio_np).unsqueeze(0)  # [1, T]
 
-            # 示例: zero-shot / cross-lingual 提取
-            result = self.frontend.frontend_cross_lingual("", audio, self.sample_rate)
-
-            speaker_features_msg = cosyvoice_pb2.Features(
-                embedding=result['llm_embedding'].reshape(-1).tolist(),
-                prompt_speech_feat=result['prompt_speech_feat'].reshape(-1).tolist(),
-                prompt_speech_feat_len=int(result['prompt_speech_feat_len'].item()),
-                prompt_speech_token=result['flow_prompt_speech_token'].reshape(-1).tolist(),
-                prompt_speech_token_len=int(result['flow_prompt_speech_token_len'].item())
+            # 提取特征 - 直接使用模型输出的tensor，维度已经正确
+            result = self.frontend.frontend_cross_lingual("", audio, request.sample_rate)
+            
+            # 更新缓存 - 直接存储tensor，维度已经正确
+            success = self.cache.update_speaker_features(
+                uuid,
+                embedding=result['llm_embedding'],  # [1, embedding_dim]
+                prompt_feat=result['prompt_speech_feat'],  # [1, time, 80]
+                prompt_feat_len=int(result['prompt_speech_feat_len'].item()),
+                prompt_token=result['flow_prompt_speech_token'],  # [1, seq_len]
+                prompt_token_len=int(result['flow_prompt_speech_token_len'].item())
             )
-            return cosyvoice_pb2.ExtractSpeakerFeaturesResponse(features=speaker_features_msg)
+
+            if not success:
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("更新缓存失败")
+                return cosyvoice_pb2.ExtractSpeakerFeaturesResponse()
+
+            return cosyvoice_pb2.ExtractSpeakerFeaturesResponse(success=True)
         except Exception as e:
             logger.error(f"ExtractSpeakerFeatures失败: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return cosyvoice_pb2.ExtractSpeakerFeaturesResponse()
 
-    # ========== 3) GenerateTTSTokens (分段) ==========
     def GenerateTTSTokens(self, request, context):
         """
-        将输入文本特征转换为TTS tokens，并估算时长
+        生成TTS tokens并更新缓存
         """
         try:
-            features_in = request.features
-            base_uuid = request.uuid or "no_uuid"
-            
-            # 1. 准备输出特征，复制输入的speaker相关特征
-            tts_out_features = cosyvoice_pb2.Features()
-            tts_out_features.embedding.extend(features_in.embedding)
-            tts_out_features.prompt_speech_feat.extend(features_in.prompt_speech_feat)
-            tts_out_features.prompt_speech_feat_len = features_in.prompt_speech_feat_len
-            tts_out_features.prompt_speech_token.extend(features_in.prompt_speech_token)
-            tts_out_features.prompt_speech_token_len = features_in.prompt_speech_token_len
-
-            # 2. 准备模型输入
-            embedding_tensor = torch.tensor(features_in.embedding, dtype=torch.float32).unsqueeze(0)
-            prompt_token_tensor = torch.tensor(features_in.prompt_speech_token, dtype=torch.int32).unsqueeze(0)
+            uuid = request.uuid
+            features = self.cache.get(uuid)
+            if not features:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details(f"UUID {uuid} 不存在")
+                return cosyvoice_pb2.GenerateTTSTokensResponse()
 
             total_duration_ms = 0
-            # 3. 处理每段文本
-            for i, text_seg in enumerate(features_in.text_segments):
-                if not text_seg.tokens:
-                    continue
+            tts_tokens = []
+            segment_uuids = []
 
-                seg_uuid = f"{base_uuid}_seg_{i}"
-                text_tensor = torch.tensor(text_seg.tokens, dtype=torch.int32).unsqueeze(0)
+            # 处理每段文本
+            for i, text_tokens in enumerate(features.text_tokens):
+                seg_uuid = f"{uuid}_seg_{i}"
+                segment_uuids.append(seg_uuid)
 
                 # 初始化LLM状态
-                with self.lock:
-                    self.model.tts_speech_token_dict[seg_uuid] = []
-                    self.model.llm_end_dict[seg_uuid] = False
+                self.model.tts_speech_token_dict[seg_uuid] = []
+                self.model.llm_end_dict[seg_uuid] = False
 
                 try:
-                    # 生成TTS tokens
+                    # 生成TTS tokens，使用默认空特征值替换不存在的特征
                     self.model.llm_job(
-                        text=text_tensor,
-                        prompt_text=torch.zeros((1, 0), dtype=torch.int32),
-                        llm_prompt_speech_token=prompt_token_tensor,
-                        llm_embedding=embedding_tensor,
+                        text=text_tokens,
+                        prompt_text=torch.zeros(1, 0, dtype=torch.int32),
+                        llm_prompt_speech_token=features.prompt_speech_token if features.prompt_speech_token is not None 
+                            else torch.zeros(1, 0, dtype=torch.int32),
+                        llm_embedding=features.embedding if features.embedding is not None 
+                            else torch.zeros(0, 192),
                         uuid=seg_uuid
                     )
 
-                    # 获取生成的tokens并添加到输出
-                    tts_tokens = self.model.tts_speech_token_dict[seg_uuid]
-                    
-                    tts_seg_msg = tts_out_features.tts_segments.add()
-                    tts_seg_msg.uuid = seg_uuid
-                    tts_seg_msg.tokens.extend(tts_tokens)  # 直接使用list
+                    # 获取生成的tokens
+                    seg_tokens = self.model.tts_speech_token_dict[seg_uuid]
+                    tts_tokens.append(seg_tokens)
 
-                    # 估算时长（每25个token约1秒）
-                    total_duration_ms += len(tts_tokens) / 25.0 * 1000
+                    # 估算时长
+                    total_duration_ms += len(seg_tokens) / 25.0 * 1000
 
                 finally:
                     # 清理LLM状态
-                    with self.lock:
-                        self.model.tts_speech_token_dict.pop(seg_uuid, None)
-                        self.model.llm_end_dict.pop(seg_uuid, None)
+                    self.model.tts_speech_token_dict.pop(seg_uuid, None)
+                    self.model.llm_end_dict.pop(seg_uuid, None)
+
+            # 更新缓存
+            success = self.cache.update_tts_tokens(uuid, tts_tokens, segment_uuids)
+            if not success:
+                context.set_code(grpc.StatusCode.INTERNAL)
+                context.set_details("更新缓存失败")
+                return cosyvoice_pb2.GenerateTTSTokensResponse()
 
             return cosyvoice_pb2.GenerateTTSTokensResponse(
-                features=tts_out_features,
-                duration_ms=int(total_duration_ms)
+                duration_ms=int(total_duration_ms),
+                success=True
             )
 
         except Exception as e:
-            logger.error(f"GenerateTTSTokens失败: {e}", exc_info=True)
+            logger.error(f"GenerateTTSTokens失败: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return cosyvoice_pb2.GenerateTTSTokensResponse()
 
-    # ========== 4) Token2Wav (把分段 tokens 拼起来一次合成) ==========
     def Token2Wav(self, request, context):
         """
-        将 GenerateTTSTokens 里返回的多段 tokens (features.tts_segments) 分段调用 token2wav，
-        使用每个seg中的uuid（如果存在）作为token2wav的uuid，然后将各段生成的音频合并。
+        将缓存中的TTS tokens转换为音频
         """
         try:
-            features = request.features
+            uuid = request.uuid
+            features = self.cache.get(uuid)
+            if not features:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details(f"UUID {uuid} 不存在")
+                return cosyvoice_pb2.Token2WavResponse()
+
             speed = request.speed
-
-            # 转换 embedding
-            if len(features.embedding) > 0:
-                embedding_tensor = torch.tensor(features.embedding, dtype=torch.float32).unsqueeze(0)
-            else:
-                embedding_tensor = torch.zeros((1, 0), dtype=torch.float32)
-                logger.warning("Token2Wav: embedding 为空, 使用零向量代替.")
-
-            # 转换 prompt_speech_feat
-            if len(features.prompt_speech_feat) > 0:
-                feat_tensor = torch.tensor(features.prompt_speech_feat, dtype=torch.float32).reshape(1, -1, 80)
-            else:
-                feat_tensor = torch.zeros((1, 0, 80), dtype=torch.float32)
-
-            prompt_token_tensor = torch.tensor(features.prompt_speech_token, dtype=torch.int32).unsqueeze(0)
-
             audio_pieces = []
             total_duration_sec = 0.0
 
-            # 针对每个tts segment单独生成音频
-            for seg in features.tts_segments:
-                tokens = seg.tokens
-                if not tokens:
+            # 处理每个TTS segment
+            for seg_tokens, seg_uuid in zip(features.tts_tokens, features.tts_segment_uuids):
+                if not seg_tokens:
                     continue
 
-                # 使用 seg 中的 uuid，如果为空则采用默认值
-                seg_uuid = seg.uuid if seg.uuid else "token2wav_uuid"
-
-                # 直接将tokens转为tensor
-                token_tensor = torch.tensor(tokens, dtype=torch.int64).unsqueeze(0)
-
-                # 设置缓存，保证线程安全
-                with self.model.lock:
-                    self.model.hift_cache_dict[seg_uuid] = None
+                # 设置缓存
+                self.model.hift_cache_dict[seg_uuid] = None
                 try:
+                    # 使用默认空特征值替换不存在的特征
                     seg_audio_out = self.model.token2wav(
-                        token=token_tensor,
-                        prompt_token=prompt_token_tensor,
-                        prompt_feat=feat_tensor,
-                        embedding=embedding_tensor,
+                        token=torch.tensor(seg_tokens).unsqueeze(0),
+                        prompt_token=features.prompt_speech_token if features.prompt_speech_token is not None 
+                            else torch.zeros(1, 0, dtype=torch.int32),
+                        prompt_feat=features.prompt_speech_feat if features.prompt_speech_feat is not None 
+                            else torch.zeros(1, 0, 80),
+                        embedding=features.embedding if features.embedding is not None 
+                            else torch.zeros(0),
                         uuid=seg_uuid,
                         token_offset=0,
                         finalize=True,
                         speed=speed
                     )
-                except Exception as e:
-                    error_msg = f"Token2Wav合成失败 (UUID: {seg_uuid}): {str(e)}"
-                    logger.error(error_msg, exc_info=True)
-                    context.set_code(grpc.StatusCode.INTERNAL)
-                    context.set_details(error_msg)
-                    return cosyvoice_pb2.Token2WavResponse()
                 finally:
-                    with self.model.lock:
-                        self.model.hift_cache_dict.pop(seg_uuid, None)
+                    self.model.hift_cache_dict.pop(seg_uuid, None)
 
-                # 处理生成的音频：转换为 numpy 数组、去除无用维度，如果多通道取均值
+                # 处理音频
                 seg_audio = seg_audio_out.cpu().numpy().squeeze()
                 if seg_audio.ndim > 1:
                     seg_audio = seg_audio.mean(axis=0)
@@ -635,10 +824,10 @@ class CosyVoiceServiceServicer(cosyvoice_pb2_grpc.CosyVoiceServiceServicer):
                 total_duration_sec += len(seg_audio) / self.sample_rate
 
             if not audio_pieces:
-                logger.warning("Token2Wav: 未生成任何音频，可能缺少有效 tokens")
+                logger.warning(f"Token2Wav: UUID {uuid} 未生成任何音频")
                 return cosyvoice_pb2.Token2WavResponse()
 
-            # 合并所有段音频
+            # 合并音频
             final_audio = np.concatenate(audio_pieces)
             audio_int16 = (final_audio * (2**15)).astype(np.int16).tobytes()
 
@@ -646,12 +835,26 @@ class CosyVoiceServiceServicer(cosyvoice_pb2_grpc.CosyVoiceServiceServicer):
                 audio=audio_int16,
                 duration_sec=total_duration_sec
             )
+
         except Exception as e:
             logger.error(f"Token2Wav失败: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return cosyvoice_pb2.Token2WavResponse()
 
+    def Cleanup(self, request, context):
+        """
+        清理缓存中的特征数据
+        """
+        try:
+            uuid = request.uuid
+            self.cache.delete(uuid)
+            return cosyvoice_pb2.CleanupResponse(success=True)
+        except Exception as e:
+            logger.error(f"Cleanup失败: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return cosyvoice_pb2.CleanupResponse(success=False)
 
 def serve(args):
     host = getattr(args, 'host', '0.0.0.0')
