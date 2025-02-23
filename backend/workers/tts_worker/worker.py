@@ -2,8 +2,8 @@ import logging
 from typing import List, Any
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
-from core.tts_token_gener import TTSTokenGenerator
-from models.model_manager import ModelManager
+from .tts_token_gener import TTSTokenGenerator
+from services.cosyvoice.client import CosyVoiceClient
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +17,10 @@ class TTSTokenWorker:
         self.config = config
         self.logger = logger
         
-        # 获取模型管理器实例
-        model_manager = ModelManager()
-        model_manager.initialize_models(config)
-        
-        # 获取 TTS Token 生成器实例
-        self.tts_token_generator = model_manager.tts_generator
+        # 初始化 CosyVoiceClient
+        cosyvoice_address = f"{config.COSYVOICE_SERVICE_HOST}:{config.COSYVOICE_SERVICE_PORT}"
+        cosyvoice_client = CosyVoiceClient(address=cosyvoice_address)
+        self.tts_token_generator = TTSTokenGenerator(cosyvoice_client=cosyvoice_client)
 
     @worker_decorator(
         input_queue_attr='tts_token_queue',

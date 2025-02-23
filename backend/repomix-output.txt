@@ -46,20 +46,6 @@ Additional Info:
 ================================================================
 Directory Structure
 ================================================================
-core/
-  timeadjust/
-    duration_aligner.py
-  translation/
-    __init__.py
-    deepseek_client.py
-    gemini_client.py
-    glm4_client.py
-    prompt.py
-    translator.py
-  __init__.py
-  audio_gener.py
-  model_in.py
-  tts_token_gener.py
 services/
   cosyvoice/
     proto/
@@ -96,22 +82,33 @@ workers/
     sentence_tools.py
     worker.py
   audio_gen_worker/
+    audio_gener.py
     timestamp_adjuster.py
     worker.py
   duration_worker/
+    duration_aligner.py
     worker.py
   mixer_worker/
     media_mixer.py
     worker.py
   modelin_worker/
+    model_in.py
     worker.py
   segment_worker/
     audio_separator.py
     video_segmenter.py
     worker.py
   translation_worker/
+    translation/
+      __init__.py
+      deepseek_client.py
+      gemini_client.py
+      glm4_client.py
+      prompt.py
+      translator.py
     worker.py
   tts_worker/
+    tts_token_gener.py
     worker.py
 __init__.py
 .cursorignore
@@ -127,863 +124,6 @@ video_translator.py
 ================================================================
 Files
 ================================================================
-
-================
-File: core/timeadjust/duration_aligner.py
-================
-import logging
-
-class DurationAligner:
-    def __init__(self, model_in=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
-        """
-        model_in：生成模型接口，用于更新文本特征  
-        simplifier：简化处理接口（Translator）  
-        tts_token_gener：TTS token 生成接口  
-        max_speed：语速阈值，超过该速率的句子需要进行简化
-        """
-        self.model_in = model_in
-        self.simplifier = simplifier
-        self.tts_token_gener = tts_token_gener
-        self.max_speed = max_speed
-        self.logger = logging.getLogger(__name__)
-
-    async def align_durations(self, sentences):
-        """
-        对整批句子进行时长对齐，并检查是否需要精简（语速过快）。
-        """
-        if not sentences:
-            return
-
-        # 第一次对齐
-        self._align_batch(sentences)
-
-        # 查找语速过快的句子（speed > max_speed）
-        retry_sentences = [s for s in sentences if s.speed > self.max_speed]
-        if retry_sentences:
-            self.logger.info(f"{len(retry_sentences)} 个句子语速过快, 正在精简...")
-            success = await self._retry_sentences_batch(retry_sentences)
-            if success:
-                # 若精简文本成功，再次对齐
-                self._align_batch(sentences)
-            else:
-                self.logger.warning("精简过程失败, 保持原结果")
-
-    def _align_batch(self, sentences):
-        """
-        同批次句子进行时长对齐。
-        """
-        if not sentences:
-            return
-
-        # 计算每句需要调整的时间差
-        for s in sentences:
-            s.diff = s.duration - s.target_duration
-
-        total_diff_to_adjust = sum(s.diff for s in sentences)
-        positive_diff_sum = sum(x.diff for x in sentences if x.diff > 0)
-        negative_diff_sum_abs = sum(abs(x.diff) for x in sentences if x.diff < 0)
-        current_time = sentences[0].start
-
-        for s in sentences:
-            s.adjusted_start = current_time
-            diff = s.diff
-            s.speed = 1.0
-            s.silence_duration = 0.0
-            s.adjusted_duration = s.duration
-
-            if total_diff_to_adjust != 0:
-                if total_diff_to_adjust > 0 and diff > 0:
-                    if positive_diff_sum > 0:
-                        proportion = diff / positive_diff_sum
-                        adjustment = total_diff_to_adjust * proportion
-                        s.adjusted_duration = s.duration - adjustment
-                        s.speed = s.duration / max(s.adjusted_duration, 0.001)
-                elif total_diff_to_adjust < 0 and diff < 0:
-                    if negative_diff_sum_abs > 0:
-                        proportion = abs(diff) / negative_diff_sum_abs
-                        total_needed = abs(total_diff_to_adjust) * proportion
-                        max_slowdown = s.duration * 0.07
-                        slowdown = min(total_needed, max_slowdown)
-                        s.adjusted_duration = s.duration + slowdown
-                        s.speed = s.duration / max(s.adjusted_duration, 0.001)
-                        s.silence_duration = total_needed - slowdown
-                        if s.silence_duration > 0:
-                            s.adjusted_duration += s.silence_duration
-
-            s.diff = s.duration - s.adjusted_duration
-            current_time += s.adjusted_duration
-
-            self.logger.info(
-                f"对齐后: {s.trans_text}, duration: {s.duration}, "
-                f"target_duration: {s.target_duration}, diff: {s.diff}, "
-                f"speed: {s.speed}, silence_duration: {s.silence_duration}"
-            )
-
-    async def _retry_sentences_batch(self, sentences):
-        """
-        对语速过快的句子执行精简 + 更新 TTS token。
-        """
-        try:
-            # 1. 分批对语速过快的句子进行精简
-            async for _ in self.simplifier.simplify_sentences(sentences, target_speed=self.max_speed):
-                pass
-            # 2. 批量更新文本特征（复用 speaker 与 uuid）
-            async for batch in self.model_in.modelin_maker(
-                sentences,
-                reuse_speaker=True,
-                batch_size=3
-            ):
-                # 3. 再生成 token（复用 uuid）
-                updated_batch = await self.tts_token_gener.tts_token_maker(batch)
-            return True
-        except Exception as e:
-            self.logger.error(f"_retry_sentences_batch 出错: {e}")
-            return False
-
-================
-File: core/translation/__init__.py
-================
-# 空文件，用于标识 translation 目录为一个 Python 包
-
-================
-File: core/translation/deepseek_client.py
-================
-# =========================== deepseek_client.py ===========================
-import json
-import logging
-from openai import OpenAI
-from typing import Dict
-from json_repair import loads
-
-# [MODIFIED] 引入统一线程管理
-from utils import concurrency
-
-logger = logging.getLogger(__name__)
-
-class DeepSeekClient:
-    def __init__(self, api_key: str):
-        """初始化 DeepSeek 客户端"""
-        if not api_key:
-            raise ValueError("DeepSeek API key must be provided")
-            
-        self.client = OpenAI(
-            api_key=api_key,
-            base_url="https://api.deepseek.com"
-        )
-        logger.info("DeepSeek 客户端初始化成功")
-
-    async def translate(
-        self,
-        system_prompt: str,
-        user_prompt: str
-    ) -> Dict[str, str]:
-        """
-        直接调用 DeepSeek API，要求返回 JSON 格式的内容。
-        """
-        try:
-            response = await concurrency.run_sync(
-                self.client.chat.completions.create,
-                model="deepseek-chat",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=1.3
-            )
-            result = response.choices[0].message.content
-            logger.info(f"DeepSeek 原文请求内容:\n{user_prompt}")
-            logger.info(f"DeepSeek 原始返回内容 (长度: {len(result)}):\n{result!r}")
-            
-            if not result or not result.strip():
-                logger.error("DeepSeek 返回了空响应")
-                raise ValueError("Empty response from DeepSeek")
-                
-            # 尝试修复和解析 JSON
-            try:
-                parsed_result = loads(result)
-                logger.debug("DeepSeek 请求成功，JSON 解析完成")
-                return parsed_result
-            except Exception as json_error:
-                logger.error(f"JSON 解析失败，原始内容: {result!r}")
-                logger.error(f"JSON 解析错误详情: {str(json_error)}")
-                raise
-            
-        except Exception as e:
-            logger.error(f"DeepSeek 请求失败: {str(e)}")
-            if "503" in str(e):
-                logger.error("连接错误：无法连接到 DeepSeek API，可能是代理或网络问题")
-            raise
-
-================
-File: core/translation/gemini_client.py
-================
-import logging
-from typing import Dict
-
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
-
-from json_repair import loads
-
-# 引入统一线程管理，与 deepseek_client 用法一致
-from utils import concurrency
-
-logger = logging.getLogger(__name__)
-
-class GeminiClient:
-    def __init__(self, api_key: str):
-        """初始化 Gemini 客户端"""
-        if not api_key:
-            raise ValueError("Gemini API key must be provided")
-        # 配置 Gemini
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')  # 或 'gemini-2.0-flash-exp'
-        logger.info("Gemini 客户端初始化成功")
-    
-    async def translate(
-        self,
-        system_prompt: str,
-        user_prompt: str
-    ) -> Dict[str, str]:
-        """
-        直接调用 Gemini API，要求返回 JSON 格式的内容。
-        """
-        try:
-            response = await concurrency.run_sync(
-                self.model.generate_content,
-                [system_prompt, user_prompt],
-                generation_config=GenerationConfig(temperature=0.3)
-            )
-            logger.info(f"Gemini 原文请求内容:\n{user_prompt}")
-            result_text = response.text
-            logger.info(f"Gemini 原始返回内容 (长度: {len(result_text)}):\n{result_text!r}")
-            
-            if not result_text or not result_text.strip():
-                logger.error("Gemini 返回了空响应")
-                raise ValueError("Empty response from Gemini")
-                
-            # 尝试修复和解析 JSON
-            try:
-                parsed_result = loads(result_text)
-                logger.debug("Gemini 请求成功，JSON 解析完成")
-                return parsed_result
-            except Exception as json_error:
-                logger.error(f"JSON 解析失败，原始内容: {result_text!r}")
-                logger.error(f"JSON 解析错误详情: {str(json_error)}")
-                raise
-            
-        except Exception as e:
-            logger.error(f"Gemini 请求失败: {str(e)}")
-            raise
-
-================
-File: core/translation/glm4_client.py
-================
-import json
-import logging
-from zhipuai import ZhipuAI
-from .prompt import GLM4_TRANSLATION_PROMPT, GLM4_SYSTEM_PROMPT
-
-logger = logging.getLogger(__name__)
-
-class GLM4Client:
-    def __init__(self, api_key: str):
-        """初始化 GLM-4 客户端"""
-        if not api_key:
-            raise ValueError("API key must be provided")
-        self.client = ZhipuAI(api_key=api_key)
-        logger.info("GLM-4 客户端初始化成功")
-
-    async def translate(self, texts: dict) -> str:
-        """调用 GLM-4 模型进行翻译，返回 JSON 字符串"""
-        prompt = GLM4_TRANSLATION_PROMPT.format(json_content=json.dumps(texts, ensure_ascii=False, indent=2))
-        try:
-            logger.debug(f"需要翻译的JSON: {json.dumps(texts, ensure_ascii=False, indent=2)}")
-            response = self.client.chat.completions.create(
-                model="glm-4-flash",
-                messages=[
-                    {"role": "system", "content": GLM4_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.3,
-                top_p=0.8
-            )
-            content = response.choices[0].message.content
-            logger.debug(f"翻译结果: {content}")
-            return content
-        except Exception as e:
-            logger.error(f"GLM-4 翻译请求失败: {str(e)}")
-            raise
-
-================
-File: core/translation/prompt.py
-================
-# 支持的语言映射
-LANGUAGE_MAP = {
-    "zh": "中文",
-    "en": "英文",
-    "ja": "日文",
-    "ko": "韩文"
-}
-
-TRANSLATION_USER_PROMPT = """
-**角色设定：**
-- **经历：** 游学四方、博览群书、翻译官、外交官
-- **性格：**严谨、好奇、坦率、睿智、求真、惜墨如金
-- **技能：**精通{target_language}、博古通今、斟字酌句、精确传达
-- **表达方式：** 精炼、简洁、最优化、避免冗余
-**执行规则：**
-1.无论何时，只翻译JSON格式中的value，*严格保持原 JSON 结构与各层级字段key数量完全一致*
-2.value中出现的数字，翻译成*{target_language}数字*，而非阿拉伯数字。
-3.仔细阅读原文，结合上下文，深思熟虑，并将你的思考过程和分析放入 "thinking" 字段中。
-4.确保译文语气、风格、表达的意思与原文保持一致。
-5.将翻译后的JSON文本放入 "output" 字段中。
-
-最终请返回一个JSON对象，结构如下：
-{{
-    "thinking": "...",
-    "output": {{ ... 翻译后的JSON ... }}
-}}
-
-原文JSON如下：
-{json_content}
-"""
-
-TRANSLATION_SYSTEM_PROMPT = """你将扮演久经历练的翻译官，致力于将提供的JSON格式原文翻译成地道的{target_language}。"""
-
-SIMPLIFICATION_USER_PROMPT = """
-**角色设定：**
-- **性格：**严谨克制、精确表达、追求简约
-- **技能：**咬文嚼字、斟字酌句、去芜存菁
-- **表达方式：** 精炼、清晰、最优化、避免冗余
-**执行规则：**
-1.在"thinking" 字段中提醒自己：
--原始文本是什么语言，你的任务不是翻译，而是精简，*切勿改变语言*。
--原始文本中出现的数字，保留当前语言的数字形式，而非阿拉伯数字。
--无论何时，只精简JSON格式中的value，*保持key不变，不要进行合并*。
-2.首先对value内容进行深度分析，进行3种不同层次的精简：
-- "slight": 轻微精简，去除冗余和重复，忠实保持原意。
-- "moderate": 中度精简，进一步去除冗余，用精简的表达取代复杂的表达，保持原意不变。
-- "extreme": 极度精简，保持句子的基本结构和意思不变。
-
-最终请返回一个JSON对象，结构如下：
-{{
-    "thinking": "...",
-    "slight": {{ ... 轻微精简后的JSON ... }},
-    "moderate": {{ ... 中度精简后的JSON ... }},
-    "extreme": {{ ... 极度精简后的JSON ... }}
-}}
-
-原文JSON如下：
-{json_content}
-"""
-
-SIMPLIFICATION_SYSTEM_PROMPT = """你将扮演克制严谨的语言专家，致力于将提供的JSON格式文本进行精简，不要对文本进行翻译。"""
-
-================
-File: core/translation/translator.py
-================
-import asyncio
-import logging
-from typing import Dict, List, AsyncGenerator, Protocol, Optional, TypeVar
-from dataclasses import dataclass
-from .prompt import (
-    TRANSLATION_SYSTEM_PROMPT,
-    TRANSLATION_USER_PROMPT,
-    SIMPLIFICATION_SYSTEM_PROMPT,
-    SIMPLIFICATION_USER_PROMPT,
-    LANGUAGE_MAP
-)
-
-logger = logging.getLogger(__name__)
-
-class TranslationClient(Protocol):
-    async def translate(
-        self,
-        texts: Dict[str, str],
-        system_prompt: str,
-        user_prompt: str
-    ) -> Dict[str, str]:
-        ...
-
-@dataclass
-class BatchConfig:
-    """批处理配置"""
-    initial_size: int = 100
-    min_size: int = 1
-    required_successes: int = 2
-    retry_delay: float = 0.1
-
-T = TypeVar('T')
-
-class Translator:
-    def __init__(self, translation_client: TranslationClient):
-        self.translation_client = translation_client
-        self.logger = logging.getLogger(__name__)
-
-    async def translate(self, texts: Dict[str, str], target_language: str = "zh") -> Dict[str, str]:
-        """执行翻译并返回包含 "thinking" 与 "output" 字段的 JSON"""
-        try:
-            system_prompt = TRANSLATION_SYSTEM_PROMPT.format(
-                target_language=LANGUAGE_MAP.get(target_language, target_language)
-            )
-            user_prompt = TRANSLATION_USER_PROMPT.format(
-                target_language=LANGUAGE_MAP.get(target_language, target_language),
-                json_content=texts
-            )
-            return await self.translation_client.translate(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt
-            )
-        except Exception as e:
-            self.logger.error(f"翻译失败: {str(e)}")
-            raise
-
-    async def simplify(self, texts: Dict[str, str]) -> Dict[str, str]:
-        """执行简化并返回包含 "thinking"、"slight"、"moderate"、"extreme" 字段的 JSON"""
-        try:
-            system_prompt = SIMPLIFICATION_SYSTEM_PROMPT
-            user_prompt = SIMPLIFICATION_USER_PROMPT.format(json_content=texts)
-            return await self.translation_client.translate(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt
-            )
-        except Exception as e:
-            self.logger.error(f"简化失败: {str(e)}")
-            raise
-
-    async def _process_batch(
-        self,
-        items: List[T],
-        process_func: callable,
-        config: BatchConfig,
-        error_handler: Optional[callable] = None,
-        reduce_batch_on_error: bool = True
-    ) -> AsyncGenerator[List[T], None]:
-        if not items:
-            return
-
-        i = 0
-        batch_size = config.initial_size
-        success_count = 0
-
-        while i < len(items):
-            try:
-                batch = items[i:i+batch_size]
-                if not batch:
-                    break
-
-                results = await process_func(batch)
-                if results:
-                    success_count += 1
-                    yield results
-                    i += len(batch)
-                    if reduce_batch_on_error and batch_size < config.initial_size and success_count >= config.required_successes:
-                        self.logger.debug(f"连续成功{success_count}次，恢复到初始批次大小: {config.initial_size}")
-                        batch_size = config.initial_size
-                        success_count = 0
-
-                    if i < len(items):
-                        await asyncio.sleep(config.retry_delay)
-
-            except Exception as e:
-                self.logger.error(f"批处理失败: {str(e)}")
-                if reduce_batch_on_error and batch_size > config.min_size:
-                    batch_size = max(batch_size // 2, config.min_size)
-                    success_count = 0
-                    self.logger.debug(f"出错后减小批次大小到: {batch_size}")
-                    continue
-                else:
-                    if error_handler:
-                        yield error_handler(batch)
-                    i += len(batch)
-
-    async def translate_sentences(
-        self,
-        sentences: List,
-        batch_size: int = 100,
-        target_language: str = "zh"
-    ) -> AsyncGenerator[List, None]:
-        """
-        批量翻译处理，将每个句子的原始文本翻译后赋值给 sentence.trans_text。
-        """
-        if not sentences:
-            self.logger.warning("收到空的句子列表")
-            return
-
-        config = BatchConfig(initial_size=batch_size)
-
-        async def process_batch(batch: List) -> Optional[List]:
-            texts = {str(j): s.raw_text for j, s in enumerate(batch)}
-            self.logger.debug(f"翻译批次: {len(texts)}条文本")
-            translated = await self.translate(texts, target_language)
-            if "output" not in translated:
-                self.logger.error("翻译结果中缺少 output 字段")
-                return None
-            translated_texts = translated["output"]
-            if len(translated_texts) == len(texts):
-                for j, sentence in enumerate(batch):
-                    sentence.trans_text = translated_texts[str(j)]
-                return batch
-            return None
-
-        def handle_error(batch: List) -> List:
-            for sentence in batch:
-                sentence.trans_text = sentence.raw_text
-            return batch
-
-        async for batch_result in self._process_batch(
-            sentences,
-            process_batch,
-            config,
-            error_handler=handle_error,
-            reduce_batch_on_error=True
-        ):
-            yield batch_result
-
-    async def simplify_sentences(
-        self,
-        sentences: List,
-        batch_size: int = 4,
-        target_speed: float = 1.1  # 目标语速设定为 max_speed，此处默认值 1.1
-    ) -> AsyncGenerator[List, None]:
-        """
-        批量精简处理，对于语速过快的句子（由 DurationAligner 筛选），
-        根据原文本与各精简版本的长度比较，计算理想文本长度后选择最佳候选版本。
-
-        理想文本长度计算公式：
-            ideal_length = len(old_text) * (target_speed / s.speed)
-        当 target_speed = max_speed 时，可确保精简后的文本达到预期的语速要求。
-        """
-        if not sentences:
-            self.logger.warning("收到空的句子列表")
-            return
-
-        config = BatchConfig(initial_size=batch_size, min_size=1, required_successes=2)
-
-        async def process_batch(batch: List) -> Optional[List]:
-            texts = {str(i): s.trans_text for i, s in enumerate(batch)}
-            self.logger.debug(f"简化批次: {len(texts)}条文本")
-            batch_result = await self.simplify(texts)
-            
-            if "thinking" not in batch_result or not any(key in batch_result for key in ["slight", "moderate", "extreme"]):
-                self.logger.error("简化结果格式不正确，缺少必要字段")
-                return None
-                
-            for i, s in enumerate(batch):
-                old_text = s.trans_text
-                str_i = str(i)
-                
-                # 确保每个句子的简化结果都存在
-                if not any(str_i in batch_result.get(key, {}) for key in ["slight", "moderate", "extreme"]):
-                    self.logger.error(f"句子 {i} 的简化结果不完整")
-                    continue
-
-                # 根据原文本长度和当前语速计算理想文本长度
-                ideal_length = len(old_text) * (target_speed / s.speed) if s.speed > 0 else len(old_text)
-                
-                acceptable_candidates = {}
-                non_acceptable_candidates = {}
-                
-                for key in ["slight", "moderate", "extreme"]:
-                    if key in batch_result and str_i in batch_result[key]:
-                        candidate_text = batch_result[key][str_i]
-                        if candidate_text:
-                            candidate_length = len(candidate_text)
-                            if candidate_length <= ideal_length:
-                                acceptable_candidates[key] = candidate_text
-                            else:
-                                non_acceptable_candidates[key] = candidate_text
-                
-                if acceptable_candidates:
-                    # 在满足候选长度不超过理想长度的版本中，选择文本最长的版本
-                    chosen_key, chosen_text = max(acceptable_candidates.items(), key=lambda item: len(item[1]))
-                elif non_acceptable_candidates:
-                    # 若所有候选均超过理想长度，则选择与理想长度差值最小的版本
-                    chosen_key, chosen_text = min(non_acceptable_candidates.items(), key=lambda item: abs(len(item[1]) - ideal_length))
-                else:
-                    chosen_text = old_text
-
-                s.trans_text = chosen_text
-                self.logger.info(
-                    f"精简: {old_text} -> {chosen_text} (理想长度: {ideal_length}, s.speed: {s.speed})"
-                )
-            return batch
-
-        def handle_error(batch: List) -> List:
-            # 出错时原样返回
-            return batch
-
-        async for batch_result in self._process_batch(
-            sentences,
-            process_batch,
-            config,
-            error_handler=handle_error,
-            reduce_batch_on_error=False
-        ):
-            yield batch_result
-
-================
-File: core/__init__.py
-================
-# 空文件即可，标识这是一个 Python 包
-
-================
-File: core/audio_gener.py
-================
-# core/audio_gener.py
-
-import logging
-import asyncio
-import numpy as np
-from typing import List
-from services.cosyvoice.client import CosyVoiceClient
-from utils import concurrency
-
-class AudioGenerator:
-    def __init__(self, cosyvoice_client: CosyVoiceClient, sample_rate: int = 24000):
-        self.cosyvoice_client = cosyvoice_client
-        self.sample_rate = sample_rate
-        self.logger = logging.getLogger(__name__)
-
-    async def vocal_audio_maker(self, sentences: List):
-        """
-        并发生成音频
-        """
-        tasks = []
-        for s in sentences:
-            text_uuid = s.model_input.get('text_uuid')
-            speaker_uuid = s.model_input.get('speaker_uuid')
-            if not text_uuid or not speaker_uuid:
-                self.logger.warning("缺少text_uuid或speaker_uuid，无法生成音频")
-                continue
-
-            tasks.append(self._generate_single_async(s))
-
-        try:
-            results = await asyncio.gather(*tasks)
-            return results
-        except Exception as e:
-            self.logger.error(f"音频生成失败: {str(e)}")
-            raise
-
-    async def _generate_single_async(self, sentence):
-        try:
-            final_audio = await concurrency.run_sync(self._generate_audio_single, sentence)
-            sentence.generated_audio = final_audio
-            return sentence
-        except Exception as e:
-            self.logger.error(
-                f"音频生成失败 (text_uuid: {sentence.model_input.get('text_uuid', 'unknown')}, "
-                f"speaker_uuid: {sentence.model_input.get('speaker_uuid', 'unknown')}): {str(e)}"
-            )
-            sentence.generated_audio = None
-            return sentence
-
-    def _generate_audio_single(self, sentence):
-        """
-        使用text_uuid和speaker_uuid从服务端获取音频
-        """
-        text_uuid = sentence.model_input.get('text_uuid')
-        speaker_uuid = sentence.model_input.get('speaker_uuid')
-        if not text_uuid or not speaker_uuid:
-            self.logger.warning("缺少text_uuid或speaker_uuid，无法生成音频")
-            return np.zeros(0, dtype=np.float32)
-
-        speed = getattr(sentence, 'speed', 1.0) or 1.0
-        audio_np, dur_sec = self.cosyvoice_client.token2wav(text_uuid, speaker_uuid, speed=speed)
-
-        if getattr(sentence, 'is_first', False) and getattr(sentence, 'start', 0) > 0:
-            silence_samples = int(sentence.start * self.sample_rate / 1000)
-            audio_np = np.concatenate([
-                np.zeros(silence_samples, dtype=np.float32),
-                audio_np
-            ])
-
-        if hasattr(sentence, 'silence_duration') and sentence.silence_duration > 0:
-            silence_samples = int(sentence.silence_duration * self.sample_rate / 1000)
-            audio_np = np.concatenate([
-                audio_np,
-                np.zeros(silence_samples, dtype=np.float32)
-            ])
-
-        self.logger.debug(
-            f"音频生成完成 (text_uuid={text_uuid}, speaker_uuid={speaker_uuid}), "
-            f"长度={len(audio_np)/self.sample_rate:.2f}s"
-        )
-        return audio_np
-
-================
-File: core/model_in.py
-================
-import logging
-import asyncio
-import torch
-import numpy as np
-import librosa
-from typing import List, Dict
-import os
-import uuid
-import soundfile as sf
-
-from services.cosyvoice.client import CosyVoiceClient
-
-class ModelIn:
-    def __init__(self, cosyvoice_client: CosyVoiceClient, max_concurrent_tasks: int = 4):
-        self.cosyvoice_client = cosyvoice_client
-        self.logger = logging.getLogger(__name__)
-        self.semaphore = asyncio.Semaphore(max_concurrent_tasks)
-        self.speaker_cache: Dict[str, asyncio.Task] = {}  # speaker_id -> asyncio.Task
-        self.max_val = 0.8
-        self.cosy_sample_rate = 24000
-
-    def postprocess(self, speech, top_db=60, hop_length=220, win_length=440):
-        """
-        对音频进行 trim、幅度归一化，并在结尾加 0.2s 静音
-        """
-        speech, _ = librosa.effects.trim(
-            speech,
-            top_db=top_db,
-            frame_length=win_length,
-            hop_length=hop_length
-        )
-        if np.abs(speech).max() > self.max_val:
-            speech = speech / np.abs(speech).max() * self.max_val
-
-        pad_samples = int(self.cosy_sample_rate * 0.2)
-        speech = np.concatenate([speech, np.zeros(pad_samples, dtype=speech.dtype)])
-        return speech
-
-    async def get_speaker_features(self, speaker_id: str, sentence) -> str:
-        """
-        异步提取说话人特征，返回说话人UUID
-        """
-        if speaker_id in self.speaker_cache:
-            return await self.speaker_cache[speaker_id]
-
-        async def extract_features() -> str:
-            # 1. 确保是 numpy array
-            audio_np = sentence.audio.squeeze(0).cpu().numpy() if isinstance(sentence.audio, torch.Tensor) else sentence.audio
-            
-            # 2. 处理音频，得到numpy array
-            postprocessed_audio = self.postprocess(audio_np)
-
-            speaker_uuid = str(uuid.uuid4())
-            success = await asyncio.to_thread(
-                self.cosyvoice_client.extract_speaker_features,
-                speaker_uuid,
-                postprocessed_audio,  # 直接传递numpy array
-                self.cosy_sample_rate
-            )
-            if not success:
-                raise Exception("提取说话人特征失败")
-            return speaker_uuid
-
-        task = asyncio.create_task(extract_features())
-        self.speaker_cache[speaker_id] = task
-        return await task
-
-    async def _process_one_sentence_async(self, sentence, reuse_speaker: bool):
-        async with self.semaphore:
-            speaker_id = getattr(sentence, 'speaker_id', None)
-            
-            # 处理文本UUID
-            text_uuid = await asyncio.to_thread(
-                self.cosyvoice_client.normalize_text,
-                sentence.trans_text or ""
-            )
-            sentence.model_input['text_uuid'] = text_uuid
-            
-            # 处理说话人UUID
-            if speaker_id is not None and not reuse_speaker:
-                speaker_uuid = await self.get_speaker_features(speaker_id, sentence)
-                sentence.model_input['speaker_uuid'] = speaker_uuid
-            elif 'speaker_uuid' not in sentence.model_input:
-                raise ValueError("缺少说话人UUID且未提取新特征")
-
-            return sentence
-
-    async def modelin_maker(self, sentences: List, reuse_speaker: bool = False, batch_size: int = 3):
-        """
-        对一批 sentence 进行文本与说话人特征提取，按 batch_size 分批 yield 结果
-        """
-        if not sentences:
-            self.logger.warning("modelin_maker: 收到空句子列表")
-            return
-
-        tasks = [
-            asyncio.create_task(self._process_one_sentence_async(s, reuse_speaker))
-            for s in sentences
-        ]
-
-        results_batch = []
-        try:
-            for i, task in enumerate(tasks, start=1):
-                updated = await task
-                if updated is not None:
-                    results_batch.append(updated)
-                if i % batch_size == 0:
-                    yield results_batch
-                    results_batch = []
-            if results_batch:
-                yield results_batch
-        except Exception as e:
-            self.logger.error(f"modelin_maker处理失败: {e}")
-            raise
-        finally:
-            if not reuse_speaker:
-                self.speaker_cache.clear()
-
-================
-File: core/tts_token_gener.py
-================
-# core/tts_token_gener.py
-
-import logging
-import asyncio
-from typing import List
-from services.cosyvoice.client import CosyVoiceClient
-from utils import concurrency
-
-class TTSTokenGenerator:
-    def __init__(self, cosyvoice_client: CosyVoiceClient):
-        self.cosyvoice_client = cosyvoice_client
-        self.logger = logging.getLogger(__name__)
-
-    async def tts_token_maker(self, sentences: List):
-        """
-        并发生成TTS tokens，并存储预估时长
-        """
-        if not sentences:
-            return []
-
-        tasks = []
-        for s in sentences:
-            text_uuid = s.model_input.get('text_uuid')
-            speaker_uuid = s.model_input.get('speaker_uuid')
-            if not text_uuid or not speaker_uuid:
-                self.logger.warning("缺少text_uuid或speaker_uuid，无法生成TTS tokens")
-                continue
-
-            tasks.append(asyncio.create_task(self._generate_tts_single_async(s, text_uuid, speaker_uuid)))
-
-        processed = await asyncio.gather(*tasks)
-        return processed
-
-    async def _generate_tts_single_async(self, sentence, text_uuid: str, speaker_uuid: str):
-        return await concurrency.run_sync(
-            self._generate_tts_single, sentence, text_uuid, speaker_uuid
-        )
-
-    def _generate_tts_single(self, sentence, text_uuid: str, speaker_uuid: str):
-        duration_ms, success = self.cosyvoice_client.generate_tts_tokens(text_uuid, speaker_uuid)
-        if not success:
-            self.logger.error(f"生成TTS tokens失败 (text_uuid={text_uuid}, speaker_uuid={speaker_uuid})")
-            return sentence
-
-        sentence.duration = duration_ms
-        self.logger.debug(f"[TTS Token] (text_uuid={text_uuid}, speaker_uuid={speaker_uuid}) 生成完毕 => 估计时长 {duration_ms}ms")
-        return sentence
 
 ================
 File: services/cosyvoice/proto/__init__.py
@@ -3568,6 +2708,91 @@ if __name__ == '__main__':
     print("ASR Worker 模块加载成功")
 
 ================
+File: workers/audio_gen_worker/audio_gener.py
+================
+# core/audio_gener.py
+
+import logging
+import asyncio
+import numpy as np
+from typing import List
+from services.cosyvoice.client import CosyVoiceClient
+from utils import concurrency
+
+class AudioGenerator:
+    def __init__(self, cosyvoice_client: CosyVoiceClient, sample_rate: int = 24000):
+        self.cosyvoice_client = cosyvoice_client
+        self.sample_rate = sample_rate
+        self.logger = logging.getLogger(__name__)
+
+    async def vocal_audio_maker(self, sentences: List):
+        """
+        并发生成音频
+        """
+        tasks = []
+        for s in sentences:
+            text_uuid = s.model_input.get('text_uuid')
+            speaker_uuid = s.model_input.get('speaker_uuid')
+            if not text_uuid or not speaker_uuid:
+                self.logger.warning("缺少text_uuid或speaker_uuid，无法生成音频")
+                continue
+
+            tasks.append(self._generate_single_async(s))
+
+        try:
+            results = await asyncio.gather(*tasks)
+            return results
+        except Exception as e:
+            self.logger.error(f"音频生成失败: {str(e)}")
+            raise
+
+    async def _generate_single_async(self, sentence):
+        try:
+            final_audio = await concurrency.run_sync(self._generate_audio_single, sentence)
+            sentence.generated_audio = final_audio
+            return sentence
+        except Exception as e:
+            self.logger.error(
+                f"音频生成失败 (text_uuid: {sentence.model_input.get('text_uuid', 'unknown')}, "
+                f"speaker_uuid: {sentence.model_input.get('speaker_uuid', 'unknown')}): {str(e)}"
+            )
+            sentence.generated_audio = None
+            return sentence
+
+    def _generate_audio_single(self, sentence):
+        """
+        使用text_uuid和speaker_uuid从服务端获取音频
+        """
+        text_uuid = sentence.model_input.get('text_uuid')
+        speaker_uuid = sentence.model_input.get('speaker_uuid')
+        if not text_uuid or not speaker_uuid:
+            self.logger.warning("缺少text_uuid或speaker_uuid，无法生成音频")
+            return np.zeros(0, dtype=np.float32)
+
+        speed = getattr(sentence, 'speed', 1.0) or 1.0
+        audio_np, dur_sec = self.cosyvoice_client.token2wav(text_uuid, speaker_uuid, speed=speed)
+
+        if getattr(sentence, 'is_first', False) and getattr(sentence, 'start', 0) > 0:
+            silence_samples = int(sentence.start * self.sample_rate / 1000)
+            audio_np = np.concatenate([
+                np.zeros(silence_samples, dtype=np.float32),
+                audio_np
+            ])
+
+        if hasattr(sentence, 'silence_duration') and sentence.silence_duration > 0:
+            silence_samples = int(sentence.silence_duration * self.sample_rate / 1000)
+            audio_np = np.concatenate([
+                audio_np,
+                np.zeros(silence_samples, dtype=np.float32)
+            ])
+
+        self.logger.debug(
+            f"音频生成完成 (text_uuid={text_uuid}, speaker_uuid={speaker_uuid}), "
+            f"长度={len(audio_np)/self.sample_rate:.2f}s"
+        )
+        return audio_np
+
+================
 File: workers/audio_gen_worker/timestamp_adjuster.py
 ================
 import logging
@@ -3662,9 +2887,10 @@ import logging
 from typing import List, Any
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
-from core.audio_gener import AudioGenerator
-from models.model_manager import ModelManager
+from .audio_gener import AudioGenerator
 from .timestamp_adjuster import TimestampAdjuster
+from services.cosyvoice.client import CosyVoiceClient
+
 
 logger = logging.getLogger(__name__)
 
@@ -3678,14 +2904,13 @@ class AudioGenWorker:
         self.config = config
         self.logger = logger
         
-        # 获取模型管理器实例
-        model_manager = ModelManager()
-        model_manager.initialize_models(config)
-        
-        # 获取音频生成器实例
-        self.audio_generator = model_manager.audio_generator
-        
-        # 直接实例化时间戳调整器
+        # 初始化 CosyVoiceClient
+        cosyvoice_address = f"{config.COSYVOICE_SERVICE_HOST}:{config.COSYVOICE_SERVICE_PORT}"
+        cosyvoice_client = CosyVoiceClient(address=cosyvoice_address)
+        self.audio_generator = AudioGenerator(
+            cosyvoice_client=cosyvoice_client,
+            sample_rate=config.SAMPLE_RATE
+        )
         self.timestamp_adjuster = TimestampAdjuster(config=config)
 
     @worker_decorator(
@@ -3709,14 +2934,131 @@ if __name__ == '__main__':
     print("Audio Generation Worker 模块加载成功")
 
 ================
+File: workers/duration_worker/duration_aligner.py
+================
+import logging
+
+class DurationAligner:
+    def __init__(self, model_in=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
+        """
+        model_in：生成模型接口，用于更新文本特征  
+        simplifier：简化处理接口（Translator）  
+        tts_token_gener：TTS token 生成接口  
+        max_speed：语速阈值，超过该速率的句子需要进行简化
+        """
+        self.model_in = model_in
+        self.simplifier = simplifier
+        self.tts_token_gener = tts_token_gener
+        self.max_speed = max_speed
+        self.logger = logging.getLogger(__name__)
+
+    async def align_durations(self, sentences):
+        """
+        对整批句子进行时长对齐，并检查是否需要精简（语速过快）。
+        """
+        if not sentences:
+            return
+
+        # 第一次对齐
+        self._align_batch(sentences)
+
+        # 查找语速过快的句子（speed > max_speed）
+        retry_sentences = [s for s in sentences if s.speed > self.max_speed]
+        if retry_sentences:
+            self.logger.info(f"{len(retry_sentences)} 个句子语速过快, 正在精简...")
+            success = await self._retry_sentences_batch(retry_sentences)
+            if success:
+                # 若精简文本成功，再次对齐
+                self._align_batch(sentences)
+            else:
+                self.logger.warning("精简过程失败, 保持原结果")
+
+    def _align_batch(self, sentences):
+        """
+        同批次句子进行时长对齐。
+        """
+        if not sentences:
+            return
+
+        # 计算每句需要调整的时间差
+        for s in sentences:
+            s.diff = s.duration - s.target_duration
+
+        total_diff_to_adjust = sum(s.diff for s in sentences)
+        positive_diff_sum = sum(x.diff for x in sentences if x.diff > 0)
+        negative_diff_sum_abs = sum(abs(x.diff) for x in sentences if x.diff < 0)
+        current_time = sentences[0].start
+
+        for s in sentences:
+            s.adjusted_start = current_time
+            diff = s.diff
+            s.speed = 1.0
+            s.silence_duration = 0.0
+            s.adjusted_duration = s.duration
+
+            if total_diff_to_adjust != 0:
+                if total_diff_to_adjust > 0 and diff > 0:
+                    if positive_diff_sum > 0:
+                        proportion = diff / positive_diff_sum
+                        adjustment = total_diff_to_adjust * proportion
+                        s.adjusted_duration = s.duration - adjustment
+                        s.speed = s.duration / max(s.adjusted_duration, 0.001)
+                elif total_diff_to_adjust < 0 and diff < 0:
+                    if negative_diff_sum_abs > 0:
+                        proportion = abs(diff) / negative_diff_sum_abs
+                        total_needed = abs(total_diff_to_adjust) * proportion
+                        max_slowdown = s.duration * 0.07
+                        slowdown = min(total_needed, max_slowdown)
+                        s.adjusted_duration = s.duration + slowdown
+                        s.speed = s.duration / max(s.adjusted_duration, 0.001)
+                        s.silence_duration = total_needed - slowdown
+                        if s.silence_duration > 0:
+                            s.adjusted_duration += s.silence_duration
+
+            s.diff = s.duration - s.adjusted_duration
+            current_time += s.adjusted_duration
+
+            self.logger.info(
+                f"对齐后: {s.trans_text}, duration: {s.duration}, "
+                f"target_duration: {s.target_duration}, diff: {s.diff}, "
+                f"speed: {s.speed}, silence_duration: {s.silence_duration}"
+            )
+
+    async def _retry_sentences_batch(self, sentences):
+        """
+        对语速过快的句子执行精简 + 更新 TTS token。
+        """
+        try:
+            # 1. 分批对语速过快的句子进行精简
+            async for _ in self.simplifier.simplify_sentences(sentences, target_speed=self.max_speed):
+                pass
+            # 2. 批量更新文本特征（复用 speaker 与 uuid）
+            async for batch in self.model_in.modelin_maker(
+                sentences,
+                reuse_speaker=True,
+                batch_size=3
+            ):
+                # 3. 再生成 token（复用 uuid）
+                updated_batch = await self.tts_token_gener.tts_token_maker(batch)
+            return True
+        except Exception as e:
+            self.logger.error(f"_retry_sentences_batch 出错: {e}")
+            return False
+
+================
 File: workers/duration_worker/worker.py
 ================
 import logging
 from typing import List, Any
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
-from core.timeadjust.duration_aligner import DurationAligner
-from models.model_manager import ModelManager
+from .duration_aligner import DurationAligner
+from workers.modelin_worker.model_in import ModelIn
+from workers.tts_worker.tts_token_gener import TTSTokenGenerator
+from workers.translation_worker.translation.translator import Translator
+from workers.translation_worker.translation.deepseek_client import DeepSeekClient
+from workers.translation_worker.translation.gemini_client import GeminiClient
+from services.cosyvoice.client import CosyVoiceClient
 
 logger = logging.getLogger(__name__)
 
@@ -3730,12 +3072,31 @@ class DurationWorker:
         self.config = config
         self.logger = logger
         
-        # 获取模型管理器实例
-        model_manager = ModelManager()
-        model_manager.initialize_models(config)
+        # 初始化 CosyVoiceClient
+        cosyvoice_address = f"{config.COSYVOICE_SERVICE_HOST}:{config.COSYVOICE_SERVICE_PORT}"
+        cosyvoice_client = CosyVoiceClient(address=cosyvoice_address)
         
-        # 获取时长对齐器实例
-        self.duration_aligner = model_manager.duration_aligner
+        # 初始化依赖组件
+        model_in = ModelIn(cosyvoice_client=cosyvoice_client, max_concurrent_tasks=config.MAX_PARALLEL_SEGMENTS)
+        tts_token_generator = TTSTokenGenerator(cosyvoice_client=cosyvoice_client)
+        
+        # 初始化翻译客户端
+        translation_model = config.TRANSLATION_MODEL.lower()
+        if translation_model == "deepseek":
+            client = DeepSeekClient(api_key=config.DEEPSEEK_API_KEY)
+        elif translation_model == "gemini":
+            client = GeminiClient(api_key=config.GEMINI_API_KEY)
+        else:
+            raise ValueError(f"不支持的翻译模型: {translation_model}")
+        simplifier = Translator(translation_client=client)
+        
+        # 直接初始化 DurationAligner
+        self.duration_aligner = DurationAligner(
+            model_in=model_in,
+            simplifier=simplifier,
+            tts_token_gener=tts_token_generator,
+            max_speed=1.2
+        )
 
     @worker_decorator(
         input_queue_attr='duration_align_queue',
@@ -4264,14 +3625,135 @@ if __name__ == '__main__':
     print("Mixer Worker 模块加载成功")
 
 ================
+File: workers/modelin_worker/model_in.py
+================
+import logging
+import asyncio
+import torch
+import numpy as np
+import librosa
+from typing import List, Dict
+import os
+import uuid
+import soundfile as sf
+
+from services.cosyvoice.client import CosyVoiceClient
+
+class ModelIn:
+    def __init__(self, cosyvoice_client: CosyVoiceClient, max_concurrent_tasks: int = 4):
+        self.cosyvoice_client = cosyvoice_client
+        self.logger = logging.getLogger(__name__)
+        self.semaphore = asyncio.Semaphore(max_concurrent_tasks)
+        self.speaker_cache: Dict[str, asyncio.Task] = {}  # speaker_id -> asyncio.Task
+        self.max_val = 0.8
+        self.cosy_sample_rate = 24000
+
+    def postprocess(self, speech, top_db=60, hop_length=220, win_length=440):
+        """
+        对音频进行 trim、幅度归一化，并在结尾加 0.2s 静音
+        """
+        speech, _ = librosa.effects.trim(
+            speech,
+            top_db=top_db,
+            frame_length=win_length,
+            hop_length=hop_length
+        )
+        if np.abs(speech).max() > self.max_val:
+            speech = speech / np.abs(speech).max() * self.max_val
+
+        pad_samples = int(self.cosy_sample_rate * 0.2)
+        speech = np.concatenate([speech, np.zeros(pad_samples, dtype=speech.dtype)])
+        return speech
+
+    async def get_speaker_features(self, speaker_id: str, sentence) -> str:
+        """
+        异步提取说话人特征，返回说话人UUID
+        """
+        if speaker_id in self.speaker_cache:
+            return await self.speaker_cache[speaker_id]
+
+        async def extract_features() -> str:
+            # 1. 确保是 numpy array
+            audio_np = sentence.audio.squeeze(0).cpu().numpy() if isinstance(sentence.audio, torch.Tensor) else sentence.audio
+            
+            # 2. 处理音频，得到numpy array
+            postprocessed_audio = self.postprocess(audio_np)
+
+            speaker_uuid = str(uuid.uuid4())
+            success = await asyncio.to_thread(
+                self.cosyvoice_client.extract_speaker_features,
+                speaker_uuid,
+                postprocessed_audio,  # 直接传递numpy array
+                self.cosy_sample_rate
+            )
+            if not success:
+                raise Exception("提取说话人特征失败")
+            return speaker_uuid
+
+        task = asyncio.create_task(extract_features())
+        self.speaker_cache[speaker_id] = task
+        return await task
+
+    async def _process_one_sentence_async(self, sentence, reuse_speaker: bool):
+        async with self.semaphore:
+            speaker_id = getattr(sentence, 'speaker_id', None)
+            
+            # 处理文本UUID
+            text_uuid = await asyncio.to_thread(
+                self.cosyvoice_client.normalize_text,
+                sentence.trans_text or ""
+            )
+            sentence.model_input['text_uuid'] = text_uuid
+            
+            # 处理说话人UUID
+            if speaker_id is not None and not reuse_speaker:
+                speaker_uuid = await self.get_speaker_features(speaker_id, sentence)
+                sentence.model_input['speaker_uuid'] = speaker_uuid
+            elif 'speaker_uuid' not in sentence.model_input:
+                raise ValueError("缺少说话人UUID且未提取新特征")
+
+            return sentence
+
+    async def modelin_maker(self, sentences: List, reuse_speaker: bool = False, batch_size: int = 3):
+        """
+        对一批 sentence 进行文本与说话人特征提取，按 batch_size 分批 yield 结果
+        """
+        if not sentences:
+            self.logger.warning("modelin_maker: 收到空句子列表")
+            return
+
+        tasks = [
+            asyncio.create_task(self._process_one_sentence_async(s, reuse_speaker))
+            for s in sentences
+        ]
+
+        results_batch = []
+        try:
+            for i, task in enumerate(tasks, start=1):
+                updated = await task
+                if updated is not None:
+                    results_batch.append(updated)
+                if i % batch_size == 0:
+                    yield results_batch
+                    results_batch = []
+            if results_batch:
+                yield results_batch
+        except Exception as e:
+            self.logger.error(f"modelin_maker处理失败: {e}")
+            raise
+        finally:
+            if not reuse_speaker:
+                self.speaker_cache.clear()
+
+================
 File: workers/modelin_worker/worker.py
 ================
 import logging
 from typing import List, Any
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
-from core.model_in import ModelIn
-from models.model_manager import ModelManager
+from .model_in import ModelIn
+from services.cosyvoice.client import CosyVoiceClient
 
 logger = logging.getLogger(__name__)
 
@@ -4285,12 +3767,10 @@ class ModelInWorker:
         self.config = config
         self.logger = logger
         
-        # 获取模型管理器实例
-        model_manager = ModelManager()
-        model_manager.initialize_models(config)
-        
-        # 获取 ModelIn 实例
-        self.model_in = model_manager.model_in
+        # 初始化 CosyVoiceClient
+        cosyvoice_address = f"{config.COSYVOICE_SERVICE_HOST}:{config.COSYVOICE_SERVICE_PORT}"
+        cosyvoice_client = CosyVoiceClient(address=cosyvoice_address)
+        self.model_in = ModelIn(cosyvoice_client=cosyvoice_client)
 
     @worker_decorator(
         input_queue_attr='modelin_queue',
@@ -4578,14 +4058,498 @@ if __name__ == '__main__':
     print("Segment Worker 模块加载成功")
 
 ================
+File: workers/translation_worker/translation/__init__.py
+================
+# 空文件，用于标识 translation 目录为一个 Python 包
+
+================
+File: workers/translation_worker/translation/deepseek_client.py
+================
+# =========================== deepseek_client.py ===========================
+import json
+import logging
+from openai import OpenAI
+from typing import Dict
+from json_repair import loads
+
+# [MODIFIED] 引入统一线程管理
+from utils import concurrency
+
+logger = logging.getLogger(__name__)
+
+class DeepSeekClient:
+    def __init__(self, api_key: str):
+        """初始化 DeepSeek 客户端"""
+        if not api_key:
+            raise ValueError("DeepSeek API key must be provided")
+            
+        self.client = OpenAI(
+            api_key=api_key,
+            base_url="https://api.deepseek.com"
+        )
+        logger.info("DeepSeek 客户端初始化成功")
+
+    async def translate(
+        self,
+        system_prompt: str,
+        user_prompt: str
+    ) -> Dict[str, str]:
+        """
+        直接调用 DeepSeek API，要求返回 JSON 格式的内容。
+        """
+        try:
+            response = await concurrency.run_sync(
+                self.client.chat.completions.create,
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=1.3
+            )
+            result = response.choices[0].message.content
+            logger.info(f"DeepSeek 原文请求内容:\n{user_prompt}")
+            logger.info(f"DeepSeek 原始返回内容 (长度: {len(result)}):\n{result!r}")
+            
+            if not result or not result.strip():
+                logger.error("DeepSeek 返回了空响应")
+                raise ValueError("Empty response from DeepSeek")
+                
+            # 尝试修复和解析 JSON
+            try:
+                parsed_result = loads(result)
+                logger.debug("DeepSeek 请求成功，JSON 解析完成")
+                return parsed_result
+            except Exception as json_error:
+                logger.error(f"JSON 解析失败，原始内容: {result!r}")
+                logger.error(f"JSON 解析错误详情: {str(json_error)}")
+                raise
+            
+        except Exception as e:
+            logger.error(f"DeepSeek 请求失败: {str(e)}")
+            if "503" in str(e):
+                logger.error("连接错误：无法连接到 DeepSeek API，可能是代理或网络问题")
+            raise
+
+================
+File: workers/translation_worker/translation/gemini_client.py
+================
+import logging
+from typing import Dict
+
+import google.generativeai as genai
+from google.generativeai.types import GenerationConfig
+
+from json_repair import loads
+
+# 引入统一线程管理，与 deepseek_client 用法一致
+from utils import concurrency
+
+logger = logging.getLogger(__name__)
+
+class GeminiClient:
+    def __init__(self, api_key: str):
+        """初始化 Gemini 客户端"""
+        if not api_key:
+            raise ValueError("Gemini API key must be provided")
+        # 配置 Gemini
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel('gemini-1.5-flash')  # 或 'gemini-2.0-flash-exp'
+        logger.info("Gemini 客户端初始化成功")
+    
+    async def translate(
+        self,
+        system_prompt: str,
+        user_prompt: str
+    ) -> Dict[str, str]:
+        """
+        直接调用 Gemini API，要求返回 JSON 格式的内容。
+        """
+        try:
+            response = await concurrency.run_sync(
+                self.model.generate_content,
+                [system_prompt, user_prompt],
+                generation_config=GenerationConfig(temperature=0.3)
+            )
+            logger.info(f"Gemini 原文请求内容:\n{user_prompt}")
+            result_text = response.text
+            logger.info(f"Gemini 原始返回内容 (长度: {len(result_text)}):\n{result_text!r}")
+            
+            if not result_text or not result_text.strip():
+                logger.error("Gemini 返回了空响应")
+                raise ValueError("Empty response from Gemini")
+                
+            # 尝试修复和解析 JSON
+            try:
+                parsed_result = loads(result_text)
+                logger.debug("Gemini 请求成功，JSON 解析完成")
+                return parsed_result
+            except Exception as json_error:
+                logger.error(f"JSON 解析失败，原始内容: {result_text!r}")
+                logger.error(f"JSON 解析错误详情: {str(json_error)}")
+                raise
+            
+        except Exception as e:
+            logger.error(f"Gemini 请求失败: {str(e)}")
+            raise
+
+================
+File: workers/translation_worker/translation/glm4_client.py
+================
+import json
+import logging
+from zhipuai import ZhipuAI
+from .prompt import GLM4_TRANSLATION_PROMPT, GLM4_SYSTEM_PROMPT
+
+logger = logging.getLogger(__name__)
+
+class GLM4Client:
+    def __init__(self, api_key: str):
+        """初始化 GLM-4 客户端"""
+        if not api_key:
+            raise ValueError("API key must be provided")
+        self.client = ZhipuAI(api_key=api_key)
+        logger.info("GLM-4 客户端初始化成功")
+
+    async def translate(self, texts: dict) -> str:
+        """调用 GLM-4 模型进行翻译，返回 JSON 字符串"""
+        prompt = GLM4_TRANSLATION_PROMPT.format(json_content=json.dumps(texts, ensure_ascii=False, indent=2))
+        try:
+            logger.debug(f"需要翻译的JSON: {json.dumps(texts, ensure_ascii=False, indent=2)}")
+            response = self.client.chat.completions.create(
+                model="glm-4-flash",
+                messages=[
+                    {"role": "system", "content": GLM4_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                top_p=0.8
+            )
+            content = response.choices[0].message.content
+            logger.debug(f"翻译结果: {content}")
+            return content
+        except Exception as e:
+            logger.error(f"GLM-4 翻译请求失败: {str(e)}")
+            raise
+
+================
+File: workers/translation_worker/translation/prompt.py
+================
+# 支持的语言映射
+LANGUAGE_MAP = {
+    "zh": "中文",
+    "en": "英文",
+    "ja": "日文",
+    "ko": "韩文"
+}
+
+TRANSLATION_USER_PROMPT = """
+**角色设定：**
+- **经历：** 游学四方、博览群书、翻译官、外交官
+- **性格：**严谨、好奇、坦率、睿智、求真、惜墨如金
+- **技能：**精通{target_language}、博古通今、斟字酌句、精确传达
+- **表达方式：** 精炼、简洁、最优化、避免冗余
+**执行规则：**
+1.无论何时，只翻译JSON格式中的value，*严格保持原 JSON 结构与各层级字段key数量完全一致*
+2.value中出现的数字，翻译成*{target_language}数字*，而非阿拉伯数字。
+3.仔细阅读原文，结合上下文，深思熟虑，并将你的思考过程和分析放入 "thinking" 字段中。
+4.确保译文语气、风格、表达的意思与原文保持一致。
+5.将翻译后的JSON文本放入 "output" 字段中。
+
+最终请返回一个JSON对象，结构如下：
+{{
+    "thinking": "...",
+    "output": {{ ... 翻译后的JSON ... }}
+}}
+
+原文JSON如下：
+{json_content}
+"""
+
+TRANSLATION_SYSTEM_PROMPT = """你将扮演久经历练的翻译官，致力于将提供的JSON格式原文翻译成地道的{target_language}。"""
+
+SIMPLIFICATION_USER_PROMPT = """
+**角色设定：**
+- **性格：**严谨克制、精确表达、追求简约
+- **技能：**咬文嚼字、斟字酌句、去芜存菁
+- **表达方式：** 精炼、清晰、最优化、避免冗余
+**执行规则：**
+1.在"thinking" 字段中提醒自己：
+-原始文本是什么语言，你的任务不是翻译，而是精简，*切勿改变语言*。
+-原始文本中出现的数字，保留当前语言的数字形式，而非阿拉伯数字。
+-无论何时，只精简JSON格式中的value，*保持key不变，不要进行合并*。
+2.首先对value内容进行深度分析，进行3种不同层次的精简：
+- "slight": 轻微精简，去除冗余和重复，忠实保持原意。
+- "moderate": 中度精简，进一步去除冗余，用精简的表达取代复杂的表达，保持原意不变。
+- "extreme": 极度精简，保持句子的基本结构和意思不变。
+
+最终请返回一个JSON对象，结构如下：
+{{
+    "thinking": "...",
+    "slight": {{ ... 轻微精简后的JSON ... }},
+    "moderate": {{ ... 中度精简后的JSON ... }},
+    "extreme": {{ ... 极度精简后的JSON ... }}
+}}
+
+原文JSON如下：
+{json_content}
+"""
+
+SIMPLIFICATION_SYSTEM_PROMPT = """你将扮演克制严谨的语言专家，致力于将提供的JSON格式文本进行精简，不要对文本进行翻译。"""
+
+================
+File: workers/translation_worker/translation/translator.py
+================
+import asyncio
+import logging
+from typing import Dict, List, AsyncGenerator, Protocol, Optional, TypeVar
+from dataclasses import dataclass
+from .prompt import (
+    TRANSLATION_SYSTEM_PROMPT,
+    TRANSLATION_USER_PROMPT,
+    SIMPLIFICATION_SYSTEM_PROMPT,
+    SIMPLIFICATION_USER_PROMPT,
+    LANGUAGE_MAP
+)
+
+logger = logging.getLogger(__name__)
+
+class TranslationClient(Protocol):
+    async def translate(
+        self,
+        texts: Dict[str, str],
+        system_prompt: str,
+        user_prompt: str
+    ) -> Dict[str, str]:
+        ...
+
+@dataclass
+class BatchConfig:
+    """批处理配置"""
+    initial_size: int = 100
+    min_size: int = 1
+    required_successes: int = 2
+    retry_delay: float = 0.1
+
+T = TypeVar('T')
+
+class Translator:
+    def __init__(self, translation_client: TranslationClient):
+        self.translation_client = translation_client
+        self.logger = logging.getLogger(__name__)
+
+    async def translate(self, texts: Dict[str, str], target_language: str = "zh") -> Dict[str, str]:
+        """执行翻译并返回包含 "thinking" 与 "output" 字段的 JSON"""
+        try:
+            system_prompt = TRANSLATION_SYSTEM_PROMPT.format(
+                target_language=LANGUAGE_MAP.get(target_language, target_language)
+            )
+            user_prompt = TRANSLATION_USER_PROMPT.format(
+                target_language=LANGUAGE_MAP.get(target_language, target_language),
+                json_content=texts
+            )
+            return await self.translation_client.translate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt
+            )
+        except Exception as e:
+            self.logger.error(f"翻译失败: {str(e)}")
+            raise
+
+    async def simplify(self, texts: Dict[str, str]) -> Dict[str, str]:
+        """执行简化并返回包含 "thinking"、"slight"、"moderate"、"extreme" 字段的 JSON"""
+        try:
+            system_prompt = SIMPLIFICATION_SYSTEM_PROMPT
+            user_prompt = SIMPLIFICATION_USER_PROMPT.format(json_content=texts)
+            return await self.translation_client.translate(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt
+            )
+        except Exception as e:
+            self.logger.error(f"简化失败: {str(e)}")
+            raise
+
+    async def _process_batch(
+        self,
+        items: List[T],
+        process_func: callable,
+        config: BatchConfig,
+        error_handler: Optional[callable] = None,
+        reduce_batch_on_error: bool = True
+    ) -> AsyncGenerator[List[T], None]:
+        if not items:
+            return
+
+        i = 0
+        batch_size = config.initial_size
+        success_count = 0
+
+        while i < len(items):
+            try:
+                batch = items[i:i+batch_size]
+                if not batch:
+                    break
+
+                results = await process_func(batch)
+                if results:
+                    success_count += 1
+                    yield results
+                    i += len(batch)
+                    if reduce_batch_on_error and batch_size < config.initial_size and success_count >= config.required_successes:
+                        self.logger.debug(f"连续成功{success_count}次，恢复到初始批次大小: {config.initial_size}")
+                        batch_size = config.initial_size
+                        success_count = 0
+
+                    if i < len(items):
+                        await asyncio.sleep(config.retry_delay)
+
+            except Exception as e:
+                self.logger.error(f"批处理失败: {str(e)}")
+                if reduce_batch_on_error and batch_size > config.min_size:
+                    batch_size = max(batch_size // 2, config.min_size)
+                    success_count = 0
+                    self.logger.debug(f"出错后减小批次大小到: {batch_size}")
+                    continue
+                else:
+                    if error_handler:
+                        yield error_handler(batch)
+                    i += len(batch)
+
+    async def translate_sentences(
+        self,
+        sentences: List,
+        batch_size: int = 100,
+        target_language: str = "zh"
+    ) -> AsyncGenerator[List, None]:
+        """
+        批量翻译处理，将每个句子的原始文本翻译后赋值给 sentence.trans_text。
+        """
+        if not sentences:
+            self.logger.warning("收到空的句子列表")
+            return
+
+        config = BatchConfig(initial_size=batch_size)
+
+        async def process_batch(batch: List) -> Optional[List]:
+            texts = {str(j): s.raw_text for j, s in enumerate(batch)}
+            self.logger.debug(f"翻译批次: {len(texts)}条文本")
+            translated = await self.translate(texts, target_language)
+            if "output" not in translated:
+                self.logger.error("翻译结果中缺少 output 字段")
+                return None
+            translated_texts = translated["output"]
+            if len(translated_texts) == len(texts):
+                for j, sentence in enumerate(batch):
+                    sentence.trans_text = translated_texts[str(j)]
+                return batch
+            return None
+
+        def handle_error(batch: List) -> List:
+            for sentence in batch:
+                sentence.trans_text = sentence.raw_text
+            return batch
+
+        async for batch_result in self._process_batch(
+            sentences,
+            process_batch,
+            config,
+            error_handler=handle_error,
+            reduce_batch_on_error=True
+        ):
+            yield batch_result
+
+    async def simplify_sentences(
+        self,
+        sentences: List,
+        batch_size: int = 4,
+        target_speed: float = 1.1  # 目标语速设定为 max_speed，此处默认值 1.1
+    ) -> AsyncGenerator[List, None]:
+        """
+        批量精简处理，对于语速过快的句子（由 DurationAligner 筛选），
+        根据原文本与各精简版本的长度比较，计算理想文本长度后选择最佳候选版本。
+
+        理想文本长度计算公式：
+            ideal_length = len(old_text) * (target_speed / s.speed)
+        当 target_speed = max_speed 时，可确保精简后的文本达到预期的语速要求。
+        """
+        if not sentences:
+            self.logger.warning("收到空的句子列表")
+            return
+
+        config = BatchConfig(initial_size=batch_size, min_size=1, required_successes=2)
+
+        async def process_batch(batch: List) -> Optional[List]:
+            texts = {str(i): s.trans_text for i, s in enumerate(batch)}
+            self.logger.debug(f"简化批次: {len(texts)}条文本")
+            batch_result = await self.simplify(texts)
+            
+            if "thinking" not in batch_result or not any(key in batch_result for key in ["slight", "moderate", "extreme"]):
+                self.logger.error("简化结果格式不正确，缺少必要字段")
+                return None
+                
+            for i, s in enumerate(batch):
+                old_text = s.trans_text
+                str_i = str(i)
+                
+                # 确保每个句子的简化结果都存在
+                if not any(str_i in batch_result.get(key, {}) for key in ["slight", "moderate", "extreme"]):
+                    self.logger.error(f"句子 {i} 的简化结果不完整")
+                    continue
+
+                # 根据原文本长度和当前语速计算理想文本长度
+                ideal_length = len(old_text) * (target_speed / s.speed) if s.speed > 0 else len(old_text)
+                
+                acceptable_candidates = {}
+                non_acceptable_candidates = {}
+                
+                for key in ["slight", "moderate", "extreme"]:
+                    if key in batch_result and str_i in batch_result[key]:
+                        candidate_text = batch_result[key][str_i]
+                        if candidate_text:
+                            candidate_length = len(candidate_text)
+                            if candidate_length <= ideal_length:
+                                acceptable_candidates[key] = candidate_text
+                            else:
+                                non_acceptable_candidates[key] = candidate_text
+                
+                if acceptable_candidates:
+                    # 在满足候选长度不超过理想长度的版本中，选择文本最长的版本
+                    chosen_key, chosen_text = max(acceptable_candidates.items(), key=lambda item: len(item[1]))
+                elif non_acceptable_candidates:
+                    # 若所有候选均超过理想长度，则选择与理想长度差值最小的版本
+                    chosen_key, chosen_text = min(non_acceptable_candidates.items(), key=lambda item: abs(len(item[1]) - ideal_length))
+                else:
+                    chosen_text = old_text
+
+                s.trans_text = chosen_text
+                self.logger.info(
+                    f"精简: {old_text} -> {chosen_text} (理想长度: {ideal_length}, s.speed: {s.speed})"
+                )
+            return batch
+
+        def handle_error(batch: List) -> List:
+            # 出错时原样返回
+            return batch
+
+        async for batch_result in self._process_batch(
+            sentences,
+            process_batch,
+            config,
+            error_handler=handle_error,
+            reduce_batch_on_error=False
+        ):
+            yield batch_result
+
+================
 File: workers/translation_worker/worker.py
 ================
 import logging
 from typing import List, Any
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
-from core.translation.translator import Translator
-from models.model_manager import ModelManager
+from .translation.translator import Translator
+from .translation.deepseek_client import DeepSeekClient
+from .translation.gemini_client import GeminiClient
 
 logger = logging.getLogger(__name__)
 
@@ -4599,12 +4563,17 @@ class TranslationWorker:
         self.config = config
         self.logger = logger
         
-        # 获取模型管理器实例
-        model_manager = ModelManager()
-        model_manager.initialize_models(config)
+        # 根据配置选择翻译客户端
+        translation_model = config.TRANSLATION_MODEL.lower()
+        if translation_model == "deepseek":
+            client = DeepSeekClient(api_key=config.DEEPSEEK_API_KEY)
+        elif translation_model == "gemini":
+            client = GeminiClient(api_key=config.GEMINI_API_KEY)
+        else:
+            raise ValueError(f"不支持的翻译模型: {translation_model}")
         
-        # 获取翻译器实例
-        self.translator = model_manager.translator
+        # 直接初始化 Translator
+        self.translator = Translator(translation_client=client)
 
     @worker_decorator(
         input_queue_attr='translation_queue',
@@ -4628,14 +4597,65 @@ if __name__ == '__main__':
     print("Translation Worker 模块加载成功")
 
 ================
+File: workers/tts_worker/tts_token_gener.py
+================
+# core/tts_token_gener.py
+
+import logging
+import asyncio
+from typing import List
+from services.cosyvoice.client import CosyVoiceClient
+from utils import concurrency
+
+class TTSTokenGenerator:
+    def __init__(self, cosyvoice_client: CosyVoiceClient):
+        self.cosyvoice_client = cosyvoice_client
+        self.logger = logging.getLogger(__name__)
+
+    async def tts_token_maker(self, sentences: List):
+        """
+        并发生成TTS tokens，并存储预估时长
+        """
+        if not sentences:
+            return []
+
+        tasks = []
+        for s in sentences:
+            text_uuid = s.model_input.get('text_uuid')
+            speaker_uuid = s.model_input.get('speaker_uuid')
+            if not text_uuid or not speaker_uuid:
+                self.logger.warning("缺少text_uuid或speaker_uuid，无法生成TTS tokens")
+                continue
+
+            tasks.append(asyncio.create_task(self._generate_tts_single_async(s, text_uuid, speaker_uuid)))
+
+        processed = await asyncio.gather(*tasks)
+        return processed
+
+    async def _generate_tts_single_async(self, sentence, text_uuid: str, speaker_uuid: str):
+        return await concurrency.run_sync(
+            self._generate_tts_single, sentence, text_uuid, speaker_uuid
+        )
+
+    def _generate_tts_single(self, sentence, text_uuid: str, speaker_uuid: str):
+        duration_ms, success = self.cosyvoice_client.generate_tts_tokens(text_uuid, speaker_uuid)
+        if not success:
+            self.logger.error(f"生成TTS tokens失败 (text_uuid={text_uuid}, speaker_uuid={speaker_uuid})")
+            return sentence
+
+        sentence.duration = duration_ms
+        self.logger.debug(f"[TTS Token] (text_uuid={text_uuid}, speaker_uuid={speaker_uuid}) 生成完毕 => 估计时长 {duration_ms}ms")
+        return sentence
+
+================
 File: workers/tts_worker/worker.py
 ================
 import logging
 from typing import List, Any
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
-from core.tts_token_gener import TTSTokenGenerator
-from models.model_manager import ModelManager
+from .tts_token_gener import TTSTokenGenerator
+from services.cosyvoice.client import CosyVoiceClient
 
 logger = logging.getLogger(__name__)
 
@@ -4649,12 +4669,10 @@ class TTSTokenWorker:
         self.config = config
         self.logger = logger
         
-        # 获取模型管理器实例
-        model_manager = ModelManager()
-        model_manager.initialize_models(config)
-        
-        # 获取 TTS Token 生成器实例
-        self.tts_token_generator = model_manager.tts_generator
+        # 初始化 CosyVoiceClient
+        cosyvoice_address = f"{config.COSYVOICE_SERVICE_HOST}:{config.COSYVOICE_SERVICE_PORT}"
+        cosyvoice_client = CosyVoiceClient(address=cosyvoice_address)
+        self.tts_token_generator = TTSTokenGenerator(cosyvoice_client=cosyvoice_client)
 
     @worker_decorator(
         input_queue_attr='tts_token_queue',
@@ -5148,9 +5166,6 @@ if __name__ == "__main__":
 ================
 File: video_translator.py
 ================
-# ---------------------------------
-# backend/video_translator.py (节选完整示例)
-# ---------------------------------
 import logging
 from typing import Dict, Any
 from pathlib import Path
@@ -5176,20 +5191,19 @@ logger = logging.getLogger(__name__)
 
 class ViTranslator:
     """
-    视频翻译器：初始化所有模型、工具以及各个 Worker，通过 PipelineScheduler 协调整个处理流程。
+    视频翻译器：初始化所有 Worker，通过 PipelineScheduler 协调整个处理流程。
     """
 
     def __init__(self, config: Config):
         self.config = config
         self.hls_client = None  # 将在 trans_video 中异步初始化
         self.logger = logger
-        self._init_global_models()
+        self._init_workers()
 
-    def _init_global_models(self):
-        """初始化所有需要的模型，只在第一次调用时加载"""
-        self.logger.info("开始初始化模型...")
+    def _init_workers(self):
+        """初始化所有 Worker"""
+        self.logger.info("开始初始化 Worker...")
         
-        # 初始化各 Worker 实例
         self.segment_worker = SegmentWorker(config=self.config)
         self.asr_worker = ASRWorker(config=self.config)
         self.translation_worker = TranslationWorker(config=self.config)
@@ -5197,9 +5211,9 @@ class ViTranslator:
         self.tts_token_worker = TTSTokenWorker(config=self.config)
         self.duration_worker = DurationWorker(config=self.config)
         self.audio_gen_worker = AudioGenWorker(config=self.config)
-        self.mixer_worker = None  # 将在 trans_video 中初始化
-
-        self.logger.info("初始化完成")
+        self.mixer_worker = None  # 将在 trans_video 中初始化，依赖 HLSClient
+        
+        self.logger.info("Worker 初始化完成")
 
     async def trans_video(
         self,

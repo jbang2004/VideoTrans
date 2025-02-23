@@ -2,9 +2,10 @@ import logging
 from typing import List, Any
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
-from core.audio_gener import AudioGenerator
-from models.model_manager import ModelManager
+from .audio_gener import AudioGenerator
 from .timestamp_adjuster import TimestampAdjuster
+from services.cosyvoice.client import CosyVoiceClient
+
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +19,13 @@ class AudioGenWorker:
         self.config = config
         self.logger = logger
         
-        # 获取模型管理器实例
-        model_manager = ModelManager()
-        model_manager.initialize_models(config)
-        
-        # 获取音频生成器实例
-        self.audio_generator = model_manager.audio_generator
-        
-        # 直接实例化时间戳调整器
+        # 初始化 CosyVoiceClient
+        cosyvoice_address = f"{config.COSYVOICE_SERVICE_HOST}:{config.COSYVOICE_SERVICE_PORT}"
+        cosyvoice_client = CosyVoiceClient(address=cosyvoice_address)
+        self.audio_generator = AudioGenerator(
+            cosyvoice_client=cosyvoice_client,
+            sample_rate=config.SAMPLE_RATE
+        )
         self.timestamp_adjuster = TimestampAdjuster(config=config)
 
     @worker_decorator(

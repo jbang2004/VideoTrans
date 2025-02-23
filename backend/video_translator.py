@@ -1,6 +1,3 @@
-# ---------------------------------
-# backend/video_translator.py (节选完整示例)
-# ---------------------------------
 import logging
 from typing import Dict, Any
 from pathlib import Path
@@ -26,20 +23,19 @@ logger = logging.getLogger(__name__)
 
 class ViTranslator:
     """
-    视频翻译器：初始化所有模型、工具以及各个 Worker，通过 PipelineScheduler 协调整个处理流程。
+    视频翻译器：初始化所有 Worker，通过 PipelineScheduler 协调整个处理流程。
     """
 
     def __init__(self, config: Config):
         self.config = config
         self.hls_client = None  # 将在 trans_video 中异步初始化
         self.logger = logger
-        self._init_global_models()
+        self._init_workers()
 
-    def _init_global_models(self):
-        """初始化所有需要的模型，只在第一次调用时加载"""
-        self.logger.info("开始初始化模型...")
+    def _init_workers(self):
+        """初始化所有 Worker"""
+        self.logger.info("开始初始化 Worker...")
         
-        # 初始化各 Worker 实例
         self.segment_worker = SegmentWorker(config=self.config)
         self.asr_worker = ASRWorker(config=self.config)
         self.translation_worker = TranslationWorker(config=self.config)
@@ -47,9 +43,9 @@ class ViTranslator:
         self.tts_token_worker = TTSTokenWorker(config=self.config)
         self.duration_worker = DurationWorker(config=self.config)
         self.audio_gen_worker = AudioGenWorker(config=self.config)
-        self.mixer_worker = None  # 将在 trans_video 中初始化
-
-        self.logger.info("初始化完成")
+        self.mixer_worker = None  # 将在 trans_video 中初始化，依赖 HLSClient
+        
+        self.logger.info("Worker 初始化完成")
 
     async def trans_video(
         self,

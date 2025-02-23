@@ -2,8 +2,9 @@ import logging
 from typing import List, Any
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
-from core.translation.translator import Translator
-from models.model_manager import ModelManager
+from .translation.translator import Translator
+from .translation.deepseek_client import DeepSeekClient
+from .translation.gemini_client import GeminiClient
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +18,17 @@ class TranslationWorker:
         self.config = config
         self.logger = logger
         
-        # 获取模型管理器实例
-        model_manager = ModelManager()
-        model_manager.initialize_models(config)
+        # 根据配置选择翻译客户端
+        translation_model = config.TRANSLATION_MODEL.lower()
+        if translation_model == "deepseek":
+            client = DeepSeekClient(api_key=config.DEEPSEEK_API_KEY)
+        elif translation_model == "gemini":
+            client = GeminiClient(api_key=config.GEMINI_API_KEY)
+        else:
+            raise ValueError(f"不支持的翻译模型: {translation_model}")
         
-        # 获取翻译器实例
-        self.translator = model_manager.translator
+        # 直接初始化 Translator
+        self.translator = Translator(translation_client=client)
 
     @worker_decorator(
         input_queue_attr='translation_queue',

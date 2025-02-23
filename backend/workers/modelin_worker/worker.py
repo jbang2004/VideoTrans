@@ -2,8 +2,8 @@ import logging
 from typing import List, Any
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
-from core.model_in import ModelIn
-from models.model_manager import ModelManager
+from .model_in import ModelIn
+from services.cosyvoice.client import CosyVoiceClient
 
 logger = logging.getLogger(__name__)
 
@@ -17,12 +17,10 @@ class ModelInWorker:
         self.config = config
         self.logger = logger
         
-        # 获取模型管理器实例
-        model_manager = ModelManager()
-        model_manager.initialize_models(config)
-        
-        # 获取 ModelIn 实例
-        self.model_in = model_manager.model_in
+        # 初始化 CosyVoiceClient
+        cosyvoice_address = f"{config.COSYVOICE_SERVICE_HOST}:{config.COSYVOICE_SERVICE_PORT}"
+        cosyvoice_client = CosyVoiceClient(address=cosyvoice_address)
+        self.model_in = ModelIn(cosyvoice_client=cosyvoice_client)
 
     @worker_decorator(
         input_queue_attr='modelin_queue',
