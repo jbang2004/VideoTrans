@@ -15,7 +15,6 @@ class ModelIn:
         self.cosyvoice_client = cosyvoice_client
         self.logger = logging.getLogger(__name__)
         self.semaphore = asyncio.Semaphore(max_concurrent_tasks)
-        # 缓存 speaker 特征提取任务，确保同一 speaker 只处理一次
         self.speaker_cache: Dict[str, asyncio.Task] = {}  # speaker_id -> asyncio.Task
         self.max_val = 0.8
         self.cosy_sample_rate = 24000
@@ -33,79 +32,69 @@ class ModelIn:
         if np.abs(speech).max() > self.max_val:
             speech = speech / np.abs(speech).max() * self.max_val
 
-        # 结尾加 0.2s 静音
         pad_samples = int(self.cosy_sample_rate * 0.2)
         speech = np.concatenate([speech, np.zeros(pad_samples, dtype=speech.dtype)])
         return speech
 
     async def get_speaker_features(self, speaker_id: str, sentence) -> str:
         """
-        异步提取 speaker 特征，并将任务缓存，
-        确保同一 speaker 只处理一次。返回UUID。
+        异步提取说话人特征，返回说话人UUID
         """
         if speaker_id in self.speaker_cache:
             return await self.speaker_cache[speaker_id]
 
         async def extract_features() -> str:
-            # 获取音频数据
-            audio_np = (
-                sentence.audio.squeeze(0).cpu().numpy()
-                if isinstance(sentence.audio, torch.Tensor)
-                else sentence.audio
-            )
+            # 1. 确保是 numpy array
+            audio_np = sentence.audio.squeeze(0).cpu().numpy() if isinstance(sentence.audio, torch.Tensor) else sentence.audio
+            
+            # 2. 处理音频，得到numpy array
             postprocessed_audio = self.postprocess(audio_np)
-            postprocessed_tensor = torch.from_numpy(postprocessed_audio).unsqueeze(0)
 
-            # 获取UUID并提取特征
-            uuid = await asyncio.to_thread(
-                self.cosyvoice_client.normalize_text,
-                ""  # 空文本，只用于获取UUID
-            )
+            speaker_uuid = str(uuid.uuid4())
             success = await asyncio.to_thread(
                 self.cosyvoice_client.extract_speaker_features,
-                uuid,
-                postprocessed_tensor,
+                speaker_uuid,
+                postprocessed_audio,  # 直接传递numpy array
                 self.cosy_sample_rate
             )
             if not success:
                 raise Exception("提取说话人特征失败")
-            return uuid
+            return speaker_uuid
 
         task = asyncio.create_task(extract_features())
         self.speaker_cache[speaker_id] = task
         return await task
 
-    async def _process_one_sentence_async(self, sentence, reuse_speaker: bool, reuse_uuid: bool):
+    async def _process_one_sentence_async(self, sentence, reuse_speaker: bool):
         async with self.semaphore:
             speaker_id = getattr(sentence, 'speaker_id', None)
             
-            # 处理UUID
-            if not reuse_uuid:
-                # 获取新的UUID
-                uuid = await asyncio.to_thread(
-                    self.cosyvoice_client.normalize_text,
-                    sentence.trans_text or ""
-                )
-                sentence.model_input['uuid'] = uuid
+            # 处理文本UUID
+            text_uuid = await asyncio.to_thread(
+                self.cosyvoice_client.normalize_text,
+                sentence.trans_text or ""
+            )
+            sentence.model_input['text_uuid'] = text_uuid
             
-            # speaker 特征提取
+            # 处理说话人UUID
             if speaker_id is not None and not reuse_speaker:
                 speaker_uuid = await self.get_speaker_features(speaker_id, sentence)
                 sentence.model_input['speaker_uuid'] = speaker_uuid
+            elif 'speaker_uuid' not in sentence.model_input:
+                raise ValueError("缺少说话人UUID且未提取新特征")
 
             return sentence
 
-    async def modelin_maker(self, sentences: List, reuse_speaker: bool = False, reuse_uuid: bool = False, batch_size: int = 3):
+    async def modelin_maker(self, sentences: List, reuse_speaker: bool = False, batch_size: int = 3):
         """
-        对一批 sentence 进行文本与 speaker 特征提取，
-        并按 batch_size 分批 yield 结果。
+        对一批 sentence 进行文本与说话人特征提取，按 batch_size 分批 yield 结果
         """
         if not sentences:
             self.logger.warning("modelin_maker: 收到空句子列表")
             return
 
         tasks = [
-            asyncio.create_task(self._process_one_sentence_async(s, reuse_speaker, reuse_uuid))
+            asyncio.create_task(self._process_one_sentence_async(s, reuse_speaker))
             for s in sentences
         ]
 

@@ -19,13 +19,13 @@ message NormalizeTextRequest {
 }
 
 message NormalizeTextResponse {
-  string uuid = 1;      // 返回生成的UUID
+  string text_uuid = 1;  // 返回文本特征的UUID
 }
 
 // 2) ExtractSpeakerFeatures
 message ExtractSpeakerFeaturesRequest {
-  string uuid = 1;      // 目标UUID
-  bytes audio = 2;      // 音频数据
+  string speaker_uuid = 1;  // 说话人特征的UUID
+  bytes audio = 2;         // 音频数据
   int32 sample_rate = 3;
 }
 
@@ -35,7 +35,8 @@ message ExtractSpeakerFeaturesResponse {
 
 // 3) GenerateTTSTokens
 message GenerateTTSTokensRequest {
-  string uuid = 1;      // 目标UUID
+  string text_uuid = 1;     // 文本特征的UUID
+  string speaker_uuid = 2;  // 说话人特征的UUID
 }
 
 message GenerateTTSTokensResponse {
@@ -45,8 +46,9 @@ message GenerateTTSTokensResponse {
 
 // 4) Token2Wav
 message Token2WavRequest {
-  string uuid = 1;      // 目标UUID
-  float speed = 2;
+  string text_uuid = 1;     // 文本特征的UUID
+  string speaker_uuid = 2;  // 说话人特征的UUID
+  float speed = 3;
 }
 
 message Token2WavResponse {
@@ -56,7 +58,8 @@ message Token2WavResponse {
 
 // 5) Cleanup
 message CleanupRequest {
-  string uuid = 1;      // 要清理的UUID
+  string uuid = 1;          // 要清理的UUID（可以是text_uuid或speaker_uuid）
+  bool is_speaker = 2;      // 是否清理说话人特征
 }
 
 message CleanupResponse {

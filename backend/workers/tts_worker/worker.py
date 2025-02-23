@@ -34,7 +34,7 @@ class TTSTokenWorker:
             return
         self.logger.debug(f"[TTS Token生成 Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
 
-        await self.tts_token_generator.tts_token_maker(sentences_batch, reuse_uuid=False)
+        await self.tts_token_generator.tts_token_maker(sentences_batch)
         return sentences_batch
 
 if __name__ == '__main__':

@@ -98,11 +98,10 @@ class DurationAligner:
             async for batch in self.model_in.modelin_maker(
                 sentences,
                 reuse_speaker=True,
-                reuse_uuid=True,
                 batch_size=3
             ):
                 # 3. 再生成 token（复用 uuid）
-                updated_batch = await self.tts_token_gener.tts_token_maker(batch, reuse_uuid=True)
+                updated_batch = await self.tts_token_gener.tts_token_maker(batch)
             return True
         except Exception as e:
             self.logger.error(f"_retry_sentences_batch 出错: {e}")

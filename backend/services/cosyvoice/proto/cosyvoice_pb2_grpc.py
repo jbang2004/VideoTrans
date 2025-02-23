@@ -35,6 +35,11 @@ class CosyVoiceServiceStub(object):
                 request_serializer=cosyvoice__pb2.Token2WavRequest.SerializeToString,
                 response_deserializer=cosyvoice__pb2.Token2WavResponse.FromString,
                 )
+        self.Cleanup = channel.unary_unary(
+                '/cosyvoice.CosyVoiceService/Cleanup',
+                request_serializer=cosyvoice__pb2.CleanupRequest.SerializeToString,
+                response_deserializer=cosyvoice__pb2.CleanupResponse.FromString,
+                )
 
 
 class CosyVoiceServiceServicer(object):
@@ -65,6 +70,12 @@ class CosyVoiceServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def Cleanup(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_CosyVoiceServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -87,6 +98,11 @@ def add_CosyVoiceServiceServicer_to_server(servicer, server):
                     servicer.Token2Wav,
                     request_deserializer=cosyvoice__pb2.Token2WavRequest.FromString,
                     response_serializer=cosyvoice__pb2.Token2WavResponse.SerializeToString,
+            ),
+            'Cleanup': grpc.unary_unary_rpc_method_handler(
+                    servicer.Cleanup,
+                    request_deserializer=cosyvoice__pb2.CleanupRequest.FromString,
+                    response_serializer=cosyvoice__pb2.CleanupResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -164,5 +180,22 @@ class CosyVoiceService(object):
         return grpc.experimental.unary_unary(request, target, '/cosyvoice.CosyVoiceService/Token2Wav',
             cosyvoice__pb2.Token2WavRequest.SerializeToString,
             cosyvoice__pb2.Token2WavResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def Cleanup(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/cosyvoice.CosyVoiceService/Cleanup',
+            cosyvoice__pb2.CleanupRequest.SerializeToString,
+            cosyvoice__pb2.CleanupResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

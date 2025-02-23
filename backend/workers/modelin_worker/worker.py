@@ -38,7 +38,6 @@ class ModelInWorker:
         async for updated_batch in self.model_in.modelin_maker(
             sentences_batch,
             reuse_speaker=False,
-            reuse_uuid=False,
             batch_size=self.config.MODELIN_BATCH_SIZE
         ):
             yield updated_batch
