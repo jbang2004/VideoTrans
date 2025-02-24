@@ -2,7 +2,7 @@ import m3u8
 import logging
 from pathlib import Path
 from typing import Optional, Dict
-from ..storage_service import StorageService
+from .storage import StorageService
 from utils.ffmpeg_utils import FFmpegTool
 
 logger = logging.getLogger(__name__)

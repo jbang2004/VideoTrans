@@ -27,10 +27,6 @@ class CosyVoiceServiceServicer(cosyvoice_pb2_grpc.CosyVoiceServiceServicer):
             self.sample_rate = self.cosyvoice.sample_rate
             self.cache = FeaturesCache()
             
-            # 创建调试音频保存目录
-            self.debug_dir = "debug_audio"
-            os.makedirs(self.debug_dir, exist_ok=True)
-            
             logger.info('CosyVoice服务初始化成功')
         except Exception as e:
             logger.error(f'CosyVoice服务初始化失败: {e}')

@@ -66,8 +66,8 @@ services/
     client.py
     server.py
     service.py
+    storage.py
   __init__.py
-  storage_service.py
 utils/
   concurrency.py
   decorators.py
@@ -676,10 +676,6 @@ class CosyVoiceServiceServicer(cosyvoice_pb2_grpc.CosyVoiceServiceServicer):
             self.model = self.cosyvoice.model
             self.sample_rate = self.cosyvoice.sample_rate
             self.cache = FeaturesCache()
-            
-            # 创建调试音频保存目录
-            self.debug_dir = "debug_audio"
-            os.makedirs(self.debug_dir, exist_ok=True)
             
             logger.info('CosyVoice服务初始化成功')
         except Exception as e:
@@ -1347,7 +1343,7 @@ from pathlib import Path
 from .proto import hls_service_pb2
 from .proto import hls_service_pb2_grpc
 from .service import HLSService
-from ..storage_service import LocalStorageService
+from .storage import LocalStorageService
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -1488,7 +1484,7 @@ import m3u8
 import logging
 from pathlib import Path
 from typing import Optional, Dict
-from ..storage_service import StorageService
+from .storage import StorageService
 from utils.ffmpeg_utils import FFmpegTool
 
 logger = logging.getLogger(__name__)
@@ -1598,22 +1594,7 @@ class HLSService:
             self.logger.error(f"清理HLS资源失败: {e}")
 
 ================
-File: services/__init__.py
-================
-from .storage_service import StorageService, LocalStorageService
-from .hls import HLSService, HLSClient, HLSServicer, serve
-
-__all__ = [
-    'StorageService',
-    'LocalStorageService',
-    'HLSService',
-    'HLSClient',
-    'HLSServicer',
-    'serve'
-]
-
-================
-File: services/storage_service.py
+File: services/hls/storage.py
 ================
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -1692,6 +1673,24 @@ class LocalStorageService(StorageService):
         playlist_path = self.public_dir / "playlists" / f"{task_id}.m3u8"
         if playlist_path.exists():
             playlist_path.unlink()
+
+================
+File: services/__init__.py
+================
+from .hls.storage import StorageService, LocalStorageService
+from .hls.service import HLSService
+from .hls.client import HLSClient
+from .cosyvoice.service import CosyVoiceServiceServicer
+from .cosyvoice.client import CosyVoiceClient
+
+__all__ = [
+    'StorageService',
+    'LocalStorageService',
+    'HLSService',
+    'HLSClient',
+    'CosyVoiceServiceServicer',
+    'CosyVoiceClient'
+]
 
 ================
 File: utils/concurrency.py

@@ -6,7 +6,7 @@ from pathlib import Path
 from .proto import hls_service_pb2
 from .proto import hls_service_pb2_grpc
 from .service import HLSService
-from ..storage_service import LocalStorageService
+from .storage import LocalStorageService
 from config import Config
 
 logger = logging.getLogger(__name__)
