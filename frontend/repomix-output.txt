@@ -1,0 +1,1815 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+
+================================================================
+File Summary
+================================================================
+
+Purpose:
+--------
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+
+File Format:
+------------
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Multiple file entries, each consisting of:
+  a. A separator line (================)
+  b. The file path (File: path/to/file)
+  c. Another separator line
+  d. The full contents of the file
+  e. A blank line
+
+Usage Guidelines:
+-----------------
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+
+Notes:
+------
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: node_modules/
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+
+Additional Info:
+----------------
+
+================================================================
+Directory Structure
+================================================================
+app/
+  globals.css
+  layout.tsx
+  page.tsx
+components/
+  ui/
+    button.tsx
+    popover.tsx
+    scroll-area.tsx
+    select.tsx
+    slider.tsx
+  video-player/
+    components/
+      Sidebar.tsx
+      TranslationControls.tsx
+      UploadButton.tsx
+      VideoControls.tsx
+    hooks/
+      useHLSPlayer.ts
+      useTranslation.ts
+      useVideoPlayer.ts
+    types/
+      index.ts
+    utils/
+      format.ts
+    index.tsx
+lib/
+  utils.ts
+styles/
+  globals.css
+.eslintrc.json
+.gitignore
+components.json
+next.config.mjs
+package.json
+postcss.config.mjs
+README.md
+tailwind.config.ts
+tsconfig.json
+
+================================================================
+Files
+================================================================
+
+================
+File: app/globals.css
+================
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 224 71.4% 4.1%;
+    --card: 0 0% 100%;
+    --card-foreground: 224 71.4% 4.1%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 224 71.4% 4.1%;
+    --primary: 220.9 39.3% 11%;
+    --primary-foreground: 210 20% 98%;
+    --secondary: 220 14.3% 95.9%;
+    --secondary-foreground: 220.9 39.3% 11%;
+    --muted: 220 14.3% 95.9%;
+    --muted-foreground: 220 8.9% 46.1%;
+    --accent: 220 14.3% 95.9%;
+    --accent-foreground: 220.9 39.3% 11%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 20% 98%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 224 71.4% 4.1%;
+    --chart-1: 12 76% 61%;
+    --chart-2: 173 58% 39%;
+    --chart-3: 197 37% 24%;
+    --chart-4: 43 74% 66%;
+    --chart-5: 27 87% 67%;
+    --radius: 0.5rem;
+  }
+  .dark {
+    --background: 224 71.4% 4.1%;
+    --foreground: 210 20% 98%;
+    --card: 224 71.4% 4.1%;
+    --card-foreground: 210 20% 98%;
+    --popover: 224 71.4% 4.1%;
+    --popover-foreground: 210 20% 98%;
+    --primary: 210 20% 98%;
+    --primary-foreground: 220.9 39.3% 11%;
+    --secondary: 215 27.9% 16.9%;
+    --secondary-foreground: 210 20% 98%;
+    --muted: 215 27.9% 16.9%;
+    --muted-foreground: 217.9 10.6% 64.9%;
+    --accent: 215 27.9% 16.9%;
+    --accent-foreground: 210 20% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 20% 98%;
+    --border: 215 27.9% 16.9%;
+    --input: 215 27.9% 16.9%;
+    --ring: 216 12.2% 83.9%;
+    --chart-1: 220 70% 50%;
+    --chart-2: 160 60% 45%;
+    --chart-3: 30 80% 55%;
+    --chart-4: 280 65% 60%;
+    --chart-5: 340 75% 55%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+================
+File: app/layout.tsx
+================
+import type { Metadata } from "next";
+import localFont from "next/font/local";
+import "./globals.css";
+
+const geistSans = localFont({
+  src: "./fonts/GeistVF.woff",
+  variable: "--font-geist-sans",
+  weight: "100 900",
+});
+const geistMono = localFont({
+  src: "./fonts/GeistMonoVF.woff",
+  variable: "--font-geist-mono",
+  weight: "100 900",
+});
+
+export const metadata: Metadata = {
+  title: "Create Next App",
+  description: "Generated by create next app",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+      >
+        {children}
+      </body>
+    </html>
+  );
+}
+
+================
+File: app/page.tsx
+================
+import VideoPlayer from "@/components/video-player"
+
+export default function Page() {
+  return <VideoPlayer />
+}
+
+================
+File: components/ui/button.tsx
+================
+import * as React from "react"
+import { Slot } from "@radix-ui/react-slot"
+import { cva, type VariantProps } from "class-variance-authority"
+
+import { cn } from "@/lib/utils"
+
+const buttonVariants = cva(
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  {
+    variants: {
+      variant: {
+        default:
+          "bg-primary text-primary-foreground shadow hover:bg-primary/90",
+        destructive:
+          "bg-destructive text-destructive-foreground shadow-sm hover:bg-destructive/90",
+        outline:
+          "border border-input bg-background shadow-sm hover:bg-accent hover:text-accent-foreground",
+        secondary:
+          "bg-secondary text-secondary-foreground shadow-sm hover:bg-secondary/80",
+        ghost: "hover:bg-accent hover:text-accent-foreground",
+        link: "text-primary underline-offset-4 hover:underline",
+      },
+      size: {
+        default: "h-9 px-4 py-2",
+        sm: "h-8 rounded-md px-3 text-xs",
+        lg: "h-10 rounded-md px-8",
+        icon: "h-9 w-9",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+      size: "default",
+    },
+  }
+)
+
+export interface ButtonProps
+  extends React.ButtonHTMLAttributes<HTMLButtonElement>,
+    VariantProps<typeof buttonVariants> {
+  asChild?: boolean
+}
+
+const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
+  ({ className, variant, size, asChild = false, ...props }, ref) => {
+    const Comp = asChild ? Slot : "button"
+    return (
+      <Comp
+        className={cn(buttonVariants({ variant, size, className }))}
+        ref={ref}
+        {...props}
+      />
+    )
+  }
+)
+Button.displayName = "Button"
+
+export { Button, buttonVariants }
+
+================
+File: components/ui/popover.tsx
+================
+"use client"
+
+import * as React from "react"
+import * as PopoverPrimitive from "@radix-ui/react-popover"
+
+import { cn } from "@/lib/utils"
+
+const Popover = PopoverPrimitive.Root
+
+const PopoverTrigger = PopoverPrimitive.Trigger
+
+const PopoverAnchor = PopoverPrimitive.Anchor
+
+const PopoverContent = React.forwardRef<
+  React.ElementRef<typeof PopoverPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof PopoverPrimitive.Content>
+>(({ className, align = "center", sideOffset = 4, ...props }, ref) => (
+  <PopoverPrimitive.Portal>
+    <PopoverPrimitive.Content
+      ref={ref}
+      align={align}
+      sideOffset={sideOffset}
+      className={cn(
+        "z-50 w-72 rounded-md border bg-popover p-4 text-popover-foreground shadow-md outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+        className
+      )}
+      {...props}
+    />
+  </PopoverPrimitive.Portal>
+))
+PopoverContent.displayName = PopoverPrimitive.Content.displayName
+
+export { Popover, PopoverTrigger, PopoverContent, PopoverAnchor }
+
+================
+File: components/ui/scroll-area.tsx
+================
+"use client"
+
+import * as React from "react"
+import * as ScrollAreaPrimitive from "@radix-ui/react-scroll-area"
+
+import { cn } from "@/lib/utils"
+
+const ScrollArea = React.forwardRef<
+  React.ElementRef<typeof ScrollAreaPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.Root>
+>(({ className, children, ...props }, ref) => (
+  <ScrollAreaPrimitive.Root
+    ref={ref}
+    className={cn("relative overflow-hidden", className)}
+    {...props}
+  >
+    <ScrollAreaPrimitive.Viewport className="h-full w-full rounded-[inherit]">
+      {children}
+    </ScrollAreaPrimitive.Viewport>
+    <ScrollBar />
+    <ScrollAreaPrimitive.Corner />
+  </ScrollAreaPrimitive.Root>
+))
+ScrollArea.displayName = ScrollAreaPrimitive.Root.displayName
+
+const ScrollBar = React.forwardRef<
+  React.ElementRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>,
+  React.ComponentPropsWithoutRef<typeof ScrollAreaPrimitive.ScrollAreaScrollbar>
+>(({ className, orientation = "vertical", ...props }, ref) => (
+  <ScrollAreaPrimitive.ScrollAreaScrollbar
+    ref={ref}
+    orientation={orientation}
+    className={cn(
+      "flex touch-none select-none transition-colors",
+      orientation === "vertical" &&
+        "h-full w-2.5 border-l border-l-transparent p-[1px]",
+      orientation === "horizontal" &&
+        "h-2.5 flex-col border-t border-t-transparent p-[1px]",
+      className
+    )}
+    {...props}
+  >
+    <ScrollAreaPrimitive.ScrollAreaThumb className="relative flex-1 rounded-full bg-border" />
+  </ScrollAreaPrimitive.ScrollAreaScrollbar>
+))
+ScrollBar.displayName = ScrollAreaPrimitive.ScrollAreaScrollbar.displayName
+
+export { ScrollArea, ScrollBar }
+
+================
+File: components/ui/select.tsx
+================
+"use client"
+
+import * as React from "react"
+import * as SelectPrimitive from "@radix-ui/react-select"
+import { Check, ChevronDown, ChevronUp } from "lucide-react"
+
+import { cn } from "@/lib/utils"
+
+const Select = SelectPrimitive.Root
+
+const SelectGroup = SelectPrimitive.Group
+
+const SelectValue = SelectPrimitive.Value
+
+const SelectTrigger = React.forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Trigger>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
+>(({ className, children, ...props }, ref) => (
+  <SelectPrimitive.Trigger
+    ref={ref}
+    className={cn(
+      "flex h-9 w-full items-center justify-between whitespace-nowrap rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+      className
+    )}
+    {...props}
+  >
+    {children}
+    <SelectPrimitive.Icon asChild>
+      <ChevronDown className="h-4 w-4 opacity-50" />
+    </SelectPrimitive.Icon>
+  </SelectPrimitive.Trigger>
+))
+SelectTrigger.displayName = SelectPrimitive.Trigger.displayName
+
+const SelectScrollUpButton = React.forwardRef<
+  React.ElementRef<typeof SelectPrimitive.ScrollUpButton>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.ScrollUpButton>
+>(({ className, ...props }, ref) => (
+  <SelectPrimitive.ScrollUpButton
+    ref={ref}
+    className={cn(
+      "flex cursor-default items-center justify-center py-1",
+      className
+    )}
+    {...props}
+  >
+    <ChevronUp className="h-4 w-4" />
+  </SelectPrimitive.ScrollUpButton>
+))
+SelectScrollUpButton.displayName = SelectPrimitive.ScrollUpButton.displayName
+
+const SelectScrollDownButton = React.forwardRef<
+  React.ElementRef<typeof SelectPrimitive.ScrollDownButton>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.ScrollDownButton>
+>(({ className, ...props }, ref) => (
+  <SelectPrimitive.ScrollDownButton
+    ref={ref}
+    className={cn(
+      "flex cursor-default items-center justify-center py-1",
+      className
+    )}
+    {...props}
+  >
+    <ChevronDown className="h-4 w-4" />
+  </SelectPrimitive.ScrollDownButton>
+))
+SelectScrollDownButton.displayName =
+  SelectPrimitive.ScrollDownButton.displayName
+
+const SelectContent = React.forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Content>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
+>(({ className, children, position = "popper", ...props }, ref) => (
+  <SelectPrimitive.Portal>
+    <SelectPrimitive.Content
+      ref={ref}
+      className={cn(
+        "relative z-50 max-h-96 min-w-[8rem] overflow-hidden rounded-md border bg-popover text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2",
+        position === "popper" &&
+          "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
+        className
+      )}
+      position={position}
+      {...props}
+    >
+      <SelectScrollUpButton />
+      <SelectPrimitive.Viewport
+        className={cn(
+          "p-1",
+          position === "popper" &&
+            "h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)]"
+        )}
+      >
+        {children}
+      </SelectPrimitive.Viewport>
+      <SelectScrollDownButton />
+    </SelectPrimitive.Content>
+  </SelectPrimitive.Portal>
+))
+SelectContent.displayName = SelectPrimitive.Content.displayName
+
+const SelectLabel = React.forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Label>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Label>
+>(({ className, ...props }, ref) => (
+  <SelectPrimitive.Label
+    ref={ref}
+    className={cn("px-2 py-1.5 text-sm font-semibold", className)}
+    {...props}
+  />
+))
+SelectLabel.displayName = SelectPrimitive.Label.displayName
+
+const SelectItem = React.forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Item>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
+>(({ className, children, ...props }, ref) => (
+  <SelectPrimitive.Item
+    ref={ref}
+    className={cn(
+      "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-2 pr-8 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      className
+    )}
+    {...props}
+  >
+    <span className="absolute right-2 flex h-3.5 w-3.5 items-center justify-center">
+      <SelectPrimitive.ItemIndicator>
+        <Check className="h-4 w-4" />
+      </SelectPrimitive.ItemIndicator>
+    </span>
+    <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+  </SelectPrimitive.Item>
+))
+SelectItem.displayName = SelectPrimitive.Item.displayName
+
+const SelectSeparator = React.forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Separator>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Separator>
+>(({ className, ...props }, ref) => (
+  <SelectPrimitive.Separator
+    ref={ref}
+    className={cn("-mx-1 my-1 h-px bg-muted", className)}
+    {...props}
+  />
+))
+SelectSeparator.displayName = SelectPrimitive.Separator.displayName
+
+export {
+  Select,
+  SelectGroup,
+  SelectValue,
+  SelectTrigger,
+  SelectContent,
+  SelectLabel,
+  SelectItem,
+  SelectSeparator,
+  SelectScrollUpButton,
+  SelectScrollDownButton,
+}
+
+================
+File: components/ui/slider.tsx
+================
+"use client"
+
+import * as React from "react"
+import * as SliderPrimitive from "@radix-ui/react-slider"
+
+import { cn } from "@/lib/utils"
+
+const Slider = React.forwardRef<
+  React.ElementRef<typeof SliderPrimitive.Root>,
+  React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root>
+>(({ className, ...props }, ref) => (
+  <SliderPrimitive.Root
+    ref={ref}
+    className={cn(
+      "relative flex w-full touch-none select-none items-center",
+      className
+    )}
+    {...props}
+  >
+    <SliderPrimitive.Track className="relative h-1.5 w-full grow overflow-hidden rounded-full bg-primary/20">
+      <SliderPrimitive.Range className="absolute h-full bg-primary" />
+    </SliderPrimitive.Track>
+    <SliderPrimitive.Thumb className="block h-4 w-4 rounded-full border border-primary/50 bg-background shadow transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50" />
+  </SliderPrimitive.Root>
+))
+Slider.displayName = SliderPrimitive.Root.displayName
+
+export { Slider }
+
+================
+File: components/video-player/components/Sidebar.tsx
+================
+import React from 'react'
+import { Button } from '../../ui/button'
+import { ScrollArea } from '../../ui/scroll-area'
+import { Clock, Folder, Heart, Library, Star, Upload, Video } from 'lucide-react'
+
+export function Sidebar() {
+  return (
+    <div className="w-[240px] border-r border-white/10 bg-white/[0.02] backdrop-blur-sm">
+      <ScrollArea className="h-full">
+        <div className="p-4">
+          <div className="mb-8">
+            <h1 className="mb-4 text-xl font-bold bg-gradient-to-r from-white to-white/70 bg-clip-text text-transparent">Sora</h1>
+          </div>
+
+          <nav className="space-y-6">
+            <div>
+              <h2 className="mb-2 text-sm font-semibold text-white/50">Explore</h2>
+              <div className="space-y-1">
+                <Button variant="ghost" className="w-full justify-start gap-2 text-white/70 hover:text-white hover:bg-white/10">
+                  <Clock className="h-4 w-4" />
+                  Recent
+                </Button>
+                <Button variant="ghost" className="w-full justify-start gap-2 text-white/70 hover:text-white hover:bg-white/10">
+                  <Star className="h-4 w-4" />
+                  Featured
+                </Button>
+                <Button variant="ghost" className="w-full justify-start gap-2 text-white/70 hover:text-white hover:bg-white/10">
+                  <Heart className="h-4 w-4" />
+                  Saved
+                </Button>
+              </div>
+            </div>
+
+            <div>
+              <h2 className="mb-2 text-sm font-semibold text-white/50">Library</h2>
+              <div className="space-y-1">
+                <Button variant="ghost" className="w-full justify-start gap-2 text-white/70 hover:text-white hover:bg-white/10">
+                  <Video className="h-4 w-4" />
+                  All videos
+                </Button>
+                <Button variant="ghost" className="w-full justify-start gap-2 text-white/70 hover:text-white hover:bg-white/10">
+                  <Star className="h-4 w-4" />
+                  Favorites
+                </Button>
+                <Button variant="ghost" className="w-full justify-start gap-2 text-white/70 hover:text-white hover:bg-white/10">
+                  <Upload className="h-4 w-4" />
+                  Uploads
+                </Button>
+                <Button variant="ghost" className="w-full justify-start gap-2 text-white/70 hover:text-white hover:bg-white/10">
+                  <Folder className="h-4 w-4" />
+                  New folder
+                </Button>
+              </div>
+            </div>
+          </nav>
+        </div>
+      </ScrollArea>
+    </div>
+  )
+}
+
+================
+File: components/video-player/components/TranslationControls.tsx
+================
+// ===============================================
+// frontend/components/video-player/components/TranslationControls.tsx
+// ===============================================
+import React from "react"
+import { Button } from "../../ui/button"
+import { Popover, PopoverTrigger, PopoverContent } from "../../ui/popover"
+import { ChevronUp } from "lucide-react"
+import { cn } from "../../../lib/utils"
+import { LANGUAGES, API_BASE_URL } from "../utils/format"
+import type { TranslationState, TranslationControls } from "../types"
+
+interface TranslationControlsProps {
+  state: TranslationState
+  controls: TranslationControls
+}
+
+export function TranslationControls({ state, controls }: TranslationControlsProps) {
+  const {
+    isTranslating,
+    isProcessing,
+    isCompleted,
+    selectedLanguage,
+    selectedFile,
+    taskId,
+    // ============ (新增) ============
+    subtitleWanted,
+  } = state
+
+  const {
+    startTranslation,
+    stopTranslation,
+    setLanguage,
+    // ============ (新增) ============
+    toggleSubtitleWanted,
+  } = controls
+
+  // 语言选择 handle
+  const handleLanguageSelect = (language: string) => {
+    setLanguage(language)
+  }
+
+  // 主按钮
+  let buttonText = "开始翻译"
+  if (isCompleted) {
+    buttonText = "下载"
+  } else if (isTranslating) {
+    buttonText = "翻译中"
+  }
+
+  const handleMainButtonClick = async () => {
+    if (isCompleted && taskId) {
+      window.open(`${API_BASE_URL}/download/${taskId}`, "_blank")
+      return
+    }
+    if (isTranslating) {
+      stopTranslation()
+      return
+    }
+    await startTranslation()
+  }
+
+  return (
+    <div className="flex items-center gap-4">
+      {/* 语言选择下拉 */}
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            className="text-sm hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white"
+          >
+            {selectedLanguage}
+            <ChevronUp className="h-4 w-4 ml-1" />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className="w-32 bg-black/60 backdrop-blur-xl border-white/20 rounded-xl shadow-2xl">
+          <div className="space-y-1">
+            {LANGUAGES.map((language) => (
+              <Button
+                key={language.value}
+                variant="ghost"
+                className="w-full justify-start text-white/80 hover:text-white hover:bg-white/10"
+                onClick={() => handleLanguageSelect(language.label)}
+              >
+                {language.label}
+              </Button>
+            ))}
+          </div>
+        </PopoverContent>
+      </Popover>
+
+      {/* ============== (新增) 字幕开关按钮 ============== */}
+      <Button
+        variant="ghost"
+        className="text-sm hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white"
+        // 一旦开始翻译 or 已完成，就不可再改
+        disabled={isTranslating || isCompleted || isProcessing}
+        onClick={() => toggleSubtitleWanted()}
+      >
+        {`字幕：${subtitleWanted ? '开' : '关'}`}
+      </Button>
+
+      {/* 单个主按钮 => 开始翻译 / 翻译中 / 下载 */}
+      <Button
+        variant="ghost"
+        className={cn(
+          "text-sm hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white",
+          (selectedFile || isTranslating || isCompleted) && "bg-white/10"
+        )}
+        // 若正在处理且没到完成, 也可禁用
+        disabled={isProcessing && !isCompleted}
+        onClick={handleMainButtonClick}
+      >
+        {buttonText}
+      </Button>
+    </div>
+  )
+}
+
+================
+File: components/video-player/components/UploadButton.tsx
+================
+import React, { useRef } from 'react'
+import { Button } from '../../ui/button'
+import { Upload } from 'lucide-react'
+import { toast } from 'sonner'
+
+interface UploadButtonProps {
+  onFileSelect: (file: File) => void
+  className?: string
+}
+
+export function UploadButton({ onFileSelect, className }: UploadButtonProps) {
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    onFileSelect(file)
+    toast.success('视频已选择，请点击开始翻译')
+  }
+
+  const handleUploadClick = () => {
+    fileInputRef.current?.click()
+  }
+
+  return (
+    <div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="video/*"
+        className="hidden"
+        onChange={handleFileUpload}
+      />
+      <Button 
+        size="icon" 
+        variant="ghost" 
+        className={className}
+        onClick={handleUploadClick}
+      >
+        <Upload className="h-4 w-4" />
+      </Button>
+    </div>
+  )
+}
+
+================
+File: components/video-player/components/VideoControls.tsx
+================
+import React from 'react'
+import { Button } from '../../ui/button'
+import { Slider } from '../../ui/slider'
+import { Volume2 } from 'lucide-react'
+import { cn } from '../../../lib/utils'
+import { formatTime } from '../utils/format'
+import type { PlayerState, PlayerControls } from '../types'
+
+interface VideoControlsProps {
+  state: PlayerState
+  controls: PlayerControls
+}
+
+export function VideoControls({ state, controls }: VideoControlsProps) {
+  const { currentTime, duration, volume } = state
+  const { seek, setVolume } = controls
+
+  const handleSeek = (value: number[]) => {
+    seek(value[0])
+  }
+
+  const handleVolumeChange = (value: number[]) => {
+    setVolume(value[0])
+  }
+
+  return (
+    <div className="w-full flex items-center gap-2">
+      <span className="text-xs text-white/70 min-w-[40px]">{formatTime(currentTime)}</span>
+      <div className="relative w-full h-1 group">
+        <div 
+          className="absolute inset-0 bg-white/20 rounded-full"
+        />
+        <div 
+          className="absolute inset-y-0 left-0 bg-white/80 rounded-full transition-all"
+          style={{ width: `${(currentTime / duration) * 100}%` }}
+        />
+        <Slider
+          value={[currentTime]}
+          max={duration}
+          step={0.1}
+          className="absolute inset-0 appearance-none bg-transparent [&>span]:opacity-0 group-hover:[&>span]:opacity-100 [&>span]:transition-opacity [&>span]:duration-200"
+          onValueChange={handleSeek}
+        />
+      </div>
+      <span className="text-xs text-white/70 min-w-[40px]">{formatTime(duration)}</span>
+
+      <div className="flex items-center gap-2">
+        <Button 
+          size="icon" 
+          variant="ghost" 
+          className="hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white"
+        >
+          <Volume2 className="h-4 w-4" />
+        </Button>
+        <div className="relative w-[60px] h-1 group">
+          <div 
+            className="absolute inset-0 bg-white/20 rounded-full"
+          />
+          <div 
+            className="absolute inset-y-0 left-0 bg-white/80 rounded-full transition-all"
+            style={{ width: `${volume * 100}%` }}
+          />
+          <Slider
+            value={[volume]}
+            max={1}
+            step={0.01}
+            className="absolute inset-0 appearance-none bg-transparent [&>span]:opacity-0 group-hover:[&>span]:opacity-100 [&>span]:transition-opacity [&>span]:duration-200"
+            onValueChange={handleVolumeChange}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+================
+File: components/video-player/hooks/useHLSPlayer.ts
+================
+import { useRef, useEffect } from 'react'
+import Hls from 'hls.js'
+import { toast } from 'sonner'
+import { API_BASE_URL } from '../utils/format'
+import type { HLSInstance } from '../types'
+
+export function useHLSPlayer(
+  videoRef: React.RefObject<HTMLVideoElement>,
+  isPlaying: boolean
+): HLSInstance {
+  const hlsRef = useRef<Hls | null>(null)
+
+  const initHLS = (taskId: string) => {
+    if (!videoRef.current) return
+
+    const video = videoRef.current
+    const playlistUrl = `${API_BASE_URL}/playlists/${taskId}.m3u8`
+
+    // 清理之前的 HLS 实例
+    if (hlsRef.current) {
+      hlsRef.current.destroy()
+    }
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        debug: false,
+        enableWorker: true,
+        maxBufferSize: 0,
+        maxBufferLength: 30,
+        manifestLoadingTimeOut: 20000,
+        manifestLoadingMaxRetry: 3,
+        levelLoadingTimeOut: 20000,
+        fragLoadingTimeOut: 20000
+      })
+
+      hls.loadSource(playlistUrl)
+      hls.attachMedia(video)
+      hlsRef.current = hls
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (isPlaying) {
+          video.play().catch(error => {
+            console.log('自动播放失败:', error)
+          })
+        }
+      })
+
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) {
+          switch(data.type) {
+            case Hls.ErrorTypes.NETWORK_ERROR:
+              console.log('网络错误，尝试恢复...')
+              hls.startLoad()
+              break
+            case Hls.ErrorTypes.MEDIA_ERROR:
+              console.log('媒体错误，尝试恢复...')
+              hls.recoverMediaError()
+              break
+            default:
+              console.error('无法恢复的错误:', data)
+              toast.error('视频播放出错，请稍后重试。')
+              break
+          }
+        }
+      })
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = playlistUrl
+      video.addEventListener('loadedmetadata', () => {
+        if (isPlaying) {
+          video.play().catch(error => {
+            console.log('自动播放失败:', error)
+          })
+        }
+      })
+    }
+  }
+
+  const destroyHLS = () => {
+    if (hlsRef.current) {
+      hlsRef.current.destroy()
+      hlsRef.current = null
+    }
+  }
+
+  useEffect(() => {
+    return () => {
+      destroyHLS()
+    }
+  }, [])
+
+  return {
+    initHLS,
+    destroyHLS
+  }
+}
+
+================
+File: components/video-player/hooks/useTranslation.ts
+================
+// ==================================
+// frontend/components/video-player/hooks/useTranslation.ts
+// ==================================
+import { useState, useRef } from 'react'
+import { toast } from 'sonner'
+import { API_BASE_URL, LANGUAGE_MAP } from '../utils/format'
+import type { TranslationState, TranslationControls } from '../types'
+
+type TimeoutHandle = ReturnType<typeof setTimeout>
+
+export function useTranslation(onTaskIdChange: (taskId: string | null) => void) {
+  // ===================== (在这里初始化 subtitleWanted) =====================
+  const [state, setState] = useState<TranslationState>({
+    isTranslating: false,
+    isProcessing: false,
+    selectedLanguage: '中文',
+    taskId: null,
+    selectedFile: null,
+    isCompleted: false,
+    subtitleWanted: false, // 新增
+  })
+
+  const pollIntervalRef = useRef<TimeoutHandle>()
+
+  const stopPolling = () => {
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current)
+      pollIntervalRef.current = undefined
+    }
+  }
+
+  // ================ (新增) 切换字幕Wanted状态 ==================
+  const toggleSubtitleWanted = () => {
+    setState(prev => ({ ...prev, subtitleWanted: !prev.subtitleWanted }))
+  }
+
+  const controls: TranslationControls = {
+    startTranslation: async () => {
+      if (!state.selectedFile) {
+        toast.error('请先上传视频')
+        return
+      }
+
+      setState(prev => ({ ...prev, isProcessing: true, isCompleted: false }))
+
+      const formData = new FormData()
+      formData.append('video', state.selectedFile)
+      formData.append('target_language', LANGUAGE_MAP[state.selectedLanguage] || 'zh')
+      // =============== (关键) 传递 generate_subtitle = subtitleWanted ================
+      formData.append('generate_subtitle', state.subtitleWanted ? 'true' : 'false')
+
+      try {
+        const response = await fetch(`${API_BASE_URL}/upload`, {
+          method: 'POST',
+          body: formData,
+        })
+
+        if (!response.ok) {
+          const errorData = await response.json()
+          throw new Error(errorData.detail || '上传失败')
+        }
+
+        const data = await response.json()
+        setState(prev => ({
+          ...prev,
+          taskId: data.task_id,
+          isTranslating: true
+        }))
+        onTaskIdChange(data.task_id)
+        toast.success('开始翻译处理')
+
+        // 开始轮询任务状态
+        pollIntervalRef.current = setInterval(async () => {
+          try {
+            const statusResponse = await fetch(`${API_BASE_URL}/task/${data.task_id}`)
+            if (!statusResponse.ok) return
+
+            const statusData = await statusResponse.json()
+            if (statusData.status === 'success') {
+              toast.success('视频翻译完成')
+              setState(prev => ({
+                ...prev,
+                isProcessing: false,
+                isCompleted: true,
+              }))
+              stopPolling()
+            } else if (statusData.status === 'error') {
+              toast.error(statusData.message || '处理失败')
+              setState(prev => ({
+                ...prev,
+                isTranslating: false,
+                isProcessing: false,
+                isCompleted: false
+              }))
+              stopPolling()
+            }
+          } catch (error) {
+            console.error('轮询任务状态错误:', error)
+          }
+        }, 5000)
+      } catch (error) {
+        console.error('开始翻译错误:', error)
+        toast.error('开始翻译失败，请重试')
+        setState(prev => ({ ...prev, isProcessing: false }))
+      }
+    },
+
+    stopTranslation: () => {
+      setState(prev => ({
+        ...prev,
+        isTranslating: false,
+        isProcessing: false,
+        taskId: null,
+        isCompleted: false
+      }))
+      onTaskIdChange(null)
+      stopPolling()
+      toast.success('已停止翻译')
+    },
+
+    setLanguage: (language: string) => {
+      setState(prev => ({ ...prev, selectedLanguage: language }))
+    },
+
+    // ============== (新增) ==================
+    toggleSubtitleWanted,
+  }
+
+  return {
+    state,
+    setState,
+    controls
+  }
+}
+
+================
+File: components/video-player/hooks/useVideoPlayer.ts
+================
+import { useRef, useState, useEffect } from 'react'
+import type { PlayerState, PlayerControls } from '../types'
+
+export function useVideoPlayer() {
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const [state, setState] = useState<PlayerState>({
+    isPlaying: false,
+    currentTime: 0,
+    duration: 0,
+    volume: 1,
+    localVideoUrl: null
+  })
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+
+    const handleTimeUpdate = () => {
+      setState(prev => ({
+        ...prev,
+        currentTime: video.currentTime,
+        duration: video.duration || prev.duration
+      }))
+    }
+
+    const handleLoadedMetadata = () => {
+      setState(prev => ({
+        ...prev,
+        duration: video.duration
+      }))
+    }
+
+    const handleVolumeChange = () => {
+      setState(prev => ({
+        ...prev,
+        volume: video.volume
+      }))
+    }
+
+    const handlePlay = () => {
+      setState(prev => ({
+        ...prev,
+        isPlaying: true
+      }))
+    }
+
+    const handlePause = () => {
+      setState(prev => ({
+        ...prev,
+        isPlaying: false
+      }))
+    }
+
+    video.addEventListener('timeupdate', handleTimeUpdate)
+    video.addEventListener('loadedmetadata', handleLoadedMetadata)
+    video.addEventListener('volumechange', handleVolumeChange)
+    video.addEventListener('play', handlePlay)
+    video.addEventListener('pause', handlePause)
+
+    return () => {
+      video.removeEventListener('timeupdate', handleTimeUpdate)
+      video.removeEventListener('loadedmetadata', handleLoadedMetadata)
+      video.removeEventListener('volumechange', handleVolumeChange)
+      video.removeEventListener('play', handlePlay)
+      video.removeEventListener('pause', handlePause)
+    }
+  }, [])
+
+  const controls: PlayerControls = {
+    play: () => {
+      if (videoRef.current) {
+        videoRef.current.play()
+      }
+    },
+    pause: () => {
+      if (videoRef.current) {
+        videoRef.current.pause()
+      }
+    },
+    seek: (time: number) => {
+      if (videoRef.current) {
+        videoRef.current.currentTime = time
+      }
+    },
+    setVolume: (volume: number) => {
+      if (videoRef.current) {
+        videoRef.current.volume = volume
+      }
+    },
+    setLocalVideoUrl: (url: string | null) => {
+      setState(prev => ({ ...prev, localVideoUrl: url }))
+      if (videoRef.current && url) {
+        videoRef.current.src = url
+      }
+    }
+  }
+
+  return {
+    videoRef,
+    state,
+    controls
+  }
+}
+
+================
+File: components/video-player/types/index.ts
+================
+// ==================================
+// frontend/components/video-player/types/index.ts
+// ==================================
+export interface PlayerState {
+  isPlaying: boolean
+  currentTime: number
+  duration: number
+  volume: number
+  localVideoUrl: string | null
+}
+
+export interface PlayerControls {
+  play: () => void
+  pause: () => void
+  seek: (time: number) => void
+  setVolume: (volume: number) => void
+  setLocalVideoUrl: (url: string | null) => void
+}
+
+// ====================== (新增字段) ======================
+export interface TranslationState {
+  isTranslating: boolean
+  isProcessing: boolean
+  selectedLanguage: string
+  taskId: string | null
+  selectedFile: File | null
+  isCompleted: boolean
+
+  // 是否“想要烧制字幕”
+  subtitleWanted: boolean
+}
+
+// ====================== (新增方法) ======================
+export interface TranslationControls {
+  startTranslation: () => Promise<void>
+  stopTranslation: () => void
+  setLanguage: (language: string) => void
+
+  // 切换“字幕Wanted”的布尔值
+  toggleSubtitleWanted: () => void
+}
+
+export interface HLSInstance {
+  initHLS: (taskId: string) => void
+  destroyHLS: () => void
+}
+
+export interface VideoPlayerProps {
+  className?: string
+}
+
+================
+File: components/video-player/utils/format.ts
+================
+export const formatTime = (seconds: number): string => {
+  if (!seconds || isNaN(seconds)) return '00:00'
+  
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = Math.floor(seconds % 60)
+  
+  return `${minutes.toString().padStart(2, '0')}:${remainingSeconds.toString().padStart(2, '0')}`
+}
+
+// 在开发环境中使用本地服务器地址
+export const API_BASE_URL = 'http://localhost:8000'
+
+export const LANGUAGES = [
+  { label: '中文', value: 'zh' },
+  { label: 'English', value: 'en' },
+  { label: '日本語', value: 'ja' },
+  { label: '한국어', value: 'ko' }
+] as const
+
+export const LANGUAGE_MAP = LANGUAGES.reduce((acc, { label, value }) => {
+  acc[label] = value
+  return acc
+}, {} as Record<string, string>)
+
+================
+File: components/video-player/index.tsx
+================
+// ===============================================
+// frontend/components/video-player/index.tsx
+// ===============================================
+'use client'
+
+import React, { useRef, useState, useEffect } from 'react'
+import { cn } from '../../lib/utils'
+import { Settings, Play, Pause, Maximize, Minimize } from 'lucide-react'
+import { Button } from '../ui/button'
+import { VideoControls } from './components/VideoControls'
+import { TranslationControls } from './components/TranslationControls'
+import { UploadButton } from './components/UploadButton'
+import { Sidebar } from './components/Sidebar'
+import { useVideoPlayer } from './hooks/useVideoPlayer'
+import { useHLSPlayer } from './hooks/useHLSPlayer'
+import { useTranslation } from './hooks/useTranslation'
+
+export default function VideoPlayer() {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const { videoRef, state: playerState, controls: playerControls } = useVideoPlayer()
+  const [showControls, setShowControls] = useState(true)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+
+  // ========== 新增: 由useTranslation()管理字幕Wanted等 ==========
+  const { state: translationState, setState: setTranslationState, controls: translationControls } = useTranslation((taskId) => {
+    if (taskId) {
+      hlsInstance.initHLS(taskId)
+    } else {
+      hlsInstance.destroyHLS()
+    }
+  })
+
+  const hlsInstance = useHLSPlayer(videoRef, playerState.isPlaying)
+  const controlsTimeoutRef = useRef<ReturnType<typeof setTimeout>>()
+
+  const handleFileSelect = (file: File) => {
+    const previewUrl = URL.createObjectURL(file)
+    playerControls.setLocalVideoUrl(previewUrl)
+    setTranslationState(prev => ({
+      ...prev,
+      selectedFile: file,
+      isTranslating: false,
+      isProcessing: false,
+      taskId: null,
+      isCompleted: false
+    }))
+  }
+
+  const toggleFullscreen = () => {
+    if (!containerRef.current) return
+    if (!isFullscreen) {
+      if (containerRef.current.requestFullscreen) {
+        containerRef.current.requestFullscreen()
+      }
+    } else {
+      if (document.exitFullscreen) {
+        document.exitFullscreen()
+      }
+    }
+  }
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(document.fullscreenElement !== null)
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange)
+    }
+  }, [])
+
+  const handleMouseMove = (e: React.MouseEvent) => {
+    if (!playerState.localVideoUrl && !translationState.taskId) return
+    setShowControls(true)
+    if (controlsTimeoutRef.current) {
+      clearTimeout(controlsTimeoutRef.current)
+    }
+    controlsTimeoutRef.current = setTimeout(() => {
+      setShowControls(false)
+    }, 3000)
+  }
+
+  const handleMouseEnter = () => {
+    setShowControls(true)
+    if (controlsTimeoutRef.current) {
+      clearTimeout(controlsTimeoutRef.current)
+    }
+  }
+
+  const handleMouseLeave = () => {
+    if (!playerState.localVideoUrl && !translationState.taskId) return
+    controlsTimeoutRef.current = setTimeout(() => {
+      setShowControls(false)
+    }, 3000)
+  }
+
+  useEffect(() => {
+    return () => {
+      if (controlsTimeoutRef.current) {
+        clearTimeout(controlsTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  return (
+    <div className="flex h-screen bg-gradient-to-br from-neutral-950 to-black text-white overflow-hidden">
+      {/* 左侧Sidebar */}
+      {!isFullscreen && <Sidebar />}
+
+      {/* 主视频区域 */}
+      <div 
+        ref={containerRef}
+        className={cn(
+          "flex-1 relative min-w-0",
+          isFullscreen && "bg-black"
+        )}
+        onMouseMove={handleMouseMove}
+      >
+        <div className="absolute inset-0 flex items-center justify-center bg-black">
+          <div className="relative w-full h-full max-h-screen">
+            {/* Video元素 */}
+            <video
+              ref={videoRef}
+              className="absolute inset-0 w-full h-full object-contain"
+              playsInline
+            />
+
+            {/* Overlay: 当没选视频时，中心显示Upload */}
+            <div className="absolute inset-0 flex items-center justify-center">
+              {(!playerState.localVideoUrl && !translationState.taskId) && (
+                <div className="flex items-center justify-center gap-8">
+                  <UploadButton
+                    onFileSelect={handleFileSelect}
+                    className="h-20 w-20 rounded-full bg-white/20 hover:bg-white/30 backdrop-blur-md active:scale-95 transition-all shadow-xl"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* 底部控制栏 */}
+            <div 
+              className={cn(
+                "control-bar absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent pt-20 pb-6 px-4 transition-opacity duration-300",
+                showControls ? "opacity-100" : "opacity-0"
+              )}
+              onMouseEnter={handleMouseEnter}
+              onMouseLeave={handleMouseLeave}
+            >
+              <div className="mx-auto flex flex-col items-center justify-between bg-black/60 backdrop-blur-sm border border-white/10 rounded-xl px-4 py-2 gap-2 w-full max-w-3xl shadow-2xl">
+                <VideoControls 
+                  state={playerState}
+                  controls={playerControls}
+                />
+                <div className="flex items-center justify-between w-full">
+                  <div className="flex items-center gap-4">
+                    <UploadButton
+                      onFileSelect={handleFileSelect}
+                      className="hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white"
+                    />
+                    <Button 
+                      size="icon" 
+                      variant="ghost" 
+                      className="hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white"
+                      onClick={() => {
+                        if (playerState.isPlaying) {
+                          playerControls.pause()
+                        } else {
+                          playerControls.play()
+                        }
+                      }}
+                    >
+                      {playerState.isPlaying ? (
+                        <Pause className="h-4 w-4" />
+                      ) : (
+                        <Play className="h-4 w-4 ml-0.5" />
+                      )}
+                    </Button>
+                  </div>
+
+                  <div className="flex items-center gap-4">
+                    {/* 翻译相关操作(语言选、字幕开关、开始翻译/下载) */}
+                    <TranslationControls
+                      state={translationState}
+                      controls={translationControls}
+                    />
+
+                    <Button 
+                      size="icon" 
+                      variant="ghost" 
+                      className="hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white"
+                      onClick={toggleFullscreen}
+                    >
+                      {isFullscreen ? (
+                        <Minimize className="h-4 w-4" />
+                      ) : (
+                        <Maximize className="h-4 w-4" />
+                      )}
+                    </Button>
+                    <Button 
+                      size="icon" 
+                      variant="ghost" 
+                      className="hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white"
+                    >
+                      <Settings className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            {/* 底部控制栏结束 */}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+================
+File: lib/utils.ts
+================
+import { type ClassValue, clsx } from "clsx"
+import { twMerge } from "tailwind-merge"
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs))
+}
+
+================
+File: styles/globals.css
+================
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+================
+File: .eslintrc.json
+================
+{
+  "extends": ["next/core-web-vitals", "next/typescript"]
+}
+
+================
+File: .gitignore
+================
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# local env files
+.env*.local
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+================
+File: components.json
+================
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "new-york",
+  "rsc": true,
+  "tsx": true,
+  "tailwind": {
+    "config": "tailwind.config.ts",
+    "css": "app/globals.css",
+    "baseColor": "gray",
+    "cssVariables": true,
+    "prefix": ""
+  },
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/hooks"
+  },
+  "iconLibrary": "lucide"
+}
+
+================
+File: next.config.mjs
+================
+/** @type {import('next').NextConfig} */
+const nextConfig = {};
+
+export default nextConfig;
+
+================
+File: package.json
+================
+{
+  "name": "new_ui",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@radix-ui/react-popover": "^1.1.4",
+    "@radix-ui/react-scroll-area": "^1.2.2",
+    "@radix-ui/react-slider": "^1.2.2",
+    "@radix-ui/react-slot": "^1.1.1",
+    "@types/hls.js": "^1.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "hls.js": "^1.5.18",
+    "lucide-react": "^0.471.1",
+    "next": "14.2.16",
+    "react": "^18",
+    "react-dom": "^18",
+    "sonner": "^1.7.1",
+    "tailwind-merge": "^2.6.0",
+    "tailwindcss-animate": "^1.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.16",
+    "postcss": "^8",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5"
+  }
+}
+
+================
+File: postcss.config.mjs
+================
+/** @type {import('postcss-load-config').Config} */
+const config = {
+  plugins: {
+    tailwindcss: {},
+  },
+};
+
+export default config;
+
+================
+File: README.md
+================
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+
+## Getting Started
+
+First, run the development server:
+
+```bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+
+## Learn More
+
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+================
+File: tailwind.config.ts
+================
+import type { Config } from "tailwindcss";
+
+const config: Config = {
+    darkMode: ["class"],
+    content: [
+    "./pages/**/*.{js,ts,jsx,tsx,mdx}",
+    "./components/**/*.{js,ts,jsx,tsx,mdx}",
+    "./app/**/*.{js,ts,jsx,tsx,mdx}",
+  ],
+  theme: {
+  	extend: {
+  		colors: {
+  			background: 'hsl(var(--background))',
+  			foreground: 'hsl(var(--foreground))',
+  			card: {
+  				DEFAULT: 'hsl(var(--card))',
+  				foreground: 'hsl(var(--card-foreground))'
+  			},
+  			popover: {
+  				DEFAULT: 'hsl(var(--popover))',
+  				foreground: 'hsl(var(--popover-foreground))'
+  			},
+  			primary: {
+  				DEFAULT: 'hsl(var(--primary))',
+  				foreground: 'hsl(var(--primary-foreground))'
+  			},
+  			secondary: {
+  				DEFAULT: 'hsl(var(--secondary))',
+  				foreground: 'hsl(var(--secondary-foreground))'
+  			},
+  			muted: {
+  				DEFAULT: 'hsl(var(--muted))',
+  				foreground: 'hsl(var(--muted-foreground))'
+  			},
+  			accent: {
+  				DEFAULT: 'hsl(var(--accent))',
+  				foreground: 'hsl(var(--accent-foreground))'
+  			},
+  			destructive: {
+  				DEFAULT: 'hsl(var(--destructive))',
+  				foreground: 'hsl(var(--destructive-foreground))'
+  			},
+  			border: 'hsl(var(--border))',
+  			input: 'hsl(var(--input))',
+  			ring: 'hsl(var(--ring))',
+  			chart: {
+  				'1': 'hsl(var(--chart-1))',
+  				'2': 'hsl(var(--chart-2))',
+  				'3': 'hsl(var(--chart-3))',
+  				'4': 'hsl(var(--chart-4))',
+  				'5': 'hsl(var(--chart-5))'
+  			}
+  		},
+  		borderRadius: {
+  			lg: 'var(--radius)',
+  			md: 'calc(var(--radius) - 2px)',
+  			sm: 'calc(var(--radius) - 4px)'
+  		}
+  	}
+  },
+  plugins: [require("tailwindcss-animate")],
+};
+export default config;
+
+================
+File: tsconfig.json
+================
+{
+  "compilerOptions": {
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+
+
+
+================================================================
+End of Codebase
+================================================================

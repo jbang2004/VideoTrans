@@ -11,8 +11,6 @@ venv/
 
 # Node
 node_modules/
-.next/
-.nuxt/
 dist/
 build/
 
@@ -34,10 +32,6 @@ backend/models/
 *.swp
 *.swo
 
-# 系统文件
-.DS_Store
-Thumbs.db
-
 # 项目特定
 storage/
 *.mp4
@@ -49,4 +43,4 @@ storage/
 # 临时文件
 tmp/
 temp/
-*.tmp 
+*.tmp

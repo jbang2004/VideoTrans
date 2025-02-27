@@ -14,7 +14,7 @@ export function useHLSPlayer(
     if (!videoRef.current) return
 
     const video = videoRef.current
-    const playlistUrl = `${API_BASE_URL}/playlists/playlist_${taskId}.m3u8`
+    const playlistUrl = `${API_BASE_URL}/playlists/${taskId}.m3u8`
 
     // 清理之前的 HLS 实例
     if (hlsRef.current) {

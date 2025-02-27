@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package hls;
+
+// HLS服务定义
+service HLSService {
+  // 初始化任务
+  rpc InitTask(InitTaskRequest) returns (InitTaskResponse);
+  
+  // 添加视频片段
+  rpc AddSegment(AddSegmentRequest) returns (AddSegmentResponse);
+  
+  // 完成任务
+  rpc FinalizeTask(FinalizeTaskRequest) returns (FinalizeTaskResponse);
+  
+  // 清理任务资源
+  rpc CleanupTask(CleanupTaskRequest) returns (CleanupTaskResponse);
+}
+
+// 初始化任务请求
+message InitTaskRequest {
+  string task_id = 1;
+}
+
+message InitTaskResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// 添加片段请求
+message AddSegmentRequest {
+  string task_id = 1;
+  string segment_path = 2;  // 暂时保留本地路径
+  int32 segment_index = 3;
+}
+
+message AddSegmentResponse {
+  bool success = 1;
+  string message = 2;
+  string segment_url = 3;  // 返回可访问的URL
+}
+
+// 完成任务请求
+message FinalizeTaskRequest {
+  string task_id = 1;
+}
+
+message FinalizeTaskResponse {
+  bool success = 1;
+  string message = 2;
+  string playlist_url = 3;  // 返回最终的播放列表URL
+}
+
+// 清理任务请求
+message CleanupTaskRequest {
+  string task_id = 1;
+}
+
+message CleanupTaskResponse {
+  bool success = 1;
+  string message = 2;
+} 

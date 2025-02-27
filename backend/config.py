@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import torch
 
 current_dir = Path(__file__).parent
 env_path = current_dir / '.env'
@@ -41,6 +42,26 @@ class Config:
     ]
 
     MODEL_DIR = project_dir / "models"
+
+    # =========== 全局音频配置 ===========
+    SAMPLE_RATE = 24000  # 全局采样率，从 CosyVoice 模型加载后会被更新
+
+    # =========== ASR 模型相关配置 ===========
+    ASR_MODEL_DIR = MODEL_DIR / "SenseVoice"
+    ASR_MODEL_NAME = "iic/SenseVoiceSmall"
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # ASR 模型的其他参数
+    ASR_MODEL_KWARGS = {
+        "model": "iic/SenseVoiceSmall",
+        "remote_code": "./models/SenseVoice/model.py",
+        "vad_model": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        "vad_kwargs": {"max_single_segment_time": 30000},
+        "spk_model": "cam++",
+        "trust_remote_code": True,
+        "disable_update": True,
+        "device": "cuda" if torch.cuda.is_available() else "cpu"
+    }
 
     @property
     def MODEL_PATH(self) -> Path:
@@ -83,3 +104,25 @@ class Config:
     MODELIN_BATCH_SIZE = 3
     # 控制同时处理多少个视频分段
     MAX_PARALLEL_SEGMENTS = 2
+
+    # 存储服务配置
+    STORAGE_TYPE = "local"  # 'local' 或 's3'
+    
+    # HLS 配置
+    HLS_SEGMENT_DURATION = 10  # 分片时长(秒)
+    HLS_LIST_SIZE = 6         # 播放列表保留的分片数
+    HLS_SEGMENT_FORMAT = "ts"  # 分片格式
+    HLS_TIME = 10             # 每个分片的目标时长
+    HLS_FLAGS = "independent_segments"  # HLS 标志
+
+    # HLS gRPC服务配置
+    HLS_GRPC_HOST = "0.0.0.0"
+    HLS_GRPC_PORT = 50051
+    
+    # HLS服务地址(供客户端使用)
+    HLS_SERVICE_HOST = os.getenv("HLS_SERVICE_HOST", "localhost")
+    HLS_SERVICE_PORT = int(os.getenv("HLS_SERVICE_PORT", "50051"))
+
+    # CosyVoice 服务配置
+    COSYVOICE_SERVICE_HOST = os.getenv("COSYVOICE_SERVICE_HOST", "localhost")
+    COSYVOICE_SERVICE_PORT = int(os.getenv("COSYVOICE_SERVICE_PORT", "50052"))
