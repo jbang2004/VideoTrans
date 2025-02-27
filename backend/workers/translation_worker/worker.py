@@ -1,6 +1,7 @@
 import logging
+import asyncio
 from typing import List, Any
-from utils.decorators import worker_decorator
+from utils.redis_decorators import redis_worker_decorator
 from utils.task_state import TaskState
 from .translation.translator import Translator
 from .translation.deepseek_client import DeepSeekClient
@@ -30,13 +31,14 @@ class TranslationWorker:
         # 直接初始化 Translator
         self.translator = Translator(translation_client=client)
 
-    @worker_decorator(
-        input_queue_attr='translation_queue',
-        next_queue_attr='modelin_queue',
+    @redis_worker_decorator(
+        input_queue='translation_queue',
+        next_queue='modelin_queue',
         worker_name='翻译 Worker',
         mode='stream'
     )
-    async def run(self, sentences_list: List[Any], task_state: TaskState):
+    async def run(self, item, task_state: TaskState):
+        sentences_list = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
         if not sentences_list:
             return
         self.logger.debug(f"[翻译 Worker] 收到 {len(sentences_list)} 句子, TaskID={task_state.task_id}")
@@ -48,5 +50,12 @@ class TranslationWorker:
         ):
             yield translated_batch
 
+async def start():
+    """启动 Worker"""
+    config_module = __import__('config')
+    config = config_module.Config()
+    worker = TranslationWorker(config)
+    await worker.run()
+
 if __name__ == '__main__':
-    print("Translation Worker 模块加载成功")
+    asyncio.run(start())

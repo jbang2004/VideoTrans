@@ -1,6 +1,7 @@
 import logging
+import asyncio
 from typing import List, Any
-from utils.decorators import worker_decorator
+from utils.redis_decorators import redis_worker_decorator
 from utils.task_state import TaskState
 from .model_in import ModelIn
 from services.cosyvoice.client import CosyVoiceClient
@@ -22,13 +23,14 @@ class ModelInWorker:
         cosyvoice_client = CosyVoiceClient(address=cosyvoice_address)
         self.model_in = ModelIn(cosyvoice_client=cosyvoice_client)
 
-    @worker_decorator(
-        input_queue_attr='modelin_queue',
-        next_queue_attr='tts_token_queue',
+    @redis_worker_decorator(
+        input_queue='modelin_queue',
+        next_queue='tts_token_queue',
         worker_name='模型输入 Worker',
         mode='stream'
     )
-    async def run(self, sentences_batch: List[Any], task_state: TaskState):
+    async def run(self, item, task_state: TaskState):
+        sentences_batch = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
         if not sentences_batch:
             return
         self.logger.debug(f"[模型输入 Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
@@ -40,5 +42,12 @@ class ModelInWorker:
         ):
             yield updated_batch
 
+async def start():
+    """启动 Worker"""
+    config_module = __import__('config')
+    config = config_module.Config()
+    worker = ModelInWorker(config)
+    await worker.run()
+
 if __name__ == '__main__':
-    print("ModelIn Worker 模块加载成功")
+    asyncio.run(start())

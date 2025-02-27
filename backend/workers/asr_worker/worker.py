@@ -1,7 +1,8 @@
 import logging
 from typing import Dict, Any
+import asyncio
 from utils.task_state import TaskState
-from utils.decorators import worker_decorator
+from utils.redis_decorators import redis_worker_decorator
 from .auto_sense import SenseAutoModel
 
 logger = logging.getLogger(__name__)
@@ -20,14 +21,16 @@ class ASRWorker:
             **config.ASR_MODEL_KWARGS
         )
 
-    @worker_decorator(
-        input_queue_attr='asr_queue',
-        next_queue_attr='translation_queue',
+    @redis_worker_decorator(
+        input_queue='asr_queue',
+        next_queue='translation_queue',
         worker_name='ASR Worker'
     )
-    async def run(self, segment_info: Dict[str, Any], task_state: TaskState) -> Dict[str, Any]:
+    async def run(self, item: Dict[str, Any], task_state: TaskState) -> Dict[str, Any]:
         """处理音频识别"""
         try:
+            segment_info = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
+            
             self.logger.debug(
                 f"[ASR Worker] 开始处理分段 {segment_info['segment_index']} -> TaskID={task_state.task_id}"
             )
@@ -70,5 +73,12 @@ class ASRWorker:
             })
             return None
 
+async def start():
+    """启动 Worker"""
+    config_module = __import__('config')
+    config = config_module.Config()
+    worker = ASRWorker(config)
+    await worker.run()
+
 if __name__ == '__main__':
-    print("ASR Worker 模块加载成功")
+    asyncio.run(start())

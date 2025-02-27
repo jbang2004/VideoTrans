@@ -5,10 +5,12 @@ import torch
 import torchaudio
 import soundfile as sf
 from pathlib import Path
+import json
+import aioredis
 from typing import Dict, Any, Optional
 from utils.ffmpeg_utils import FFmpegTool
 from utils.task_state import TaskState
-from utils.decorators import worker_decorator
+from utils.redis_decorators import redis_worker_decorator
 from utils import concurrency
 from .audio_separator import ClearVoiceSeparator
 from .video_segmenter import VideoSegmenter
@@ -31,9 +33,9 @@ class SegmentWorker:
         self.video_segmenter = VideoSegmenter(config=config, ffmpeg_tool=self.ffmpeg_tool)
         self.logger = logger
 
-    @worker_decorator(
-        input_queue_attr='segment_init_queue',
-        next_queue_attr='segment_queue',
+    @redis_worker_decorator(
+        input_queue='segment_init_queue',
+        next_queue='segment_queue',
         worker_name='分段初始化 Worker',
         mode='stream'
     )
@@ -47,6 +49,10 @@ class SegmentWorker:
             segments = await self.video_segmenter.get_audio_segments(duration)
             if not segments:
                 raise ValueError("无法获取有效分段")
+                
+            # 更新总分段数
+            task_state.total_segments = len(segments)
+            
             self.logger.info(
                 f"[分段初始化 Worker] 视频总长={duration:.2f}s, 分段数={len(segments)}, TaskID={task_state.task_id}"
             )
@@ -64,9 +70,9 @@ class SegmentWorker:
                 'error': str(e)
             })
 
-    @worker_decorator(
-        input_queue_attr='segment_queue',
-        next_queue_attr='asr_queue',
+    @redis_worker_decorator(
+        input_queue='segment_queue',
+        next_queue='asr_queue',
         worker_name='分段提取 Worker'
     )
     async def run_extract(self, item, task_state: TaskState) -> Dict[str, Any]:
@@ -81,10 +87,11 @@ class SegmentWorker:
             if item is None:
                 return None
 
-            index = item['index']
-            start = item['start']
-            duration = item['duration']
-            video_path = item['video_path']  # 从队列消息中获取视频路径
+            data = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
+            index = data['index']
+            start = data['start']
+            duration = data['duration']
+            video_path = data['video_path']  # 从队列消息中获取视频路径
 
             self.logger.debug(
                 f"[分段提取 Worker] 开始处理分段 {index}, start={start:.2f}s, duration={duration:.2f}s -> TaskID={task_state.task_id}"
@@ -100,67 +107,53 @@ class SegmentWorker:
                 self.ffmpeg_tool.extract_video(video_path, silent_video, start, duration)
             )
 
-            # 分离人声与背景（同步调用用 asyncio.to_thread 包装）
-            vocals, background, sr = await asyncio.to_thread(self.audio_separator.separate_audio, full_audio)
-            background = await asyncio.to_thread(self._resample_audio_sync, sr, background, self.target_sr)
-
-            await asyncio.gather(
-                asyncio.to_thread(sf.write, vocals_audio, vocals, sr, subtype='FLOAT'),
-                asyncio.to_thread(sf.write, background_audio, background, self.target_sr, subtype='FLOAT')
+            # 分离人声和背景音
+            await self.audio_separator.separate(
+                input_path=full_audio,
+                vocals_output=vocals_audio,
+                background_output=background_audio
             )
 
-            Path(full_audio).unlink(missing_ok=True)
-
-            media_files = {
-                'video': silent_video,
-                'vocals': vocals_audio,
-                'background': background_audio,
-                'duration': len(vocals) / sr
-            }
-            task_state.segment_media_files[index] = media_files
-
-            return {
+            # 保存分段媒体文件信息
+            segment_info = {
                 'segment_index': index,
-                'vocals_path': vocals_audio,
                 'start': start,
-                'duration': media_files['duration']
+                'duration': duration,
+                'silent_video_path': silent_video,
+                'full_audio_path': full_audio,
+                'vocals_path': vocals_audio,
+                'background_path': background_audio
             }
+            task_state.segment_media_files[index] = segment_info
+
+            self.logger.info(
+                f"[分段提取 Worker] 分段 {index} 处理完成 -> TaskID={task_state.task_id}"
+            )
+            return segment_info
+
         except Exception as e:
             self.logger.error(
-                f"[分段提取 Worker] 分段处理失败: {e} -> TaskID={task_state.task_id}",
+                f"[分段提取 Worker] 分段 {index if 'index' in locals() else '?'} 处理失败: {e} -> TaskID={task_state.task_id}",
                 exc_info=True
             )
             task_state.errors.append({
+                'segment_index': index if 'index' in locals() else None,
                 'stage': 'segment_extraction',
                 'error': str(e)
             })
             return None
 
-    def _resample_audio_sync(self, fs: int, audio: np.ndarray, target_sr: int) -> np.ndarray:
-        """
-        同步方式进行音频归一化和重采样
-          - audio: 待处理音频数据
-          - fs: 源采样率
-          - target_sr: 目标采样率
-        """
-        audio = audio.astype(np.float32)
-        max_val = np.abs(audio).max()
-        if max_val > 0:
-            audio = audio / max_val
-
-        if len(audio.shape) > 1:
-            audio = audio.mean(axis=-1)
-
-        if fs != target_sr:
-            audio = np.ascontiguousarray(audio)
-            resampler = torchaudio.transforms.Resample(
-                orig_freq=fs,
-                new_freq=target_sr,
-                dtype=torch.float32
-            )
-            audio = resampler(torch.from_numpy(audio)[None, :])[0].numpy()
-
-        return audio
+async def start():
+    """启动 Worker"""
+    config_module = __import__('config')
+    config = config_module.Config()
+    worker = SegmentWorker(config)
+    
+    # 启动两个并行任务
+    await asyncio.gather(
+        worker.run_init(),
+        worker.run_extract()
+    )
 
 if __name__ == '__main__':
-    print("Segment Worker 模块加载成功")
+    asyncio.run(start())
