@@ -5,6 +5,7 @@ import logging
 import os
 from typing import List, Dict, Any
 from pathlib import Path
+import ray
 
 from core.auto_sense import SenseAutoModel
 from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
@@ -35,6 +36,11 @@ class ViTranslator:
     def __init__(self, config: Config = None):
         self.logger = logger
         self.config = config or Config()
+        
+        # 初始化Ray（如果尚未初始化）
+        if not ray.is_initialized():
+            ray.init(ignore_reinit_error=True)
+            
         self._init_global_models()
 
     def _init_global_models(self):
@@ -53,15 +59,19 @@ class ViTranslator:
             disable_update=True,
             device="cuda"
         )
-        # TTS 模型
-        self.cosyvoice_model = CosyVoice2("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
-        self.target_sr = self.cosyvoice_model.sample_rate
+        # 创建CosyVoice模型Actor
+        from core.cosyvoice_model_actor import CosyVoiceModelActor
+        self.cosyvoice_model_actor = CosyVoiceModelActor.options(num_gpus=1).remote(
+            "models/CosyVoice/pretrained_models/CosyVoice2-0.5B"
+        )
+        # 获取采样率
+        self.target_sr = ray.get(self.cosyvoice_model_actor.get_sample_rate.remote())
 
         # 其他核心工具
         self.media_utils = MediaUtils(config=self.config, audio_separator=self.audio_separator, target_sr=self.target_sr)
-        self.model_in = ModelIn(self.cosyvoice_model)
-        self.tts_generator = TTSTokenGenerator(self.cosyvoice_model, Hz=25)
-        self.audio_generator = AudioGenerator(self.cosyvoice_model, sample_rate=self.target_sr)
+        self.model_in = ModelIn(self.cosyvoice_model_actor)
+        self.tts_generator = TTSTokenGenerator(self.cosyvoice_model_actor, Hz=25)
+        self.audio_generator = AudioGenerator(self.cosyvoice_model_actor, sample_rate=self.target_sr)
 
         # 翻译
         translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()

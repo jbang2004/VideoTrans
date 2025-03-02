@@ -2,30 +2,36 @@ import logging
 import asyncio
 import uuid
 import torch
-import os
+import ray
 
-# [NEW] import concurrency
 from utils import concurrency
 
 class TTSTokenGenerator:
-    def __init__(self, cosyvoice_model, Hz=25, max_workers=None):
+    def __init__(self, cosyvoice_model_actor, Hz=25):
         """
         Args:
-            cosyvoice_model: CosyVoice model wrapper
+            cosyvoice_model_actor: CosyVoice模型Actor引用
             Hz: token频率
-            max_workers: (废弃, 改统一线程池)
         """
-        self.cosyvoice_model = cosyvoice_model.model
+        self.cosyvoice_actor = cosyvoice_model_actor
         self.Hz = Hz
         self.logger = logging.getLogger(__name__)
 
     async def tts_token_maker(self, sentences, reuse_uuid=False):
-        """
-        并发为句子生成 TTS token，不再自建线程池，而是统一 run_sync.
-        """
+        """生成TTS tokens（调用Actor）"""
         try:
+            # 确保sentences不是协程
+            if asyncio.iscoroutine(sentences):
+                self.logger.warning("收到协程对象而非句子列表，尝试等待...")
+                sentences = await sentences
+            
             tasks = []
             for s in sentences:
+                # 检查单个句子是否为协程
+                if asyncio.iscoroutine(s):
+                    self.logger.warning(f"句子{id(s)}是协程，等待...")
+                    s = await s
+                
                 current_uuid = (
                     s.model_input.get('uuid') if reuse_uuid and s.model_input.get('uuid')
                     else str(uuid.uuid1())
@@ -48,15 +54,22 @@ class TTSTokenGenerator:
             raise
 
     async def _generate_tts_single_async(self, sentence, main_uuid):
-        """
-        异步：实际调用 _generate_tts_single 同步逻辑 => concurrency.run_sync
-        """
-        return await concurrency.run_sync(self._generate_tts_single, sentence, main_uuid)
+        """异步调用Actor生成TTS tokens"""
+        # 检查sentence是否为协程
+        if asyncio.iscoroutine(sentence):
+            self.logger.warning(f"在_generate_tts_single_async中接收到协程，等待...")
+            sentence = await sentence
+        
+        # 使用直接方式而非run_sync
+        try:
+            # 使用内部同步实现直接生成
+            return self._generate_tts_single(sentence, main_uuid)
+        except Exception as e:
+            self.logger.error(f"处理失败 (UUID={main_uuid}): {e}")
+            raise
 
     def _generate_tts_single(self, sentence, main_uuid):
-        """
-        同步核心逻辑：对 sentence 做 TTS token 生成
-        """
+        """同步调用Actor生成TTS tokens"""
         model_input = sentence.model_input
         segment_tokens_list = []
         segment_uuids = []
@@ -65,23 +78,16 @@ class TTSTokenGenerator:
         try:
             for i, (text, text_len) in enumerate(zip(model_input['text'], model_input['text_len'])):
                 seg_uuid = f"{main_uuid}_seg_{i}"
-                with self.cosyvoice_model.lock:
-                    self.cosyvoice_model.tts_speech_token_dict[seg_uuid] = []
-                    self.cosyvoice_model.llm_end_dict[seg_uuid] = False
-                    if hasattr(self.cosyvoice_model, 'mel_overlap_dict'):
-                        self.cosyvoice_model.mel_overlap_dict[seg_uuid] = None
-                    self.cosyvoice_model.hift_cache_dict[seg_uuid] = None
+                
+                # 调用Actor生成TTS tokens
+                prompt_text = model_input.get('prompt_text', torch.zeros(1, 0, dtype=torch.int32))
+                llm_prompt_speech_token = model_input.get('llm_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32))
+                llm_embedding = model_input.get('llm_embedding', torch.zeros(0, 192))
+                
+                seg_tokens = ray.get(self.cosyvoice_actor.generate_tts_tokens.remote(
+                    text, prompt_text, llm_prompt_speech_token, llm_embedding, seg_uuid
+                ))
 
-                # 调用 cosyvoice_model.llm_job( ... ) 同步
-                self.cosyvoice_model.llm_job(
-                    text,
-                    model_input.get('prompt_text', torch.zeros(1, 0, dtype=torch.int32)),
-                    model_input.get('llm_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32)),
-                    model_input.get('llm_embedding', torch.zeros(0, 192)),
-                    seg_uuid
-                )
-
-                seg_tokens = self.cosyvoice_model.tts_speech_token_dict[seg_uuid]
                 segment_tokens_list.append(seg_tokens)
                 segment_uuids.append(seg_uuid)
                 total_token_count += len(seg_tokens)
@@ -101,12 +107,7 @@ class TTSTokenGenerator:
 
         except Exception as e:
             self.logger.error(f"生成失败 (UUID={main_uuid}): {e}")
-            # 清理
-            with self.cosyvoice_model.lock:
-                for seg_uuid in segment_uuids:
-                    self.cosyvoice_model.tts_speech_token_dict.pop(seg_uuid, None)
-                    self.cosyvoice_model.llm_end_dict.pop(seg_uuid, None)
-                    self.cosyvoice_model.hift_cache_dict.pop(seg_uuid, None)
-                    if hasattr(self.cosyvoice_model, 'mel_overlap_dict'):
-                        self.cosyvoice_model.mel_overlap_dict.pop(seg_uuid, None)
+            # 调用Actor清理
+            for seg_uuid in segment_uuids:
+                ray.get(self.cosyvoice_actor.cleanup_tts_tokens.remote(seg_uuid))
             raise

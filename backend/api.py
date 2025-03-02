@@ -10,7 +10,7 @@ from typing import Dict
 
 import uvicorn
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -155,7 +155,17 @@ async def get_task_status(task_id: str):
         }
     return result
 
-app.mount("/playlists", StaticFiles(directory=str(config.PUBLIC_DIR / "playlists")), name="playlists")
+app.mount("/playlists", 
+    StaticFiles(directory=str(config.PUBLIC_DIR / "playlists"), 
+    check_dir=True), 
+    name="playlists")
+
+app.mount("/segments", 
+    StaticFiles(
+        directory=str(config.PUBLIC_DIR / "segments"), 
+        check_dir=True
+    ), 
+    name="segments")
 
 @app.get("/playlists/{task_id}/{filename}")
 async def serve_playlist(task_id: str, filename: str):
@@ -165,9 +175,11 @@ async def serve_playlist(task_id: str, filename: str):
             logger.error(f"播放列表未找到: {playlist_path}")
             raise HTTPException(status_code=404, detail="播放列表未找到")
         
-        logger.info(f"提供播放列表: {playlist_path}")
-        return FileResponse(
-            str(playlist_path), 
+        async with aiofiles.open(playlist_path, mode='rb') as f:
+            content = await f.read()
+            
+        return Response(
+            content=content,
             media_type='application/vnd.apple.mpegurl',
             headers={
                 "Cache-Control": "public, max-age=3600",
@@ -186,9 +198,9 @@ async def serve_segments(task_id: str, filename: str):
             logger.error(f"片段文件未找到: {segment_path}")
             raise HTTPException(status_code=404, detail="片段文件未找到")
         
-        logger.debug(f"提供视频片段: {segment_path}")
-        return FileResponse(
-            str(segment_path),
+        # 使用StreamingResponse而非静态文件
+        return StreamingResponse(
+            open(segment_path, mode="rb"),
             media_type='video/MP2T',
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate",

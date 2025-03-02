@@ -111,6 +111,10 @@ class PipelineScheduler:
             return
         self.logger.debug(f"[TTS Token生成Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
 
+        # 确保sentences_batch不是协程
+        if asyncio.iscoroutine(sentences_batch):
+            sentences_batch = await sentences_batch
+        
         await self.tts_token_generator.tts_token_maker(sentences_batch, reuse_uuid=False)
         return sentences_batch
 
