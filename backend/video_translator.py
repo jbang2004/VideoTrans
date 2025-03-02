@@ -6,6 +6,7 @@ import os
 from typing import List, Dict, Any
 from pathlib import Path
 import ray
+import asyncio
 
 from core.auto_sense import SenseAutoModel
 from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
@@ -26,6 +27,7 @@ from config import Config
 from utils.task_state import TaskState
 
 from utils.ffmpeg_utils import FFmpegTool
+from utils.gpu_manager import GPUResourceManager
 
 logger = logging.getLogger(__name__)
 
@@ -40,30 +42,43 @@ class ViTranslator:
         # 初始化Ray（如果尚未初始化）
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
+        
+        # 初始化GPU资源管理器
+        self.gpu_manager = GPUResourceManager(
+            total_gpus=1.0,  # 总GPU资源
+            min_gpu=0.1      # 最小分配单位
+        )
             
         self._init_global_models()
 
     def _init_global_models(self):
         self.logger.info("[ViTranslator] 初始化模型和工具...")
+        
         # 音频分离器
         self.audio_separator = ClearVoiceSeparator(model_name='MossFormer2_SE_48K')
-        # ASR + VAD + Speaker
-        self.sense_model = SenseAutoModel(
-            config=self.config,
-            model="iic/SenseVoiceSmall",
-            remote_code="./models/SenseVoice/model.py",
-            vad_model="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-            vad_kwargs={"max_single_segment_time": 30000},
-            spk_model="cam++",
-            trust_remote_code=True,
-            disable_update=True,
-            device="cuda"
-        )
+        
+        # 为ASR模型动态分配GPU资源
+        asr_gpu = self.gpu_manager.get_allocation("sense_asr")
+        self.logger.info(f"ASR模型分配GPU: {asr_gpu}")
+        
+        # 创建ASR模型Actor
+        from core.asr_model_actor import SenseAutoModelActor
+        self.sense_model_actor = SenseAutoModelActor.options(
+            num_gpus=asr_gpu,
+            name="sense_asr_model"
+        ).remote()
+        
+        # 为TTS模型动态分配GPU资源
+        tts_gpu = self.gpu_manager.get_allocation("cosyvoice")
+        self.logger.info(f"TTS模型分配GPU: {tts_gpu}")
+        
         # 创建CosyVoice模型Actor
         from core.cosyvoice_model_actor import CosyVoiceModelActor
-        self.cosyvoice_model_actor = CosyVoiceModelActor.options(num_gpus=1).remote(
-            "models/CosyVoice/pretrained_models/CosyVoice2-0.5B"
-        )
+        self.cosyvoice_model_actor = CosyVoiceModelActor.options(
+            num_gpus=tts_gpu,
+            name="cosyvoice_model"
+        ).remote("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
+        
         # 获取采样率
         self.target_sr = ray.get(self.cosyvoice_model_actor.get_sample_rate.remote())
 
@@ -206,8 +221,8 @@ class ViTranslator:
         )
         task_state.segment_media_files[segment_index] = media_files
 
-        # 2. ASR
-        sentences = await self.sense_model.generate_async(
+        # 2. ASR - 使用与Ray官方示例一致的语法
+        asr_result = await self.sense_model_actor.generate_async.remote(
             input=media_files['vocals'],
             cache={},
             language="auto",
@@ -215,19 +230,20 @@ class ViTranslator:
             batch_size_s=60,
             merge_vad=False
         )
-        self.logger.info(f"[_process_segment] ASR识别到 {len(sentences)} 条句子, seg={segment_index}, TaskID={task_state.task_id}")
+        
+        self.logger.info(f"[_process_segment] ASR识别到 {len(asr_result)} 条句子, seg={segment_index}, TaskID={task_state.task_id}")
 
-        if not sentences:
+        if not asr_result:
             return
 
-        for s in sentences:
+        for s in asr_result:
             s.segment_index = segment_index
             s.segment_start = start
             s.task_id = task_state.task_id
             s.sentence_id = task_state.sentence_counter
             task_state.sentence_counter += 1
 
-        await pipeline.push_sentences_to_pipeline(task_state, sentences)
+        await pipeline.push_sentences_to_pipeline(task_state, asr_result)
 
     async def _concat_segment_mp4s(self, task_state: TaskState) -> Path:
         """
@@ -276,3 +292,26 @@ class ViTranslator:
         finally:
             if list_txt.exists():
                 list_txt.unlink()
+
+    async def adjust_gpu_allocation(self):
+        """根据当前负载重新调整GPU资源分配"""
+        try:
+            # 重新获取每个模型的适当分配
+            asr_gpu = self.gpu_manager.get_allocation("sense_asr")
+            tts_gpu = self.gpu_manager.get_allocation("cosyvoice")
+            
+            # 向Ray报告新的资源需求
+            # 注意：这需要模型支持在运行时调整资源，可能需要重新创建Actor
+            self.logger.info(f"动态调整GPU分配 - ASR: {asr_gpu}, TTS: {tts_gpu}")
+            
+            # Ray目前不直接支持在运行时调整Actor资源，
+            # 这里只是概念演示，实际使用时可能需要终止并重新创建Actor
+            
+            return {
+                "asr_gpu": asr_gpu,
+                "tts_gpu": tts_gpu,
+                "total": asr_gpu + tts_gpu
+            }
+        except Exception as e:
+            self.logger.error(f"调整GPU分配失败: {e}")
+            return None

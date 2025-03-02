@@ -83,3 +83,11 @@ class Config:
     MODELIN_BATCH_SIZE = 3
     # 控制同时处理多少个视频分段
     MAX_PARALLEL_SEGMENTS = 2
+
+    # 只保留Actor配置，方便Ray资源管理
+    ASR_ACTOR_NUM_GPUS = 0.3  # 分配GPU比例，根据需要调整
+
+    # ASR流程配置
+    ASR_BATCH_SIZE_S = 60  # 音频批处理大小(秒)
+    ASR_USE_ITN = True     # 使用逆文本规范化
+    ASR_MERGE_VAD = False  # 是否合并VAD结果
