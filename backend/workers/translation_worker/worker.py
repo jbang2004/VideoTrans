@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from typing import List, Any
-from utils.redis_decorators import redis_worker_decorator
+from utils.worker_decorators import redis_worker_decorator
 from utils.task_state import TaskState
 from .translation.translator import Translator
 from .translation.deepseek_client import DeepSeekClient
@@ -35,10 +35,13 @@ class TranslationWorker:
         input_queue='translation_queue',
         next_queue='modelin_queue',
         worker_name='翻译 Worker',
-        mode='stream'
+        mode='stream',
+        serialization_mode='msgpack'
     )
     async def run(self, item, task_state: TaskState):
-        sentences_list = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
+        # 检查是否有嵌套的数据结构
+        sentences_list = item.get('data', item) if isinstance(item, dict) else item
+        
         if not sentences_list:
             return
         self.logger.debug(f"[翻译 Worker] 收到 {len(sentences_list)} 句子, TaskID={task_state.task_id}")

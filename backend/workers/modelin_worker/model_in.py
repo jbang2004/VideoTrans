@@ -19,7 +19,7 @@ class ModelIn:
         self.max_val = 0.8
         self.cosy_sample_rate = 24000
 
-    def postprocess(self, speech, top_db=60, hop_length=220, win_length=440):
+    def postprocess(self, speech, sr, top_db=60, hop_length=220, win_length=440):
         """
         对音频进行 trim、幅度归一化，并在结尾加 0.2s 静音
         """
@@ -32,7 +32,9 @@ class ModelIn:
         if np.abs(speech).max() > self.max_val:
             speech = speech / np.abs(speech).max() * self.max_val
 
-        pad_samples = int(self.cosy_sample_rate * 0.2)
+        # 使用 sr 采样率计算静音尾音的长度
+        # 因为我们期望输入的音频采样率为 sr
+        pad_samples = int(sr * 0.2)  # 0.2秒的静音
         speech = np.concatenate([speech, np.zeros(pad_samples, dtype=speech.dtype)])
         return speech
 
@@ -44,18 +46,23 @@ class ModelIn:
             return await self.speaker_cache[speaker_id]
 
         async def extract_features() -> str:
-            # 1. 确保是 numpy array
-            audio_np = sentence.audio.squeeze(0).cpu().numpy() if isinstance(sentence.audio, torch.Tensor) else sentence.audio
+            # 从文件加载音频
+            if not hasattr(sentence, 'audio_path') or not sentence.audio_path:
+                raise ValueError(f"缺少音频路径 (audio_path)，无法提取说话人特征: speaker_id={speaker_id}")
+            audio_path = sentence.audio_path
+                
+            # 从文件路径加载音频
+            audio_np, sr = sf.read(audio_path)
             
-            # 2. 处理音频，得到numpy array
-            postprocessed_audio = self.postprocess(audio_np)
+            # 处理音频，得到numpy array
+            postprocessed_audio = self.postprocess(audio_np, sr)
 
             speaker_uuid = str(uuid.uuid4())
             success = await asyncio.to_thread(
                 self.cosyvoice_client.extract_speaker_features,
                 speaker_uuid,
                 postprocessed_audio,  # 直接传递numpy array
-                self.cosy_sample_rate
+                16000  # 使用 16000Hz 作为采样率参数
             )
             if not success:
                 raise Exception("提取说话人特征失败")
@@ -67,13 +74,18 @@ class ModelIn:
 
     async def _process_one_sentence_async(self, sentence, reuse_speaker: bool):
         async with self.semaphore:
+            # 获取 speaker_id
             speaker_id = getattr(sentence, 'speaker_id', None)
             
             # 处理文本UUID
+            trans_text = sentence.trans_text or ""
+                
             text_uuid = await asyncio.to_thread(
                 self.cosyvoice_client.normalize_text,
-                sentence.trans_text or ""
+                trans_text
             )
+            
+            # 更新 model_input
             sentence.model_input['text_uuid'] = text_uuid
             
             # 处理说话人UUID

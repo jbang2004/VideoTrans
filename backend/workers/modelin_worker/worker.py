@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from typing import List, Any
-from utils.redis_decorators import redis_worker_decorator
+from utils.worker_decorators import redis_worker_decorator
 from utils.task_state import TaskState
 from .model_in import ModelIn
 from services.cosyvoice.client import CosyVoiceClient
@@ -27,20 +27,21 @@ class ModelInWorker:
         input_queue='modelin_queue',
         next_queue='tts_token_queue',
         worker_name='模型输入 Worker',
-        mode='stream'
+        mode='stream',
+        serialization_mode='msgpack'
     )
     async def run(self, item, task_state: TaskState):
-        sentences_batch = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
+        sentences_batch = item.get('data', item) if isinstance(item, dict) else item
         if not sentences_batch:
             return
         self.logger.debug(f"[模型输入 Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
 
-        async for updated_batch in self.model_in.modelin_maker(
+        async for processed_batch in self.model_in.modelin_maker(
             sentences_batch,
             reuse_speaker=False,
             batch_size=self.config.MODELIN_BATCH_SIZE
         ):
-            yield updated_batch
+            yield processed_batch
 
 async def start():
     """启动 Worker"""

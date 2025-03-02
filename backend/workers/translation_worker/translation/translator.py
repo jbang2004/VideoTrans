@@ -81,8 +81,10 @@ class Translator:
         i = 0
         batch_size = config.initial_size
         success_count = 0
-
+        
         while i < len(items):
+            # 提前初始化 batch 变量，确保异常处理中可以安全访问
+            batch = []
             try:
                 batch = items[i:i+batch_size]
                 if not batch:
@@ -109,9 +111,37 @@ class Translator:
                     self.logger.debug(f"出错后减小批次大小到: {batch_size}")
                     continue
                 else:
-                    if error_handler:
+                    # 确保 batch 有值，即使发生了异常
+                    if error_handler and batch:
                         yield error_handler(batch)
-                    i += len(batch)
+                    i += len(batch) if batch else 1  # 如果 batch 为空，则至少前进一个
+
+    async def _process_translation_batch(self, batch: List, target_language: str = "zh") -> List:
+        """处理翻译批次"""
+        if not batch:
+            return None
+            
+        # 构建翻译请求
+        texts = {}
+        for i, sentence in enumerate(batch):
+            texts[str(i)] = sentence.raw_text
+                
+        self.logger.debug(f"翻译批次: {len(texts)}条文本")
+        translated = await self.translate(texts, target_language)
+        if "output" not in translated:
+            self.logger.error("翻译结果中缺少 output 字段")
+            return None
+        translated_texts = translated["output"]
+        if len(translated_texts) == len(texts):
+            for j, sentence in enumerate(batch):
+                sentence.trans_text = translated_texts[str(j)]
+            return batch
+        return None
+
+    def handle_error(self, batch: List) -> List:
+        for sentence in batch:
+            sentence.trans_text = sentence.raw_text
+        return batch
 
     async def translate_sentences(
         self,
@@ -128,30 +158,11 @@ class Translator:
 
         config = BatchConfig(initial_size=batch_size)
 
-        async def process_batch(batch: List) -> Optional[List]:
-            texts = {str(j): s.raw_text for j, s in enumerate(batch)}
-            self.logger.debug(f"翻译批次: {len(texts)}条文本")
-            translated = await self.translate(texts, target_language)
-            if "output" not in translated:
-                self.logger.error("翻译结果中缺少 output 字段")
-                return None
-            translated_texts = translated["output"]
-            if len(translated_texts) == len(texts):
-                for j, sentence in enumerate(batch):
-                    sentence.trans_text = translated_texts[str(j)]
-                return batch
-            return None
-
-        def handle_error(batch: List) -> List:
-            for sentence in batch:
-                sentence.trans_text = sentence.raw_text
-            return batch
-
         async for batch_result in self._process_batch(
             sentences,
-            process_batch,
+            self._process_translation_batch,
             config,
-            error_handler=handle_error,
+            error_handler=self.handle_error,
             reduce_batch_on_error=True
         ):
             yield batch_result

@@ -47,7 +47,12 @@ current_dir = Path(__file__).parent
 templates = Jinja2Templates(directory=str(current_dir / "templates"))
 
 # 初始化服务
-vi_translator = ViTranslator(config=config)
+vi_translator = None
+
+@app.on_event("startup")
+async def startup_event():
+    global vi_translator
+    vi_translator = await ViTranslator(config=config).initialize()
 
 task_results: Dict[str, dict] = {}
 
@@ -72,7 +77,8 @@ async def upload_video(
             raise HTTPException(status_code=400, detail=f"不支持的目标语言: {target_language}")
         
         task_id = str(uuid.uuid4())
-        task_paths = TaskPaths(config, task_id)
+        task_dir = config.TASKS_DIR / task_id
+        task_paths = TaskPaths(task_dir=task_dir, config=config, task_id=task_id)
         task_paths.create_directories()
         
         video_path = task_paths.input_dir / f"original_{video.filename}"

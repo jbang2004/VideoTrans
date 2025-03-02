@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from typing import List, Any
-from utils.redis_decorators import redis_worker_decorator
+from utils.worker_decorators import redis_worker_decorator
 from utils.task_state import TaskState
 from .duration_aligner import DurationAligner
 from workers.modelin_worker.model_in import ModelIn
@@ -52,14 +52,16 @@ class DurationWorker:
     @redis_worker_decorator(
         input_queue='duration_align_queue',
         next_queue='audio_gen_queue',
-        worker_name='时长对齐 Worker'
+        worker_name='时长对齐 Worker',
+        serialization_mode='msgpack'
     )
     async def run(self, item, task_state: TaskState):
-        sentences_batch = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
+        sentences_batch = item.get('data', item) if isinstance(item, dict) else item
         if not sentences_batch:
             return
         self.logger.debug(f"[时长对齐 Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
 
+        # 对齐时长
         await self.duration_aligner.align_durations(sentences_batch)
         return sentences_batch
 

@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from typing import List, Any
-from utils.redis_decorators import redis_worker_decorator
+from utils.worker_decorators import redis_worker_decorator
 from utils.task_state import TaskState
 from .tts_token_gener import TTSTokenGenerator
 from services.cosyvoice.client import CosyVoiceClient
@@ -26,15 +26,22 @@ class TTSTokenWorker:
     @redis_worker_decorator(
         input_queue='tts_token_queue',
         next_queue='duration_align_queue',
-        worker_name='TTS Token生成 Worker'
+        worker_name='TTS Token生成 Worker',
+        serialization_mode='msgpack'
     )
     async def run(self, item, task_state: TaskState):
-        sentences_batch = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
+        sentences_batch = item.get('data', item) if isinstance(item, dict) else item
         if not sentences_batch:
             return
         self.logger.debug(f"[TTS Token生成 Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
 
+        # 生成 TTS token
         await self.tts_token_generator.tts_token_maker(sentences_batch)
+        
+        # 计算目标时长
+        for s in sentences_batch:
+            s.target_duration = s.end - s.start
+            
         return sentences_batch
 
 async def start():

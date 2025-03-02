@@ -1,16 +1,16 @@
-import logging
 import asyncio
 import json
 from typing import List, Any
 from pathlib import Path
-from utils.redis_decorators import redis_worker_decorator
+from utils.worker_decorators import redis_worker_decorator
 from utils.task_state import TaskState
 from utils.redis_utils import load_task_state
+from utils.log_config import get_logger
 from .media_mixer import MediaMixer
 from services.hls import HLSClient
 import aioredis
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class MixerWorker:
     """
@@ -33,24 +33,30 @@ class MixerWorker:
 
     @redis_worker_decorator(
         input_queue='mixing_queue',
-        worker_name='混音 Worker'
+        worker_name='混音 Worker',
+        serialization_mode='msgpack'
     )
     async def run(self, item, task_state: TaskState):
-        sentences_batch = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
+        sentences_batch = item.get('data', item) if isinstance(item, dict) else item
         if not sentences_batch:
             return
-        seg_index = sentences_batch[0].segment_index
-        self.logger.debug(f"[混音 Worker] 收到 {len(sentences_batch)} 句, segment={seg_index}, TaskID={task_state.task_id}")
+        self.logger.debug(f"[混音 Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
 
+        # 确保 HLS 服务已初始化
+        if not self.hls_service:
+            await self.initialize()
+
+        # 处理输出路径
         output_path = task_state.task_paths.segments_dir / f"segment_{task_state.batch_counter}.mp4"
 
+        # 混音处理
         success = await self.mixer.mixed_media_maker(
             sentences=sentences_batch,
             task_state=task_state,
             output_path=str(output_path),
             generate_subtitle=task_state.generate_subtitle
         )
-
+        
         if success:
             # 使用 HLS 服务
             added = await self.hls_service.add_segment(

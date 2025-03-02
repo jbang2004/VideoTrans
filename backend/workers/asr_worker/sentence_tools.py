@@ -19,7 +19,7 @@ class Sentence:
     speaker_id: int
     trans_text: str = field(default="")
     sentence_id: int = field(default=-1)
-    audio: torch.Tensor = field(default=None)
+    audio_path: str = field(default="")  # 存储音频文件路径
     target_duration: float = field(default=None)
     duration: float = field(default=0.0)
     diff: float = field(default=0.0)
@@ -159,9 +159,22 @@ def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, conf
         end_sample = int(s.end * sr / 1000)
         speaker_segments.setdefault(s.speaker_id, []).append((start_sample, end_sample, idx))
 
-    speaker_audio_cache: Dict[int, torch.Tensor] = {}
+    output_dir = Path(config.TASKS_DIR) / sentences[0].task_id / 'speakers'
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    for speaker_id, segments in speaker_segments.items():
+    # 检查每个说话人的音频文件是否已存在
+    for speaker_id in speaker_segments.keys():
+        output_path = output_dir / f'speaker_{speaker_id}.wav'
+        
+        # 如果文件已存在，直接设置路径并跳过处理
+        if output_path.exists():
+            for sentence in sentences:
+                if sentence.speaker_id == speaker_id:
+                    sentence.audio_path = str(output_path)
+            continue
+            
+        # 文件不存在，需要处理并保存
+        segments = speaker_segments[speaker_id]
         segments.sort(key=lambda x: x[1] - x[0], reverse=True)
         longest_start, longest_end, _ = segments[0]
 
@@ -177,18 +190,11 @@ def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, conf
             audio_length = min(target_samples, available_length_original)
             speaker_audio = speech[:, longest_start:longest_start + audio_length]
 
-        speaker_audio_cache[speaker_id] = speaker_audio
+        torchaudio.save(str(output_path), speaker_audio, sr)
 
-    for sentence in sentences:
-        sentence.audio = speaker_audio_cache.get(sentence.speaker_id)
-
-    output_dir = Path(config.TASKS_DIR) / sentences[0].task_id / 'speakers'
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for speaker_id, audio in speaker_audio_cache.items():
-        if audio is not None:
-            output_path = output_dir / f'speaker_{speaker_id}.wav'
-            torchaudio.save(str(output_path), audio, sr)
+        for sentence in sentences:
+            if sentence.speaker_id == speaker_id:
+                sentence.audio_path = str(output_path)
 
     return sentences
 

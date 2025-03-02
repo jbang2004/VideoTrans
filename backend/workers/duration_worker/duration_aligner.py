@@ -25,7 +25,11 @@ class DurationAligner:
         self._align_batch(sentences)
 
         # 查找语速过快的句子（speed > max_speed）
-        retry_sentences = [s for s in sentences if s.speed > self.max_speed]
+        retry_sentences = []
+        for s in sentences:
+            if s.speed > self.max_speed:
+                retry_sentences.append(s)
+                    
         if retry_sentences:
             self.logger.info(f"{len(retry_sentences)} 个句子语速过快, 正在精简...")
             success = await self._retry_sentences_batch(retry_sentences)

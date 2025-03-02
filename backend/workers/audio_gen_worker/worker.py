@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from typing import List, Any
-from utils.redis_decorators import redis_worker_decorator
+from utils.worker_decorators import redis_worker_decorator
 from utils.task_state import TaskState
 from .audio_gener import AudioGenerator
 from .timestamp_adjuster import TimestampAdjuster
@@ -32,10 +32,11 @@ class AudioGenWorker:
     @redis_worker_decorator(
         input_queue='audio_gen_queue',
         next_queue='mixing_queue',
-        worker_name='音频生成 Worker'
+        worker_name='音频生成 Worker',
+        serialization_mode='msgpack'
     )
     async def run(self, item, task_state: TaskState):
-        sentences_batch = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
+        sentences_batch = item.get('data', item) if isinstance(item, dict) else item
         if not sentences_batch:
             return
         self.logger.debug(f"[音频生成 Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")

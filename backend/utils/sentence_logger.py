@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import List, Dict, Any
 import asyncio
-from utils.decorators import handle_errors
+from utils.worker_decorators import handle_errors
 
 logger = logging.getLogger(__name__)
 

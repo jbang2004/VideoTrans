@@ -12,7 +12,7 @@ from typing import List, Any
 
 import pysubs2
 
-from utils.decorators import handle_errors
+from utils.worker_decorators import handle_errors
 from utils.ffmpeg_utils import FFmpegTool
 from config import Config
 from utils.task_state import TaskState
@@ -69,7 +69,11 @@ class MediaMixer:
             return False
 
         segment_index = sentences[0].segment_index
-        segment_files = task_state.segment_media_files.get(segment_index)
+        if segment_index is None:
+            logger.error("找不到分段索引")
+            return False
+
+        segment_files = task_state.segment_media_files.get(str(segment_index))
         if not segment_files:
             logger.error(f"找不到分段 {segment_index} 对应的媒体文件信息")
             return False
@@ -77,16 +81,15 @@ class MediaMixer:
         # =========== (1) 拼接所有句子的合成音频 =============
         full_audio = np.array([], dtype=np.float32)
         for sentence in sentences:
-            if sentence.generated_audio is not None:
-                audio_data = np.asarray(sentence.generated_audio, dtype=np.float32)
-                # 如果已经有前面累积的音频，做淡入淡出衔接
-                if len(full_audio) > 0:
-                    audio_data = self._apply_fade_effect(audio_data)
-                full_audio = np.concatenate((full_audio, audio_data))
-            else:
+            audio_data = np.asarray(sentence.generated_audio, dtype=np.float32)
+            # 如果已经有前面累积的音频，做淡入淡出衔接
+            if len(full_audio) > 0:
+                audio_data = self._apply_fade_effect(audio_data)
+            full_audio = np.concatenate((full_audio, audio_data))
+            if audio_data is None:
                 logger.warning(
                     "句子音频生成失败: text=%r, UUID=%s",
-                    sentence.raw_text,  # 或 sentence.trans_text
+                    sentence.raw_text or sentence.trans_text,
                     sentence.model_input.get("uuid", "unknown")
                 )
 
@@ -96,10 +99,15 @@ class MediaMixer:
 
         # 计算当前片段的起始时间和时长(秒)
         start_time = 0.0
-        if not sentences[0].is_first:
-            start_time = (sentences[0].adjusted_start - sentences[0].segment_start * 1000) / 1000.0
+        if sentences[0]:
+            if not sentences[0].is_first:
+                start_time = (sentences[0].adjusted_start - sentences[0].segment_start * 1000) / 1000.0
 
-        duration = sum(s.adjusted_duration for s in sentences) / 1000.0
+        # 计算总时长
+        duration = 0.0
+        for s in sentences:
+            duration += s.adjusted_duration
+        duration /= 1000.0  # 转换为秒
 
         # =========== (2) 背景音乐混合 (可选) =============
         background_audio_path = segment_files['background']
@@ -279,18 +287,16 @@ class MediaMixer:
         for s in sentences:
             # 计算相对时间
             start_local = s.adjusted_start - segment_start_ms - s.segment_start * 1000
-
             sub_text = (s.trans_text or s.raw_text or "").strip()
+            duration_ms = s.adjusted_duration
+            lang = target_language
+
             if not sub_text:
                 continue
 
             # 直接使用adjusted_duration作为duration_ms
-            duration_ms = s.duration / s.speed
             if duration_ms <= 0:
                 continue
-
-            # 如果 Sentence 本身带 lang, 就优先使用 s.lang, 否则用 target_language
-            lang = target_language or "en"
 
             # 拆分长句子 -> 多段 sequential
             blocks = self._split_long_text_to_sub_blocks(

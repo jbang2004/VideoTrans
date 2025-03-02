@@ -21,6 +21,7 @@ class AudioGenerator:
         for s in sentences:
             text_uuid = s.model_input.get('text_uuid')
             speaker_uuid = s.model_input.get('speaker_uuid')
+                
             if not text_uuid or not speaker_uuid:
                 self.logger.warning("缺少text_uuid或speaker_uuid，无法生成音频")
                 continue
@@ -53,26 +54,24 @@ class AudioGenerator:
         """
         text_uuid = sentence.model_input.get('text_uuid')
         speaker_uuid = sentence.model_input.get('speaker_uuid')
+        speed = getattr(sentence, 'speed', 1.0) or 1.0
+        is_first = sentence.is_first
+        start = sentence.start
+        silence_duration = sentence.silence_duration
+
         if not text_uuid or not speaker_uuid:
             self.logger.warning("缺少text_uuid或speaker_uuid，无法生成音频")
             return np.zeros(0, dtype=np.float32)
 
-        speed = getattr(sentence, 'speed', 1.0) or 1.0
         audio_np, dur_sec = self.cosyvoice_client.token2wav(text_uuid, speaker_uuid, speed=speed)
 
-        if getattr(sentence, 'is_first', False) and getattr(sentence, 'start', 0) > 0:
-            silence_samples = int(sentence.start * self.sample_rate / 1000)
-            audio_np = np.concatenate([
-                np.zeros(silence_samples, dtype=np.float32),
-                audio_np
-            ])
+        if is_first and start > 0:
+            silence_samples = int(start * self.sample_rate / 1000)
+            audio_np = np.concatenate([np.zeros(silence_samples, dtype=np.float32), audio_np])
 
-        if hasattr(sentence, 'silence_duration') and sentence.silence_duration > 0:
-            silence_samples = int(sentence.silence_duration * self.sample_rate / 1000)
-            audio_np = np.concatenate([
-                audio_np,
-                np.zeros(silence_samples, dtype=np.float32)
-            ])
+        if silence_duration > 0:
+            silence_samples = int(silence_duration * self.sample_rate / 1000)
+            audio_np = np.concatenate([audio_np, np.zeros(silence_samples, dtype=np.float32)])
 
         self.logger.debug(
             f"音频生成完成 (text_uuid={text_uuid}, speaker_uuid={speaker_uuid}), "

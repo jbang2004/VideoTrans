@@ -22,6 +22,7 @@ class TTSTokenGenerator:
         for s in sentences:
             text_uuid = s.model_input.get('text_uuid')
             speaker_uuid = s.model_input.get('speaker_uuid')
+                
             if not text_uuid or not speaker_uuid:
                 self.logger.warning("缺少text_uuid或speaker_uuid，无法生成TTS tokens")
                 continue
@@ -43,5 +44,6 @@ class TTSTokenGenerator:
             return sentence
 
         sentence.duration = duration_ms
+            
         self.logger.debug(f"[TTS Token] (text_uuid={text_uuid}, speaker_uuid={speaker_uuid}) 生成完毕 => 估计时长 {duration_ms}ms")
         return sentence

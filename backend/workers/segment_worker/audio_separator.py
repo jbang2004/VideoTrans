@@ -34,3 +34,21 @@ class ClearVoiceSeparator(AudioSeparator):
             sr = 48000
         
         return enhanced_audio, background_audio, sr
+    
+    async def separate(self, input_path: str, vocals_output: str, background_output: str) -> None:
+        """
+        分离音频，并将人声和背景音保存到指定路径
+        
+        Args:
+            input_path: 输入音频路径
+            vocals_output: 人声输出路径
+            background_output: 背景音输出路径
+        """
+        import soundfile as sf
+        
+        # 分离音频
+        enhanced_audio, background_audio, sr = self.separate_audio(input_path)
+        
+        # 保存音频
+        sf.write(vocals_output, enhanced_audio, sr)
+        sf.write(background_output, background_audio, sr)

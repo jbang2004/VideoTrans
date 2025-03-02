@@ -8,6 +8,7 @@ import asyncio
 import logging
 import signal
 import argparse
+from pathlib import Path
 from config import Config
 from workers.segment_worker.worker import SegmentWorker
 from workers.asr_worker.worker import ASRWorker
@@ -18,15 +19,24 @@ from workers.duration_worker.worker import DurationWorker
 from workers.audio_gen_worker.worker import AudioGenWorker
 from workers.mixer_worker.worker import MixerWorker
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# 导入日志配置模块
+from utils.log_config import configure_logging
+
+# 初始化日志系统
+log_dir = configure_logging()
 logger = logging.getLogger(__name__)
+
+# 定义所有工作者类及其显示名称
+WORKERS = {
+    'segment': (SegmentWorker, "分段 Worker"),
+    'asr': (ASRWorker, "ASR Worker"),
+    'translation': (TranslationWorker, "翻译 Worker"),
+    'modelin': (ModelInWorker, "模型输入 Worker"),
+    'tts': (TTSTokenWorker, "TTS Token生成 Worker"),
+    'duration': (DurationWorker, "时长对齐 Worker"),
+    'audio': (AudioGenWorker, "音频生成 Worker"),
+    'mixer': (MixerWorker, "混音 Worker"),
+}
 
 async def start_worker(worker_class, config, worker_name):
     """启动单个 worker"""
@@ -38,28 +48,29 @@ async def start_worker(worker_class, config, worker_name):
         if hasattr(worker, 'initialize') and callable(worker.initialize):
             worker = await worker.initialize()
         
+        # 针对不同类型的worker调用不同的方法
+        if worker_class == SegmentWorker:
+            logger.info(f"{worker_name} 开始处理队列...")
+            await asyncio.gather(
+                worker.run_init(),
+                worker.run_extract()
+            )
+        elif hasattr(worker, 'run') and callable(worker.run):
+            logger.info(f"{worker_name} 开始处理队列...")
+            await worker.run()
+        else:
+            logger.error(f"{worker_name} 没有可调用的run方法")
+            
         # 创建一个永不结束的任务，让 worker 保持运行
-        # 不再调用 worker.run()，而是让装饰器处理队列监听
         await asyncio.Future()
     except Exception as e:
         logger.error(f"{worker_name} 启动失败: {e}", exc_info=True)
 
 async def start_all_workers(config):
     """启动所有 worker"""
-    workers = [
-        (SegmentWorker, "分段初始化 Worker"),
-        (ASRWorker, "ASR Worker"),
-        (TranslationWorker, "翻译 Worker"),
-        (ModelInWorker, "模型输入 Worker"),
-        (TTSTokenWorker, "TTS Token生成 Worker"),
-        (DurationWorker, "时长对齐 Worker"),
-        (AudioGenWorker, "音频生成 Worker"),
-        (MixerWorker, "混音 Worker"),
-    ]
-    
     # 创建所有 worker 任务
     tasks = []
-    for worker_class, worker_name in workers:
+    for worker_id, (worker_class, worker_name) in WORKERS.items():
         task = asyncio.create_task(start_worker(worker_class, config, worker_name))
         tasks.append(task)
     
@@ -78,7 +89,8 @@ def handle_signal(sig, frame):
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="启动 Redis 队列 Worker")
-    parser.add_argument('--worker', type=str, help='指定要启动的 worker: segment, asr, translation, modelin, tts, duration, audio, mixer, all')
+    parser.add_argument('--worker', type=str, 
+                        help=f'指定要启动的 worker: {", ".join(WORKERS.keys())}, all')
     args = parser.parse_args()
     
     # 注册信号处理器
@@ -87,25 +99,14 @@ def main():
     
     config = Config()
     
-    if args.worker == 'segment':
-        asyncio.run(start_worker(SegmentWorker, config, "分段 Worker"))
-    elif args.worker == 'asr':
-        asyncio.run(start_worker(ASRWorker, config, "ASR Worker"))
-    elif args.worker == 'translation':
-        asyncio.run(start_worker(TranslationWorker, config, "翻译 Worker"))
-    elif args.worker == 'modelin':
-        asyncio.run(start_worker(ModelInWorker, config, "模型输入 Worker"))
-    elif args.worker == 'tts':
-        asyncio.run(start_worker(TTSTokenWorker, config, "TTS Token生成 Worker"))
-    elif args.worker == 'duration':
-        asyncio.run(start_worker(DurationWorker, config, "时长对齐 Worker"))
-    elif args.worker == 'audio':
-        asyncio.run(start_worker(AudioGenWorker, config, "音频生成 Worker"))
-    elif args.worker == 'mixer':
-        asyncio.run(start_worker(MixerWorker, config, "混音 Worker"))
-    else:
+    if args.worker in WORKERS:
+        worker_class, worker_name = WORKERS[args.worker]
+        asyncio.run(start_worker(worker_class, config, worker_name))
+    elif args.worker == 'all' or args.worker is None:
         # 启动所有 worker
         asyncio.run(start_all_workers(config))
+    else:
+        logger.error("无效的 worker 名称")
 
 if __name__ == "__main__":
     main()

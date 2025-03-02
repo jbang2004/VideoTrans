@@ -1,4 +1,3 @@
-import logging
 import asyncio
 import numpy as np
 import torch
@@ -10,12 +9,13 @@ import aioredis
 from typing import Dict, Any, Optional
 from utils.ffmpeg_utils import FFmpegTool
 from utils.task_state import TaskState
-from utils.redis_decorators import redis_worker_decorator
+from utils.worker_decorators import redis_worker_decorator
 from utils import concurrency
+from utils.log_config import get_logger
 from .audio_separator import ClearVoiceSeparator
 from .video_segmenter import VideoSegmenter
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 class SegmentWorker:
     """
@@ -84,16 +84,13 @@ class SegmentWorker:
           4. 清理临时文件，并返回提取信息。
         """
         try:
-            if item is None:
-                return None
-
-            data = item.get('data', item)  # 兼容直接传入数据或包含data字段的情况
+            data = item.get('data', item) if isinstance(item, dict) else item
             index = data['index']
             start = data['start']
             duration = data['duration']
             video_path = data['video_path']  # 从队列消息中获取视频路径
 
-            self.logger.debug(
+            self.logger.info(
                 f"[分段提取 Worker] 开始处理分段 {index}, start={start:.2f}s, duration={duration:.2f}s -> TaskID={task_state.task_id}"
             )
             silent_video = str(task_state.task_paths.processing_dir / f"video_silent_{index}.mp4")
@@ -124,7 +121,7 @@ class SegmentWorker:
                 'vocals_path': vocals_audio,
                 'background_path': background_audio
             }
-            task_state.segment_media_files[index] = segment_info
+            task_state.segment_media_files[str(index)] = segment_info
 
             self.logger.info(
                 f"[分段提取 Worker] 分段 {index} 处理完成 -> TaskID={task_state.task_id}"

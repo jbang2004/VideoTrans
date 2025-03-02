@@ -45,20 +45,44 @@ class FFmpegTool:
         """
         提取音频，可选指定起始时间与持续时长。
         输出为单声道 PCM float32 (48k/16k 视需求).
+        如果视频没有音频流，则生成一个空的音频文件。
         """
-        cmd = ["ffmpeg", "-y", "-i", input_path]
-        if start > 0:
-            cmd += ["-ss", str(start)]
-        if duration is not None:
-            cmd += ["-t", str(duration)]
+        # 首先检查视频是否有音频流
+        has_audio = await self._check_audio_stream(input_path)
+        
+        if has_audio:
+            cmd = ["ffmpeg", "-y", "-i", input_path]
+            if start > 0:
+                cmd += ["-ss", str(start)]
+            if duration is not None:
+                cmd += ["-t", str(duration)]
 
-        cmd += [
-            "-vn",                # 去掉视频
-            "-acodec", "pcm_f32le",
-            "-ac", "1",
-            output_path
-        ]
-        await self.run_command(cmd)
+            cmd += [
+                "-vn",                # 去掉视频
+                "-acodec", "pcm_f32le",
+                "-ac", "1",
+                output_path
+            ]
+            await self.run_command(cmd)
+        else:
+            # 如果没有音频流，生成一个空的音频文件
+            logger.warning(f"[FFmpegTool] 视频 {input_path} 没有音频流，生成空音频文件")
+            # 获取视频时长
+            video_duration = await self._get_video_duration(input_path)
+            if duration is not None:
+                video_duration = min(video_duration, duration)
+            
+            # 生成静音音频
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "lavfi",
+                "-i", f"anullsrc=r=48000:cl=mono",
+                "-t", str(video_duration),
+                "-acodec", "pcm_f32le",
+                "-ac", "1",
+                output_path
+            ]
+            await self.run_command(cmd)
 
     async def extract_video(
         self,
@@ -220,6 +244,26 @@ class FFmpegTool:
             ]
             await self.run_command(cmd)
             logger.warning("[FFmpegTool] 已跳过字幕，仅合并音视频")
+
+    async def _check_audio_stream(self, input_path: str) -> bool:
+        """检查视频是否有音频流"""
+        cmd = ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", 
+               "stream=codec_type", "-of", "json", input_path]
+        try:
+            stdout, _ = await self.run_command(cmd)
+            import json
+            result = json.loads(stdout)
+            return 'streams' in result and len(result['streams']) > 0
+        except Exception as e:
+            logger.error(f"[FFmpegTool] 检查音频流失败: {e}")
+            return False
+            
+    async def _get_video_duration(self, input_path: str) -> float:
+        """获取视频时长"""
+        cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", 
+               "-of", "default=noprint_wrappers=1:nokey=1", input_path]
+        stdout, _ = await self.run_command(cmd)
+        return float(stdout.decode().strip())
 
     async def get_duration(self, input_path: str) -> float:
         """
