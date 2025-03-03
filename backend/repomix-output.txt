@@ -60,7 +60,7 @@ core/
   __init__.py
   asr_model_actor.py
   audio_gener.py
-  audio_separator.py
+  audio_separator_actor.py
   auto_sense.py
   cosyvoice_model_actor.py
   hls_manager.py
@@ -72,7 +72,6 @@ utils/
   concurrency.py
   decorators.py
   ffmpeg_utils.py
-  gpu_manager.py
   media_utils.py
   sentence_logger.py
   task_state.py
@@ -835,7 +834,14 @@ class SenseAutoModelActor:
             return result
         except Exception as e:
             self.logger.error(f"ASR识别失败: {str(e)}")
-            raise
+            raise 
+
+def create_asr_model(num_gpus=0.1):
+    """创建ASR模型Actor实例"""
+    return SenseAutoModelActor.options(
+        num_gpus=num_gpus,
+        name="sense_asr_model"
+    ).remote()
 
 ================
 File: core/audio_gener.py
@@ -948,44 +954,87 @@ class AudioGenerator:
             raise
 
 ================
-File: core/audio_separator.py
+File: core/audio_separator_actor.py
 ================
-from abc import ABC, abstractmethod
-from typing import Tuple
+import ray
+import sys
+import logging
 import numpy as np
+from typing import Tuple
 
-from models.ClearerVoice.clearvoice import ClearVoice
-
-class AudioSeparator(ABC):
-    """音频分离器接口"""
-    @abstractmethod
-    def separate_audio(self, input_path: str, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
-        pass
-
-class ClearVoiceSeparator(AudioSeparator):
-    """使用 ClearVoice 实现的音频分离器"""
-    def __init__(self, model_name: str = 'MossFormer2_SE_48K'):
-        self.model_name = model_name
-        self.clearvoice = ClearVoice(
-            task='speech_enhancement',
-            model_names=[model_name]
-        )
+@ray.remote(num_gpus=0.1)  # 分配较少的GPU资源
+class AudioSeparatorActor:
+    """音频分离器Actor封装"""
     
-    def separate_audio(self, input_path: str) -> Tuple[np.ndarray, np.ndarray, int]:
-        enhanced_audio, background_audio = self.clearvoice(
-            input_path=input_path,
-            online_write=False,
-            extract_noise=True
-        )
+    def __init__(self, model_name: str = 'MossFormer2_SE_48K'):
+        """初始化音频分离器Actor"""
+        self.logger = logging.getLogger(__name__)
+        self.logger.info(f"初始化音频分离器Actor: {model_name}")
         
-        if self.model_name.endswith('16K'):
-            sr = 16000
-        elif self.model_name.endswith('48K'):
-            sr = 48000
-        else:
-            sr = 48000
+        # 导入Config并设置系统路径
+        from config import Config
+        self.config = Config()
         
-        return enhanced_audio, background_audio, sr
+        # 添加系统路径
+        for path in self.config.SYSTEM_PATHS:
+            if path not in sys.path:
+                sys.path.append(path)
+                self.logger.info(f"添加系统路径: {path}")
+        
+        try:
+            # 导入并初始化音频分离模型
+            from models.ClearerVoice.clearvoice import ClearVoice
+            
+            self.model_name = model_name
+            self.clearvoice = ClearVoice(
+                task='speech_enhancement',
+                model_names=[model_name]
+            )
+            
+            self.logger.info("音频分离模型加载完成")
+        except Exception as e:
+            self.logger.error(f"音频分离模型加载失败: {str(e)}")
+            raise
+    
+    async def separate_audio(self, input_path: str) -> Tuple[np.ndarray, np.ndarray, int]:
+        """执行音频分离"""
+        try:
+            self.logger.info(f"开始分离音频: {input_path}")
+            
+            # 在异步方法中使用run_sync包装同步操作
+            def do_separate():
+                return self.clearvoice(
+                    input_path=input_path,
+                    online_write=False,
+                    extract_noise=True
+                )
+            
+            # 使用Ray的concurrency.run_sync或asyncio.to_thread
+            from utils import concurrency
+            enhanced_audio, background_audio = await concurrency.run_sync(do_separate)
+            
+            # 根据模型名称确定采样率
+            if self.model_name.endswith('16K'):
+                sr = 16000
+            elif self.model_name.endswith('48K'):
+                sr = 48000
+            else:
+                sr = 48000
+                
+            self.logger.info(f"音频分离完成: {input_path}")
+            return enhanced_audio, background_audio, sr
+            
+        except Exception as e:
+            self.logger.error(f"音频分离失败: {str(e)}")
+            raise
+
+# 只保留工厂函数，移除默认实例创建
+def create_audio_separator(num_gpus=0.1, model_name='MossFormer2_SE_48K'):
+    """创建音频分离器Actor实例"""
+    return AudioSeparatorActor.options(
+        num_gpus=num_gpus,
+        name="audio_separator"
+    ).remote(model_name)
 
 ================
 File: core/auto_sense.py
@@ -1294,6 +1343,13 @@ class CosyVoiceModelActor:
         
         segment_output = self.model.token2wav(**token2wav_kwargs)
         return segment_output.cpu().numpy()
+
+def create_cosyvoice_model(num_gpus=0.8, model_path="models/CosyVoice/pretrained_models/CosyVoice2-0.5B"):
+    """创建CosyVoice模型Actor实例"""
+    return CosyVoiceModelActor.options(
+        num_gpus=num_gpus,
+        name="cosyvoice_model"
+    ).remote(model_path)
 
 ================
 File: core/hls_manager.py
@@ -2761,108 +2817,6 @@ class FFmpegTool:
         return float(stdout.decode().strip())
 
 ================
-File: utils/gpu_manager.py
-================
-import ray
-import logging
-import psutil
-import time
-import numpy as np
-from threading import Lock
-
-logger = logging.getLogger(__name__)
-
-class GPUResourceManager:
-    """GPU资源自动分配管理器"""
-    
-    def __init__(self, total_gpus=1.0, min_gpu=0.1, check_interval=5):
-        self.total_gpus = total_gpus  # 总GPU资源
-        self.min_gpu = min_gpu         # 最小分配单位
-        self.check_interval = check_interval  # 检查间隔(秒)
-        self.lock = Lock()
-        self.last_check = 0
-        self.usage_history = []        # 保存历史使用率
-        self.history_window = 3        # 历史窗口大小
-        
-        # 模型优先级和基础资源需求
-        self.model_priority = {
-            "cosyvoice": 0.7,    # TTS模型优先级高，基础资源需求0.7
-            "sense_asr": 0.3,    # ASR模型优先级低，基础资源需求0.3
-        }
-    
-    def _get_current_load(self):
-        """获取当前系统负载"""
-        try:
-            # 1. CPU负载检查
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            # 2. 内存使用检查
-            memory_percent = psutil.virtual_memory().percent
-            # 3. GPU使用率检查 (可选，需要安装额外库如pynvml)
-            
-            # 综合负载分数 (0-100)
-            load_score = (cpu_percent + memory_percent) / 2
-            return load_score
-        except Exception as e:
-            logger.error(f"获取系统负载失败: {e}")
-            return 50  # 默认中等负载
-    
-    def _check_ray_resources(self):
-        """检查Ray集群资源状态"""
-        try:
-            resources = ray.available_resources()
-            gpu_available = resources.get("GPU", 0)
-            return {
-                "gpu_available": gpu_available,
-                "total_resources": resources
-            }
-        except Exception as e:
-            logger.error(f"获取Ray资源失败: {e}")
-            return {"gpu_available": 0.1, "total_resources": {}}
-    
-    def get_allocation(self, model_type):
-        """根据负载情况为指定模型类型分配GPU资源"""
-        with self.lock:  # 防止并发分配冲突
-            # 避免频繁检查
-            current_time = time.time()
-            if current_time - self.last_check < self.check_interval:
-                # 使用缓存的最近分配决策
-                if len(self.usage_history) > 0:
-                    load_score = np.mean(self.usage_history)
-                else:
-                    load_score = 50  # 默认中等负载
-            else:
-                # 更新负载并缓存
-                load_score = self._get_current_load()
-                self.usage_history.append(load_score)
-                if len(self.usage_history) > self.history_window:
-                    self.usage_history.pop(0)
-                self.last_check = current_time
-            
-            # 检查Ray资源
-            ray_resources = self._check_ray_resources()
-            gpu_available = ray_resources["gpu_available"]
-            
-            # 负载级别分类 (0-100)
-            if load_score < 30:  # 低负载
-                scale_factor = 1.0
-            elif load_score < 70:  # 中等负载 
-                scale_factor = 0.8
-            else:  # 高负载
-                scale_factor = 0.6
-            
-            # 根据模型类型和优先级分配资源
-            base_allocation = self.model_priority.get(model_type, 0.1)
-            allocation = max(self.min_gpu, base_allocation * scale_factor)
-            
-            # 检查是否超出可用资源
-            if allocation > gpu_available and gpu_available > self.min_gpu:
-                logger.warning(f"GPU资源不足，调整分配: {allocation} -> {gpu_available}")
-                allocation = gpu_available
-            
-            logger.info(f"模型 {model_type} 分配GPU: {allocation:.2f} (负载: {load_score:.1f}, 缩放: {scale_factor:.1f})")
-            return allocation
-
-================
 File: utils/media_utils.py
 ================
 # utils/media_utils.py
@@ -2877,6 +2831,7 @@ from pathlib import Path
 from typing import List, Tuple, Dict, Union, Optional
 from utils.decorators import handle_errors
 from utils import concurrency
+import ray
 
 # 引入统一的 FFmpegTool
 from utils.ffmpeg_utils import FFmpegTool
@@ -2884,14 +2839,21 @@ from utils.ffmpeg_utils import FFmpegTool
 logger = logging.getLogger(__name__)
 
 class MediaUtils:
-    def __init__(self, config, audio_separator, target_sr: int = 24000):
+    """媒体工具类，处理视频、音频的提取和处理"""
+    
+    def __init__(self, config, audio_separator_actor=None, target_sr=None):
+        """初始化
+        
+        Args:
+            config: 配置对象
+            audio_separator_actor: 音频分离Actor引用
+            target_sr: 目标采样率
+        """
         self.config = config
+        self.audio_separator_actor = audio_separator_actor  
         self.target_sr = target_sr
-        self.logger = logging.getLogger(__name__)
-        self.audio_separator = audio_separator
-
-        # 新增 ffmpeg 工具类
         self.ffmpeg_tool = FFmpegTool()
+        self.logger = logging.getLogger(__name__)
 
     def normalize_and_resample(
         self,
@@ -2930,17 +2892,21 @@ class MediaUtils:
         return audio_input
 
     @handle_errors(logger)
-    async def get_video_duration(self, video_path: str) -> float:
+    async def get_video_segments(self, video_path: str) -> List[Tuple[float, float]]:
         """
-        用 ffprobe 查询视频时长 (异步)，统一改用 FFmpegTool。
+        获取视频时长并计算分段信息
+        
+        Args:
+            video_path: 视频文件路径
+            
+        Returns:
+            List[Tuple[float, float]]: 分段列表，每个元素为(开始时间, 持续时间)
         """
-        return await self.ffmpeg_tool.get_duration(video_path)
-
-    @handle_errors(logger)
-    async def get_audio_segments(self, duration: float) -> List[Tuple[float, float]]:
-        """
-        按照配置中的 SEGMENT_MINUTES 分割时间片。仅做一些计算，不会阻塞。
-        """
+        # 1. 获取视频时长
+        duration = await self.ffmpeg_tool.get_duration(video_path)
+        self.logger.info(f"视频时长: {duration:.2f}秒")
+        
+        # 2. 计算分段
         segment_length = self.config.SEGMENT_MINUTES * 60
         min_length = self.config.MIN_SEGMENT_MINUTES * 60
 
@@ -2965,7 +2931,8 @@ class MediaUtils:
 
             segments.append((current_pos, segment_length))
             current_pos += segment_length
-
+            
+        self.logger.info(f"视频分为 {len(segments)} 个分段")
         return segments
 
     @handle_errors(logger)
@@ -2978,6 +2945,8 @@ class MediaUtils:
         segment_index: int
     ) -> Dict[str, Union[str, float]]:
         """
+        提取视频片段并分离人声/背景
+        
         1) 提取纯视频 + 音频
         2) 调用 audio_separator 分离人声/背景
         3) 重采样 + 写音频文件
@@ -2985,53 +2954,60 @@ class MediaUtils:
         """
         temp_files = {}
         try:
+            # 准备文件路径
             silent_video = str(output_dir / f"video_silent_{segment_index}.mp4")
             full_audio = str(output_dir / f"audio_full_{segment_index}.wav")
             vocals_audio = str(output_dir / f"vocals_{segment_index}.wav")
-            background_audio = str(output_dir / f"background_{segment_index}.wav")
+            background_audio_path = str(output_dir / f"background_{segment_index}.wav")
 
-            # (1) 并发提取音频 & 视频
+            self.logger.info(f"开始处理视频片段: {segment_index}, 起始={start:.2f}s, 持续={duration:.2f}s")
+            
+            # (1) 并发提取音频 & 视频 - 高效利用异步
             await asyncio.gather(
                 self.ffmpeg_tool.extract_audio(video_path, full_audio, start, duration),
                 self.ffmpeg_tool.extract_video(video_path, silent_video, start, duration)
             )
 
-            # (2) 分离人声
-            def do_separate():
-                return self.audio_separator.separate_audio(full_audio)
+            # (2) 使用Actor进行音频分离
+            if self.audio_separator_actor:
+                self.logger.info(f"使用Actor分离音频: {full_audio}")
+                # 使用更清晰的直接await语法
+                enhanced_audio, background_audio, sep_sr = await self.audio_separator_actor.separate_audio.remote(str(full_audio))
+                
+                # 如果需要重采样到target_sr
+                if self.target_sr and sep_sr != self.target_sr:
+                    background_audio = self.normalize_and_resample((sep_sr, background_audio), self.target_sr)
 
-            vocals, background, sr = await concurrency.run_sync(do_separate)
+                # 写入人声/背景音频 - 并发写入
+                async def write_audio_files():
+                    await asyncio.gather(
+                        concurrency.run_sync(lambda: sf.write(vocals_audio, enhanced_audio, sep_sr, subtype='FLOAT')),
+                        concurrency.run_sync(lambda: sf.write(background_audio_path, background_audio, 
+                                                           self.target_sr or sep_sr, subtype='FLOAT'))
+                    )
+                
+                await write_audio_files()
+                segment_duration = len(enhanced_audio) / sep_sr
 
-            # (3) 重采样
-            def do_resample_bg():
-                return self.normalize_and_resample((sr, background), self.target_sr)
+                # 删除原始整段音频，节省空间
+                Path(full_audio).unlink(missing_ok=True)
 
-            background = await concurrency.run_sync(do_resample_bg)
-
-            # 写入人声/背景音频
-            def write_vocals():
-                sf.write(vocals_audio, vocals, sr, subtype='FLOAT')
-
-            def write_bg():
-                sf.write(background_audio, background, self.target_sr, subtype='FLOAT')
-
-            await concurrency.run_sync(write_vocals)
-            await concurrency.run_sync(write_bg)
-
-            segment_duration = len(vocals) / sr
-
-            # optional: 删除原始整段音频
-            Path(full_audio).unlink(missing_ok=True)
-
-            temp_files = {
-                'video': silent_video,
-                'vocals': vocals_audio,
-                'background': background_audio,
-                'duration': segment_duration
-            }
-            return temp_files
+                temp_files = {
+                    'video': silent_video,
+                    'vocals': vocals_audio,
+                    'background': background_audio_path,
+                    'duration': segment_duration
+                }
+                
+                self.logger.info(f"视频片段处理完成: 索引={segment_index}, 实际持续时间={segment_duration:.2f}s")
+                return temp_files
+            else:
+                self.logger.warning("未提供音频分离Actor，无法分离音频")
+                raise ValueError("缺少音频分离Actor")
 
         except Exception as e:
+            self.logger.error(f"视频片段处理失败: {str(e)}")
+            
             # 清理已生成的临时文件
             for file_path in temp_files.values():
                 if isinstance(file_path, str) and Path(file_path).exists():
@@ -3790,10 +3766,6 @@ import os
 from typing import List, Dict, Any
 from pathlib import Path
 import ray
-import asyncio
-
-from core.auto_sense import SenseAutoModel
-from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
 from core.translation.translator import Translator
 from core.translation.deepseek_client import DeepSeekClient
 from core.translation.gemini_client import GeminiClient
@@ -3804,14 +3776,16 @@ from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.media_mixer import MediaMixer
 from utils.media_utils import MediaUtils
 from pipeline_scheduler import PipelineScheduler
-from core.audio_separator import ClearVoiceSeparator
 from core.model_in import ModelIn
 from utils.task_storage import TaskPaths
 from config import Config
 from utils.task_state import TaskState
 
 from utils.ffmpeg_utils import FFmpegTool
-from utils.gpu_manager import GPUResourceManager
+
+from core.audio_separator_actor import create_audio_separator
+from core.asr_model_actor import create_asr_model
+from core.cosyvoice_model_actor import create_cosyvoice_model
 
 logger = logging.getLogger(__name__)
 
@@ -3826,48 +3800,22 @@ class ViTranslator:
         # 初始化Ray（如果尚未初始化）
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
-        
-        # 初始化GPU资源管理器
-        self.gpu_manager = GPUResourceManager(
-            total_gpus=1.0,  # 总GPU资源
-            min_gpu=0.1      # 最小分配单位
-        )
             
         self._init_global_models()
 
     def _init_global_models(self):
         self.logger.info("[ViTranslator] 初始化模型和工具...")
         
-        # 音频分离器
-        self.audio_separator = ClearVoiceSeparator(model_name='MossFormer2_SE_48K')
-        
-        # 为ASR模型动态分配GPU资源
-        asr_gpu = self.gpu_manager.get_allocation("sense_asr")
-        self.logger.info(f"ASR模型分配GPU: {asr_gpu}")
-        
-        # 创建ASR模型Actor
-        from core.asr_model_actor import SenseAutoModelActor
-        self.sense_model_actor = SenseAutoModelActor.options(
-            num_gpus=asr_gpu,
-            name="sense_asr_model"
-        ).remote()
-        
-        # 为TTS模型动态分配GPU资源
-        tts_gpu = self.gpu_manager.get_allocation("cosyvoice")
-        self.logger.info(f"TTS模型分配GPU: {tts_gpu}")
-        
-        # 创建CosyVoice模型Actor
-        from core.cosyvoice_model_actor import CosyVoiceModelActor
-        self.cosyvoice_model_actor = CosyVoiceModelActor.options(
-            num_gpus=tts_gpu,
-            name="cosyvoice_model"
-        ).remote("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
+        # 使用工厂函数
+        self.audio_separator_actor = create_audio_separator(num_gpus=0.1)
+        self.sense_model_actor = create_asr_model(num_gpus=0.1)
+        self.cosyvoice_model_actor = create_cosyvoice_model(num_gpus=0.8)
         
         # 获取采样率
         self.target_sr = ray.get(self.cosyvoice_model_actor.get_sample_rate.remote())
 
-        # 其他核心工具
-        self.media_utils = MediaUtils(config=self.config, audio_separator=self.audio_separator, target_sr=self.target_sr)
+        # 其他核心工具 - 传递actor引用而非实例
+        self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
         self.model_in = ModelIn(self.cosyvoice_model_actor)
         self.tts_generator = TTSTokenGenerator(self.cosyvoice_model_actor, Hz=25)
         self.audio_generator = AudioGenerator(self.cosyvoice_model_actor, sample_rate=self.target_sr)
@@ -3900,7 +3848,6 @@ class ViTranslator:
         task_paths: TaskPaths,
         hls_manager=None,
         target_language="zh",
-        # =========== (新增) ===========
         generate_subtitle: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -3918,7 +3865,6 @@ class ViTranslator:
             task_paths=task_paths,
             hls_manager=hls_manager,
             target_language=target_language,
-            # =========== (新增) ===========
             generate_subtitle=generate_subtitle
         )
 
@@ -3935,11 +3881,9 @@ class ViTranslator:
         await pipeline.start_workers(task_state)
 
         try:
-            # 1. 获取视频总时长
-            duration = await self.media_utils.get_video_duration(video_path)
-            # 2. 划分分段
-            segments = await self.media_utils.get_audio_segments(duration)
-            self.logger.info(f"总长度={duration:.2f}s, 分段数={len(segments)}, 任务ID={task_id}")
+            # 1. 获取视频分段信息 (合并了原来的两个步骤)
+            segments = await self.media_utils.get_video_segments(video_path)
+            self.logger.info(f"总分段数={len(segments)}, 任务ID={task_id}")
 
             if not segments:
                 self.logger.warning(f"没有可用分段 -> 任务ID={task_id}")
@@ -4076,29 +4020,6 @@ class ViTranslator:
         finally:
             if list_txt.exists():
                 list_txt.unlink()
-
-    async def adjust_gpu_allocation(self):
-        """根据当前负载重新调整GPU资源分配"""
-        try:
-            # 重新获取每个模型的适当分配
-            asr_gpu = self.gpu_manager.get_allocation("sense_asr")
-            tts_gpu = self.gpu_manager.get_allocation("cosyvoice")
-            
-            # 向Ray报告新的资源需求
-            # 注意：这需要模型支持在运行时调整资源，可能需要重新创建Actor
-            self.logger.info(f"动态调整GPU分配 - ASR: {asr_gpu}, TTS: {tts_gpu}")
-            
-            # Ray目前不直接支持在运行时调整Actor资源，
-            # 这里只是概念演示，实际使用时可能需要终止并重新创建Actor
-            
-            return {
-                "asr_gpu": asr_gpu,
-                "tts_gpu": tts_gpu,
-                "total": asr_gpu + tts_gpu
-            }
-        except Exception as e:
-            self.logger.error(f"调整GPU分配失败: {e}")
-            return None
 
 
 

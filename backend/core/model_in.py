@@ -48,18 +48,14 @@ class ModelIn:
             tts_text = sentence.trans_text
             
             # 调用Actor的normalize_text方法
-            normalized_segments = await concurrency.run_sync(
-                lambda: ray.get(self.cosyvoice_actor.normalize_text.remote(tts_text, split=True))
-            )
+            normalized_segments = await self.cosyvoice_actor.normalize_text.remote(tts_text, split=True)
             
             segment_tokens = []
             segment_token_lens = []
 
             for seg in normalized_segments:
                 # 调用Actor提取文本token
-                txt, txt_len = await concurrency.run_sync(
-                    lambda s=seg: ray.get(self.cosyvoice_actor.extract_text_tokens.remote(s))
-                )
+                txt, txt_len = await self.cosyvoice_actor.extract_text_tokens.remote(seg)
                 segment_tokens.append(txt)
                 segment_token_lens.append(txt_len)
 
@@ -83,18 +79,14 @@ class ModelIn:
         if not reuse_speaker:
             if speaker_id not in self.speaker_cache:
                 # 调用Actor处理音频
-                processed_audio = await concurrency.run_sync(
-                    lambda: ray.get(self.cosyvoice_actor.postprocess_audio.remote(
-                        sentence.audio, max_val=self.max_val
-                    ))
+                processed_audio = await self.cosyvoice_actor.postprocess_audio.remote(
+                    sentence.audio, max_val=self.max_val
                 )
                 
                 # 调用Actor提取说话人特征
-                self.speaker_cache[speaker_id] = await concurrency.run_sync(
-                    lambda: ray.get(self.cosyvoice_actor.extract_speaker_features.remote(processed_audio))
-                )
+                self.speaker_cache[speaker_id] = await self.cosyvoice_actor.extract_speaker_features.remote(processed_audio)
                 
-            speaker_features = self.speaker_cache[speaker_id].copy()
+            speaker_features = self.speaker_cache[speaker_id]
             sentence.model_input = speaker_features
 
         # 2) UUID处理

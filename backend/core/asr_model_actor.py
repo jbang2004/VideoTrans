@@ -57,3 +57,10 @@ class SenseAutoModelActor:
         except Exception as e:
             self.logger.error(f"ASR识别失败: {str(e)}")
             raise 
+
+def create_asr_model(num_gpus=0.1):
+    """创建ASR模型Actor实例"""
+    return SenseAutoModelActor.options(
+        num_gpus=num_gpus,
+        name="sense_asr_model"
+    ).remote() 

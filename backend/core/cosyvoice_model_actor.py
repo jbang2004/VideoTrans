@@ -129,4 +129,11 @@ class CosyVoiceModelActor:
         }
         
         segment_output = self.model.token2wav(**token2wav_kwargs)
-        return segment_output.cpu().numpy() 
+        return segment_output.cpu().numpy()
+
+def create_cosyvoice_model(num_gpus=0.8, model_path="models/CosyVoice/pretrained_models/CosyVoice2-0.5B"):
+    """创建CosyVoice模型Actor实例"""
+    return CosyVoiceModelActor.options(
+        num_gpus=num_gpus,
+        name="cosyvoice_model"
+    ).remote(model_path) 

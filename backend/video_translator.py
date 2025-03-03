@@ -6,10 +6,6 @@ import os
 from typing import List, Dict, Any
 from pathlib import Path
 import ray
-import asyncio
-
-from core.auto_sense import SenseAutoModel
-from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
 from core.translation.translator import Translator
 from core.translation.deepseek_client import DeepSeekClient
 from core.translation.gemini_client import GeminiClient
@@ -20,13 +16,16 @@ from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.media_mixer import MediaMixer
 from utils.media_utils import MediaUtils
 from pipeline_scheduler import PipelineScheduler
-from core.audio_separator import ClearVoiceSeparator
 from core.model_in import ModelIn
 from utils.task_storage import TaskPaths
 from config import Config
 from utils.task_state import TaskState
 
 from utils.ffmpeg_utils import FFmpegTool
+
+from core.audio_separator_actor import create_audio_separator
+from core.asr_model_actor import create_asr_model
+from core.cosyvoice_model_actor import create_cosyvoice_model
 
 logger = logging.getLogger(__name__)
 
@@ -47,28 +46,16 @@ class ViTranslator:
     def _init_global_models(self):
         self.logger.info("[ViTranslator] 初始化模型和工具...")
         
-        # 音频分离器
-        self.audio_separator = ClearVoiceSeparator(model_name='MossFormer2_SE_48K')
-        
-        # 创建ASR模型Actor
-        from core.asr_model_actor import SenseAutoModelActor
-        self.sense_model_actor = SenseAutoModelActor.options(
-            num_gpus=0.1,
-            name="sense_asr_model"
-        ).remote()
-        
-        # 创建CosyVoice模型Actor
-        from core.cosyvoice_model_actor import CosyVoiceModelActor
-        self.cosyvoice_model_actor = CosyVoiceModelActor.options(
-            num_gpus=0.9,
-            name="cosyvoice_model"
-        ).remote("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
+        # 使用工厂函数
+        self.audio_separator_actor = create_audio_separator(num_gpus=0.1)
+        self.sense_model_actor = create_asr_model(num_gpus=0.1)
+        self.cosyvoice_model_actor = create_cosyvoice_model(num_gpus=0.8)
         
         # 获取采样率
         self.target_sr = ray.get(self.cosyvoice_model_actor.get_sample_rate.remote())
 
-        # 其他核心工具
-        self.media_utils = MediaUtils(config=self.config, audio_separator=self.audio_separator, target_sr=self.target_sr)
+        # 其他核心工具 - 传递actor引用而非实例
+        self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
         self.model_in = ModelIn(self.cosyvoice_model_actor)
         self.tts_generator = TTSTokenGenerator(self.cosyvoice_model_actor, Hz=25)
         self.audio_generator = AudioGenerator(self.cosyvoice_model_actor, sample_rate=self.target_sr)
@@ -101,7 +88,6 @@ class ViTranslator:
         task_paths: TaskPaths,
         hls_manager=None,
         target_language="zh",
-        # =========== (新增) ===========
         generate_subtitle: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -119,7 +105,6 @@ class ViTranslator:
             task_paths=task_paths,
             hls_manager=hls_manager,
             target_language=target_language,
-            # =========== (新增) ===========
             generate_subtitle=generate_subtitle
         )
 
@@ -136,11 +121,9 @@ class ViTranslator:
         await pipeline.start_workers(task_state)
 
         try:
-            # 1. 获取视频总时长
-            duration = await self.media_utils.get_video_duration(video_path)
-            # 2. 划分分段
-            segments = await self.media_utils.get_audio_segments(duration)
-            self.logger.info(f"总长度={duration:.2f}s, 分段数={len(segments)}, 任务ID={task_id}")
+            # 1. 获取视频分段信息 (合并了原来的两个步骤)
+            segments = await self.media_utils.get_video_segments(video_path)
+            self.logger.info(f"总分段数={len(segments)}, 任务ID={task_id}")
 
             if not segments:
                 self.logger.warning(f"没有可用分段 -> 任务ID={task_id}")
