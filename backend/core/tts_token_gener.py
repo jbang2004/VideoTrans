@@ -36,10 +36,8 @@ class TTSTokenGenerator:
                     s.model_input.get('uuid') if reuse_uuid and s.model_input.get('uuid')
                     else str(uuid.uuid1())
                 )
-                # 创建异步任务
-                tasks.append(asyncio.create_task(
-                    self._generate_tts_single_async(s, current_uuid)
-                ))
+                # 直接将协程函数添加到任务列表
+                tasks.append(self._generate_tts_single_async(s, current_uuid))
 
             processed = await asyncio.gather(*tasks)
 
@@ -60,10 +58,12 @@ class TTSTokenGenerator:
             self.logger.warning(f"在_generate_tts_single_async中接收到协程，等待...")
             sentence = await sentence
         
-        # 使用直接方式而非run_sync
+        # 使用concurrency.run_sync而非直接调用
         try:
-            # 使用内部同步实现直接生成
-            return self._generate_tts_single(sentence, main_uuid)
+            # 使用concurrency.run_sync实现异步生成
+            return await concurrency.run_sync(
+                self._generate_tts_single, sentence, main_uuid
+            )
         except Exception as e:
             self.logger.error(f"处理失败 (UUID={main_uuid}): {e}")
             raise
