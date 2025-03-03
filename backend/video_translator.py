@@ -27,7 +27,6 @@ from config import Config
 from utils.task_state import TaskState
 
 from utils.ffmpeg_utils import FFmpegTool
-from utils.gpu_manager import GPUResourceManager
 
 logger = logging.getLogger(__name__)
 
@@ -42,12 +41,6 @@ class ViTranslator:
         # 初始化Ray（如果尚未初始化）
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
-        
-        # 初始化GPU资源管理器
-        self.gpu_manager = GPUResourceManager(
-            total_gpus=1.0,  # 总GPU资源
-            min_gpu=0.1      # 最小分配单位
-        )
             
         self._init_global_models()
 
@@ -57,25 +50,17 @@ class ViTranslator:
         # 音频分离器
         self.audio_separator = ClearVoiceSeparator(model_name='MossFormer2_SE_48K')
         
-        # 为ASR模型动态分配GPU资源
-        asr_gpu = self.gpu_manager.get_allocation("sense_asr")
-        self.logger.info(f"ASR模型分配GPU: {asr_gpu}")
-        
         # 创建ASR模型Actor
         from core.asr_model_actor import SenseAutoModelActor
         self.sense_model_actor = SenseAutoModelActor.options(
-            num_gpus=asr_gpu,
+            num_gpus=0.1,
             name="sense_asr_model"
         ).remote()
-        
-        # 为TTS模型动态分配GPU资源
-        tts_gpu = self.gpu_manager.get_allocation("cosyvoice")
-        self.logger.info(f"TTS模型分配GPU: {tts_gpu}")
         
         # 创建CosyVoice模型Actor
         from core.cosyvoice_model_actor import CosyVoiceModelActor
         self.cosyvoice_model_actor = CosyVoiceModelActor.options(
-            num_gpus=tts_gpu,
+            num_gpus=0.9,
             name="cosyvoice_model"
         ).remote("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
         
@@ -292,26 +277,3 @@ class ViTranslator:
         finally:
             if list_txt.exists():
                 list_txt.unlink()
-
-    async def adjust_gpu_allocation(self):
-        """根据当前负载重新调整GPU资源分配"""
-        try:
-            # 重新获取每个模型的适当分配
-            asr_gpu = self.gpu_manager.get_allocation("sense_asr")
-            tts_gpu = self.gpu_manager.get_allocation("cosyvoice")
-            
-            # 向Ray报告新的资源需求
-            # 注意：这需要模型支持在运行时调整资源，可能需要重新创建Actor
-            self.logger.info(f"动态调整GPU分配 - ASR: {asr_gpu}, TTS: {tts_gpu}")
-            
-            # Ray目前不直接支持在运行时调整Actor资源，
-            # 这里只是概念演示，实际使用时可能需要终止并重新创建Actor
-            
-            return {
-                "asr_gpu": asr_gpu,
-                "tts_gpu": tts_gpu,
-                "total": asr_gpu + tts_gpu
-            }
-        except Exception as e:
-            self.logger.error(f"调整GPU分配失败: {e}")
-            return None
