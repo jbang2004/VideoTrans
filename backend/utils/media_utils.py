@@ -7,6 +7,7 @@ import torchaudio
 import librosa
 import soundfile as sf
 from pathlib import Path
+import ray
 from typing import List, Tuple, Dict, Union, Optional
 from utils.decorators import handle_errors
 from utils import concurrency
@@ -17,11 +18,19 @@ from utils.ffmpeg_utils import FFmpegTool
 logger = logging.getLogger(__name__)
 
 class MediaUtils:
-    def __init__(self, config, audio_separator, target_sr: int = 24000):
+    def __init__(self, config, audio_separator_actor, target_sr: int = 24000):
+        """
+        初始化MediaUtils
+        
+        Args:
+            config: 配置对象
+            audio_separator_actor: ClearVoiceActor引用
+            target_sr: 目标采样率
+        """
         self.config = config
         self.target_sr = target_sr
         self.logger = logging.getLogger(__name__)
-        self.audio_separator = audio_separator
+        self.audio_separator_actor = audio_separator_actor
 
         # 新增 ffmpeg 工具类
         self.ffmpeg_tool = FFmpegTool()
@@ -112,7 +121,7 @@ class MediaUtils:
     ) -> Dict[str, Union[str, float]]:
         """
         1) 提取纯视频 + 音频
-        2) 调用 audio_separator 分离人声/背景
+        2) 调用 audio_separator_actor 分离人声/背景
         3) 重采样 + 写音频文件
         4) 返回分段文件信息 (video, vocals, background, duration)
         """
@@ -129,11 +138,8 @@ class MediaUtils:
                 self.ffmpeg_tool.extract_video(video_path, silent_video, start, duration)
             )
 
-            # (2) 分离人声
-            def do_separate():
-                return self.audio_separator.separate_audio(full_audio)
-
-            vocals, background, sr = await concurrency.run_sync(do_separate)
+            # (2) 分离人声 - 使用Actor
+            vocals, background, sr = await self.audio_separator_actor.separate_audio.remote(full_audio)
 
             # (3) 重采样
             def do_resample_bg():

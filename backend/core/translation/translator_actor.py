@@ -1,7 +1,8 @@
 import asyncio
 import logging
-from typing import Dict, List, AsyncGenerator, Protocol, Optional, TypeVar
+from typing import Dict, List, AsyncGenerator, Optional, TypeVar
 from dataclasses import dataclass
+import ray
 from .prompt import (
     TRANSLATION_SYSTEM_PROMPT,
     TRANSLATION_USER_PROMPT,
@@ -9,17 +10,10 @@ from .prompt import (
     SIMPLIFICATION_USER_PROMPT,
     LANGUAGE_MAP
 )
+from .deepseek_client import DeepSeekClient
+from .gemini_client import GeminiClient
 
 logger = logging.getLogger(__name__)
-
-class TranslationClient(Protocol):
-    async def translate(
-        self,
-        texts: Dict[str, str],
-        system_prompt: str,
-        user_prompt: str
-    ) -> Dict[str, str]:
-        ...
 
 @dataclass
 class BatchConfig:
@@ -31,13 +25,20 @@ class BatchConfig:
 
 T = TypeVar('T')
 
-class Translator:
-    def __init__(self, translation_client: TranslationClient):
-        self.translation_client = translation_client
+@ray.remote
+class TranslatorActor:
+    def __init__(self, api_key: str = None, model_type: str = "deepseek"):
         self.logger = logging.getLogger(__name__)
+        if model_type.lower() == "deepseek":
+            self.client = DeepSeekClient(api_key=api_key)
+        elif model_type.lower() == "gemini":
+            self.client = GeminiClient(api_key=api_key)
+        else:
+            raise ValueError(f"不支持的翻译模型：{model_type}")
+        self.logger.info(f"初始化翻译Actor，使用模型: {model_type}")
 
     async def translate(self, texts: Dict[str, str], target_language: str = "zh") -> Dict[str, str]:
-        """执行翻译并返回包含 "thinking" 与 "output" 字段的 JSON"""
+        """翻译文本"""
         try:
             system_prompt = TRANSLATION_SYSTEM_PROMPT.format(
                 target_language=LANGUAGE_MAP.get(target_language, target_language)
@@ -46,23 +47,17 @@ class Translator:
                 target_language=LANGUAGE_MAP.get(target_language, target_language),
                 json_content=texts
             )
-            return await self.translation_client.translate(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt
-            )
+            return await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
         except Exception as e:
             self.logger.error(f"翻译失败: {str(e)}")
             raise
 
     async def simplify(self, texts: Dict[str, str]) -> Dict[str, str]:
-        """执行简化并返回包含 "thinking"、"slight"、"moderate"、"extreme" 字段的 JSON"""
+        """简化文本"""
         try:
             system_prompt = SIMPLIFICATION_SYSTEM_PROMPT
             user_prompt = SIMPLIFICATION_USER_PROMPT.format(json_content=texts)
-            return await self.translation_client.translate(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt
-            )
+            return await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
         except Exception as e:
             self.logger.error(f"简化失败: {str(e)}")
             raise
@@ -75,6 +70,7 @@ class Translator:
         error_handler: Optional[callable] = None,
         reduce_batch_on_error: bool = True
     ) -> AsyncGenerator[List[T], None]:
+        """动态批处理核心逻辑"""
         if not items:
             return
 
@@ -84,7 +80,7 @@ class Translator:
 
         while i < len(items):
             try:
-                batch = items[i:i+batch_size]
+                batch = items[i:i + batch_size]
                 if not batch:
                     break
 
@@ -93,6 +89,7 @@ class Translator:
                     success_count += 1
                     yield results
                     i += len(batch)
+                    # 如果出错后批次变小，连续成功后恢复初始批次大小
                     if reduce_batch_on_error and batch_size < config.initial_size and success_count >= config.required_successes:
                         self.logger.debug(f"连续成功{success_count}次，恢复到初始批次大小: {config.initial_size}")
                         batch_size = config.initial_size
@@ -119,9 +116,7 @@ class Translator:
         batch_size: int = 100,
         target_language: str = "zh"
     ) -> AsyncGenerator[List, None]:
-        """
-        批量翻译处理，将每个句子的原始文本翻译后赋值给 sentence.trans_text。
-        """
+        """翻译句子，返回异步生成器"""
         if not sentences:
             self.logger.warning("收到空的句子列表")
             return
@@ -160,16 +155,9 @@ class Translator:
         self,
         sentences: List,
         batch_size: int = 4,
-        target_speed: float = 1.1  # 目标语速设定为 max_speed，此处默认值 1.1
+        target_speed: float = 1.1
     ) -> AsyncGenerator[List, None]:
-        """
-        批量精简处理，对于语速过快的句子（由 DurationAligner 筛选），
-        根据原文本与各精简版本的长度比较，计算理想文本长度后选择最佳候选版本。
-
-        理想文本长度计算公式：
-            ideal_length = len(old_text) * (target_speed / s.speed)
-        当 target_speed = max_speed 时，可确保精简后的文本达到预期的语速要求。
-        """
+        """简化句子，返回异步生成器"""
         if not sentences:
             self.logger.warning("收到空的句子列表")
             return
@@ -189,12 +177,10 @@ class Translator:
                 old_text = s.trans_text
                 str_i = str(i)
                 
-                # 确保每个句子的简化结果都存在
                 if not any(str_i in batch_result.get(key, {}) for key in ["slight", "moderate", "extreme"]):
                     self.logger.error(f"句子 {i} 的简化结果不完整")
                     continue
 
-                # 根据原文本长度和当前语速计算理想文本长度
                 ideal_length = len(old_text) * (target_speed / s.speed) if s.speed > 0 else len(old_text)
                 
                 acceptable_candidates = {}
@@ -211,10 +197,8 @@ class Translator:
                                 non_acceptable_candidates[key] = candidate_text
                 
                 if acceptable_candidates:
-                    # 在满足候选长度不超过理想长度的版本中，选择文本最长的版本
                     chosen_key, chosen_text = max(acceptable_candidates.items(), key=lambda item: len(item[1]))
                 elif non_acceptable_candidates:
-                    # 若所有候选均超过理想长度，则选择与理想长度差值最小的版本
                     chosen_key, chosen_text = min(non_acceptable_candidates.items(), key=lambda item: abs(len(item[1]) - ideal_length))
                 else:
                     chosen_text = old_text
@@ -226,7 +210,6 @@ class Translator:
             return batch
 
         def handle_error(batch: List) -> List:
-            # 出错时原样返回
             return batch
 
         async for batch_result in self._process_batch(

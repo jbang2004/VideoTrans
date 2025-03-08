@@ -1,8 +1,6 @@
-# -----------------------------------------
-# backend/pipeline_scheduler.py (节选完整示例)
-# -----------------------------------------
 import asyncio
 import logging
+import ray
 from typing import List
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
@@ -10,14 +8,34 @@ from core.sentence_tools import Sentence
 
 logger = logging.getLogger(__name__)
 
+# 定义模型输入任务的远程函数
+@ray.remote
+def modelin_task(model_in, translated_ref, config):
+    """
+    远程任务：处理翻译后的句子，返回模型输入处理后的 ObjectRefGenerator。
+    """
+    # 获取翻译任务的 ObjectRefGenerator
+    translated_gen = ray.get(translated_ref)  # translated_ref 是 ObjectRef
+    # 迭代处理每个翻译批次
+    for translated_batch in translated_gen:
+        # 调用 modelin_maker 处理批次
+        updated_batch = model_in.modelin_maker(
+            translated_batch,
+            reuse_speaker=False,
+            reuse_uuid=False,
+            batch_size=config.MODELIN_BATCH_SIZE
+        )
+        yield updated_batch  # 逐步 yield 处理后的批次
+
 class PipelineScheduler:
     """
     多个Worker的调度器，负责翻译->model_in->tts_token->时长对齐->音频生成->混音 ...
+    使用 Ray 的依赖传递重构翻译和模型输入部分，后续部分仍使用队列。
     """
 
     def __init__(
         self,
-        translator,
+        translator_actor,  # TranslatorActor
         model_in,
         tts_token_generator,
         duration_aligner,
@@ -27,7 +45,7 @@ class PipelineScheduler:
         config
     ):
         self.logger = logging.getLogger(__name__)
-        self.translator = translator
+        self.translator_actor = translator_actor  # TranslatorActor引用
         self.model_in = model_in
         self.tts_token_generator = tts_token_generator
         self.duration_aligner = duration_aligner
@@ -39,10 +57,11 @@ class PipelineScheduler:
         self._workers = []
 
     async def start_workers(self, task_state: TaskState):
+        """
+        启动后续的异步 worker，不包括翻译和模型输入部分（它们通过依赖传递执行）。
+        """
         self.logger.info(f"[PipelineScheduler] start_workers -> TaskID={task_state.task_id}")
         self._workers = [
-            asyncio.create_task(self._translation_worker(task_state)),
-            asyncio.create_task(self._modelin_worker(task_state)),
             asyncio.create_task(self._tts_token_worker(task_state)),
             asyncio.create_task(self._duration_align_worker(task_state)),
             asyncio.create_task(self._audio_generation_worker(task_state)),
@@ -50,56 +69,41 @@ class PipelineScheduler:
         ]
 
     async def stop_workers(self, task_state: TaskState):
+        """
+        停止所有 worker，通过向 tts_token_queue 发送 None 信号。
+        """
         self.logger.info(f"[PipelineScheduler] stop_workers -> TaskID={task_state.task_id}")
-        # 向translation_queue发送None，让整条流水线停止
-        await task_state.translation_queue.put(None)
+        await task_state.tts_token_queue.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self.logger.info(f"[PipelineScheduler] 所有Worker已结束 -> TaskID={task_state.task_id}")
 
     async def push_sentences_to_pipeline(self, task_state: TaskState, sentences: List[Sentence]):
-        self.logger.debug(f"[push_sentences_to_pipeline] 放入 {len(sentences)} 个句子到 translation_queue, TaskID={task_state.task_id}")
-        await task_state.translation_queue.put(sentences)
+        """
+        将句子推送到流水线，使用 Ray 的依赖传递执行翻译和模型输入，最后放入 tts_token_queue。
+        """
+        self.logger.debug(f"[push_sentences_to_pipeline] 处理 {len(sentences)} 个句子, TaskID={task_state.task_id}")
+        
+        # 迭代获取翻译的 ObjectRef
+        for translated_ref in self.translator_actor.translate_sentences.remote(
+            sentences,
+            target_language=task_state.target_language,
+            batch_size=self.config.TRANSLATION_BATCH_SIZE
+        ):
+        
+            modelin_ref = modelin_task.remote(
+                self.model_in,
+                translated_ref,
+                self.config
+            )
+        
+            modelin_gen = ray.get(modelin_ref)  
+
+            for batch in modelin_gen:
+                await task_state.tts_token_queue.put(ray.get(batch))
 
     # ------------------------------
-    # 各 Worker 的实现
+    # 后续 Worker 保持不变
     # ------------------------------
-
-    @worker_decorator(
-        input_queue_attr='translation_queue',
-        next_queue_attr='modelin_queue',
-        worker_name='翻译Worker',
-        mode='stream'
-    )
-    async def _translation_worker(self, sentences_list: List[Sentence], task_state: TaskState):
-        if not sentences_list:
-            return
-        self.logger.debug(f"[翻译Worker] 收到 {len(sentences_list)} 句子, TaskID={task_state.task_id}")
-
-        async for translated_batch in self.translator.translate_sentences(
-            sentences_list,
-            batch_size=self.config.TRANSLATION_BATCH_SIZE,
-            target_language=task_state.target_language
-        ):
-            yield translated_batch
-
-    @worker_decorator(
-        input_queue_attr='modelin_queue',
-        next_queue_attr='tts_token_queue',
-        worker_name='模型输入Worker',
-        mode='stream'
-    )
-    async def _modelin_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
-        if not sentences_batch:
-            return
-        self.logger.debug(f"[模型输入Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
-
-        async for updated_batch in self.model_in.modelin_maker(
-            sentences_batch,
-            reuse_speaker=False,
-            reuse_uuid=False,
-            batch_size=self.config.MODELIN_BATCH_SIZE
-        ):
-            yield updated_batch
 
     @worker_decorator(
         input_queue_attr='tts_token_queue',
@@ -111,7 +115,7 @@ class PipelineScheduler:
             return
         self.logger.debug(f"[TTS Token生成Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
 
-        # 确保sentences_batch不是协程
+        # 确保 sentences_batch 不是协程
         if asyncio.iscoroutine(sentences_batch):
             sentences_batch = await sentences_batch
         
@@ -160,8 +164,6 @@ class PipelineScheduler:
 
         output_path = task_state.task_paths.segments_dir / f"segment_{task_state.batch_counter}.mp4"
 
-        # ========== (修改) ============
-        # 将task_state.generate_subtitle 传给MediaMixer
         success = await self.mixer.mixed_media_maker(
             sentences=sentences_batch,
             task_state=task_state,

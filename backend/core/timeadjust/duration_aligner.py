@@ -1,10 +1,11 @@
 import logging
+import ray
 
 class DurationAligner:
     def __init__(self, model_in=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
         """
         model_in：生成模型接口，用于更新文本特征  
-        simplifier：简化处理接口（Translator）  
+        simplifier：简化处理接口（TranslatorActor）  
         tts_token_gener：TTS token 生成接口  
         max_speed：语速阈值，超过该速率的句子需要进行简化
         """
@@ -54,6 +55,7 @@ class DurationAligner:
         for s in sentences:
             s.adjusted_start = current_time
             diff = s.diff
+            # 确保初始speed不为0
             s.speed = 1.0
             s.silence_duration = 0.0
             s.adjusted_duration = s.duration
@@ -89,20 +91,30 @@ class DurationAligner:
     async def _retry_sentences_batch(self, sentences):
         """
         对语速过快的句子执行精简 + 更新 TTS token。
+        使用TranslatorActor而不是原来的Translator
         """
         try:
-            # 1. 分批对语速过快的句子进行精简
-            async for _ in self.simplifier.simplify_sentences(sentences, target_speed=self.max_speed):
-                pass
+            # 1. 使用TranslatorActor对语速过快的句子进行精简
+            async for simplified_batch_ref in self.simplifier.simplify_sentences.remote(
+                sentences,
+                target_speed=self.max_speed
+            ):
+                simplified_batch = await simplified_batch_ref
+            
+            if not simplified_batch:
+                self.logger.warning("简化结果为空")
+                return False
+                
             # 2. 批量更新文本特征（复用 speaker 与 uuid）
             async for batch in self.model_in.modelin_maker(
-                sentences,
+                simplified_batch,
                 reuse_speaker=True,
                 reuse_uuid=True,
                 batch_size=3
             ):
                 # 3. 再生成 token（复用 uuid）
                 updated_batch = await self.tts_token_gener.tts_token_maker(batch, reuse_uuid=True)
+                
             return True
         except Exception as e:
             self.logger.error(f"_retry_sentences_batch 出错: {e}")

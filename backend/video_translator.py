@@ -1,5 +1,5 @@
 # ---------------------------------
-# backend/video_translator.py (节选完整示例)
+# backend/video_translator.py (重构后)
 # ---------------------------------
 import logging
 import os
@@ -8,11 +8,10 @@ from pathlib import Path
 import ray
 import asyncio
 
-from core.auto_sense import SenseAutoModel
-from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
-from core.translation.translator import Translator
-from core.translation.deepseek_client import DeepSeekClient
-from core.translation.gemini_client import GeminiClient
+from core.asr_model_actor import SenseAutoModelActor
+from core.cosyvoice_model_actor import CosyVoiceModelActor
+from core.clear_voice_actor import ClearVoiceActor
+from core.translation.translator_actor import TranslatorActor
 from core.tts_token_gener import TTSTokenGenerator
 from core.audio_gener import AudioGenerator
 from core.timeadjust.duration_aligner import DurationAligner
@@ -20,7 +19,6 @@ from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.media_mixer import MediaMixer
 from utils.media_utils import MediaUtils
 from pipeline_scheduler import PipelineScheduler
-from core.audio_separator import ClearVoiceSeparator
 from core.model_in import ModelIn
 from utils.task_storage import TaskPaths
 from config import Config
@@ -47,44 +45,42 @@ class ViTranslator:
     def _init_global_models(self):
         self.logger.info("[ViTranslator] 初始化模型和工具...")
         
-        # 音频分离器
-        self.audio_separator = ClearVoiceSeparator(model_name='MossFormer2_SE_48K')
+        # 创建音频分离器Actor
+        self.audio_separator_actor = ClearVoiceActor.options(
+            num_gpus=0.1,
+            name="clear_voice_separator"
+        ).remote(model_name='MossFormer2_SE_48K')
         
-        # 创建ASR模型Actor
-        from core.asr_model_actor import SenseAutoModelActor
         self.sense_model_actor = SenseAutoModelActor.options(
             num_gpus=0.1,
             name="sense_asr_model"
         ).remote()
         
-        # 创建CosyVoice模型Actor
-        from core.cosyvoice_model_actor import CosyVoiceModelActor
         self.cosyvoice_model_actor = CosyVoiceModelActor.options(
-            num_gpus=0.9,
+            num_gpus=0.7,
             name="cosyvoice_model"
         ).remote("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
         
         # 获取采样率
         self.target_sr = ray.get(self.cosyvoice_model_actor.get_sample_rate.remote())
 
+        # 创建翻译Actor
+        translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
+        api_key = self.config.DEEPSEEK_API_KEY if translation_model == "deepseek" else self.config.GEMINI_API_KEY
+        self.translator_actor = TranslatorActor.options(
+            name="translator"
+        ).remote(api_key=api_key, model_type=translation_model)
+
         # 其他核心工具
-        self.media_utils = MediaUtils(config=self.config, audio_separator=self.audio_separator, target_sr=self.target_sr)
+        self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
         self.model_in = ModelIn(self.cosyvoice_model_actor)
         self.tts_generator = TTSTokenGenerator(self.cosyvoice_model_actor, Hz=25)
         self.audio_generator = AudioGenerator(self.cosyvoice_model_actor, sample_rate=self.target_sr)
 
-        # 翻译
-        translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
-        if translation_model == "deepseek":
-            self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
-        elif translation_model == "gemini":
-            self.translator = Translator(GeminiClient(api_key=self.config.GEMINI_API_KEY))
-        else:
-            raise ValueError(f"不支持的翻译模型：{translation_model}")
-
+        # 初始化其他组件
         self.duration_aligner = DurationAligner(
             model_in=self.model_in,
-            simplifier=self.translator,
+            simplifier=self.translator_actor,  # 使用translator_actor替代原来的translator
             tts_token_gener=self.tts_generator,
             max_speed=1.2
         )
@@ -124,7 +120,7 @@ class ViTranslator:
         )
 
         pipeline = PipelineScheduler(
-            translator=self.translator,
+            translator=self.translator_actor,
             model_in=self.model_in,
             tts_token_generator=self.tts_generator,
             duration_aligner=self.duration_aligner,

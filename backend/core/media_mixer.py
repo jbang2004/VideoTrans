@@ -315,7 +315,13 @@ class MediaMixer:
                 continue
 
             # 直接使用adjusted_duration作为duration_ms
-            duration_ms = s.duration / s.speed
+            if s.speed <= 0.0001:  # 使用一个很小的阈值而不是直接判断=0
+                # 如果speed接近0，直接使用adjusted_duration
+                duration_ms = s.adjusted_duration
+                logger.warning(f"检测到speed接近0，直接使用adjusted_duration({s.adjusted_duration}ms): {s.trans_text}")
+            else:
+                # 正常情况下使用计算公式
+                duration_ms = s.duration / s.speed
             if duration_ms <= 0:
                 continue
 
