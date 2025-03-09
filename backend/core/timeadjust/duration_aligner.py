@@ -1,18 +1,19 @@
 import logging
 import ray
 import torch
+from core.tts_token_gener import generate_tts_tokens
 
 class DurationAligner:
-    def __init__(self, model_in_actor=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
+    def __init__(self, model_in_actor=None, simplifier=None, cosyvoice_actor=None, max_speed=1.1):
         """
         model_in_actor：生成模型Actor接口，用于更新文本特征  
         simplifier：简化处理接口（TranslatorActor）  
-        tts_token_gener：TTS token 生成接口  
+        cosyvoice_actor：CosyVoice模型Actor接口，用于生成TTS token
         max_speed：语速阈值，超过该速率的句子需要进行简化
         """
         self.model_in_actor = model_in_actor
         self.simplifier = simplifier
-        self.tts_token_gener = tts_token_gener
+        self.cosyvoice_actor = cosyvoice_actor  # 替代tts_token_gener
         self.max_speed = max_speed
         self.logger = logging.getLogger(__name__)
 
@@ -134,14 +135,15 @@ class DurationAligner:
                 reuse_speaker=True,
                 batch_size=3
             ):
-                # 获取处理后的句子
-                refined_batch = ray.get(batch_ref)
+                # 3. 使用Ray Task生成TTS token，传递batch_ref而不是获取结果
+                tts_token_ref = generate_tts_tokens.remote(
+                    batch_ref,  # 直接传递引用，不使用ray.get()
+                    self.cosyvoice_actor
+                )
                 
-                # 3. 生成新的TTS token
-                if refined_batch:
-                    await self.tts_token_gener.tts_token_maker(refined_batch)
-                    refined_sentences.extend(refined_batch)
-                    self.logger.info(f"精简后的句子批次: {refined_batch}")
+                # 获取处理后的句子
+                refined_batch = ray.get(tts_token_ref)
+                refined_sentences.extend(refined_batch)
             
             # 4. 直接更新原始句子列表
             if refined_sentences:

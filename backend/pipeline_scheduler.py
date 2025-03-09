@@ -5,20 +5,22 @@ from typing import List
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
 from core.sentence_tools import Sentence
+from core.tts_token_gener import generate_tts_tokens
+from utils import concurrency
 
 logger = logging.getLogger(__name__)
 
 class PipelineScheduler:
     """
-    多个Worker的调度器，负责翻译->model_in->tts_token->时长对齐->音频生成->混音 ...
-    使用 Ray 的依赖传递重构翻译和模型输入部分，后续部分仍使用队列。
+    多个Worker的调度器，负责翻译->model_in->TTS token生成->时长对齐->音频生成->混音 ...
+    使用 Ray 的依赖传递重构翻译、模型输入和TTS Token生成部分，后续部分仍使用队列。
     """
 
     def __init__(
         self,
         translator_actor,  # TranslatorActor
         model_in_actor,    # ModelInActor
-        tts_token_generator,
+        cosyvoice_actor,   # CosyVoiceModelActor (替代tts_token_generator)
         duration_aligner,
         audio_generator,
         timestamp_adjuster,
@@ -28,7 +30,7 @@ class PipelineScheduler:
         self.logger = logging.getLogger(__name__)
         self.translator_actor = translator_actor  # TranslatorActor引用
         self.model_in_actor = model_in_actor      # ModelInActor引用
-        self.tts_token_generator = tts_token_generator
+        self.cosyvoice_actor = cosyvoice_actor    # CosyVoice模型Actor
         self.duration_aligner = duration_aligner
         self.audio_generator = audio_generator
         self.timestamp_adjuster = timestamp_adjuster
@@ -39,11 +41,10 @@ class PipelineScheduler:
 
     async def start_workers(self, task_state: TaskState):
         """
-        启动后续的异步 worker，不包括翻译和模型输入部分（它们通过依赖传递执行）。
+        启动后续的异步 worker，不包括翻译、模型输入和TTS Token生成部分（它们通过依赖传递执行）。
         """
         self.logger.info(f"[PipelineScheduler] start_workers -> TaskID={task_state.task_id}")
         self._workers = [
-            asyncio.create_task(self._tts_token_worker(task_state)),
             asyncio.create_task(self._duration_align_worker(task_state)),
             asyncio.create_task(self._audio_generation_worker(task_state)),
             asyncio.create_task(self._mixing_worker(task_state))
@@ -51,10 +52,10 @@ class PipelineScheduler:
 
     async def stop_workers(self, task_state: TaskState):
         """
-        停止所有 worker，通过向 tts_token_queue 发送 None 信号。
+        停止所有 worker，通过向 duration_align_queue 发送 None 信号。
         """
         self.logger.info(f"[PipelineScheduler] stop_workers -> TaskID={task_state.task_id}")
-        await task_state.tts_token_queue.put(None)
+        await task_state.duration_align_queue.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self.logger.info(f"[PipelineScheduler] 所有Worker已结束 -> TaskID={task_state.task_id}")
         
@@ -81,7 +82,7 @@ class PipelineScheduler:
 
     async def push_sentences_to_pipeline(self, task_state: TaskState, sentences: List[Sentence]):
         """
-        将句子推送到流水线，使用 Ray 的依赖传递执行翻译和模型输入，最后放入 tts_token_queue。
+        将句子推送到流水线，使用 Ray 的依赖传递执行翻译、模型输入和TTS Token生成，最后放入 duration_align_queue。
         """
         self.logger.debug(f"[push_sentences_to_pipeline] 处理 {len(sentences)} 个句子, TaskID={task_state.task_id}")
         
@@ -91,37 +92,27 @@ class PipelineScheduler:
             target_language=task_state.target_language,
             batch_size=self.config.TRANSLATION_BATCH_SIZE
         ):
-            # 直接使用 model_in_actor 处理翻译后的句子
+            # 使用 model_in_actor 处理翻译后的句子
             for modelin_ref in self.model_in_actor.modelin_maker.remote(
                 translated_ref,
                 reuse_speaker=False,
                 batch_size=self.config.MODELIN_BATCH_SIZE
             ):
-                # 获取处理后的句子并放入队列
-                processed_batch = ray.get(modelin_ref)
-                self.logger.debug(f"model_in_actor处理完成: {len(processed_batch)}个句子")
-                await task_state.tts_token_queue.put(processed_batch)
+                # 使用 generate_tts_tokens task 处理模型输入后的句子
+                self.logger.info(f"TTS token生成开始")
+                tts_token_ref = generate_tts_tokens.remote(
+                    modelin_ref,  # 直接传递引用，不使用ray.get()
+                    self.cosyvoice_actor
+                )
+                
+                # 获取处理后的句子并放入下一阶段队列
+                tts_processed_batch = ray.get(tts_token_ref)
+                self.logger.info(f"TTS token生成完成: {len(tts_processed_batch)}个句子")
+                await task_state.duration_align_queue.put(tts_processed_batch)
 
     # ------------------------------
-    # 后续 Worker 保持不变
+    # 后续 Worker 
     # ------------------------------
-
-    @worker_decorator(
-        input_queue_attr='tts_token_queue',
-        next_queue_attr='duration_align_queue',
-        worker_name='TTS Token生成Worker'
-    )
-    async def _tts_token_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
-        if not sentences_batch:
-            return
-        self.logger.debug(f"[TTS Token生成Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
-
-        # 确保 sentences_batch 不是协程
-        if asyncio.iscoroutine(sentences_batch):
-            sentences_batch = await sentences_batch
-        
-        await self.tts_token_generator.tts_token_maker(sentences_batch)
-        return sentences_batch
 
     @worker_decorator(
         input_queue_attr='duration_align_queue',

@@ -12,7 +12,6 @@ from core.asr_model_actor import SenseAutoModelActor
 from core.cosyvoice_model_actor import CosyVoiceModelActor
 from core.clear_voice_actor import ClearVoiceActor
 from core.translation.translator_actor import TranslatorActor
-from core.tts_token_gener import TTSTokenGenerator
 from core.audio_gener import AudioGenerator
 from core.timeadjust.duration_aligner import DurationAligner
 from core.timeadjust.timestamp_adjuster import TimestampAdjuster
@@ -78,14 +77,13 @@ class ViTranslator:
 
         # 其他核心工具
         self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
-        self.tts_generator = TTSTokenGenerator(self.cosyvoice_model_actor, Hz=25)
         self.audio_generator = AudioGenerator(self.cosyvoice_model_actor, sample_rate=self.target_sr)
 
         # 初始化其他组件
         self.duration_aligner = DurationAligner(
             model_in_actor=self.model_in_actor,
             simplifier=self.translator_actor,
-            tts_token_gener=self.tts_generator,
+            cosyvoice_actor=self.cosyvoice_model_actor,
             max_speed=1.2
         )
         self.timestamp_adjuster = TimestampAdjuster(sample_rate=self.target_sr)
@@ -126,7 +124,7 @@ class ViTranslator:
         pipeline = PipelineScheduler(
             translator_actor=self.translator_actor,
             model_in_actor=self.model_in_actor,
-            tts_token_generator=self.tts_generator,
+            cosyvoice_actor=self.cosyvoice_model_actor,
             duration_aligner=self.duration_aligner,
             audio_generator=self.audio_generator,
             timestamp_adjuster=self.timestamp_adjuster,
