@@ -32,7 +32,6 @@ class TaskState:
     # 各个异步队列
     translation_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     modelin_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    duration_align_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     audio_gen_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     mixing_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
 

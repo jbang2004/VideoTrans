@@ -7,6 +7,7 @@ from utils.task_state import TaskState
 from core.sentence_tools import Sentence
 from core.tts_token_gener import generate_tts_tokens
 from utils import concurrency
+from core.timeadjust.duration_aligner import align_durations
 
 logger = logging.getLogger(__name__)
 
@@ -21,41 +22,44 @@ class PipelineScheduler:
         translator_actor,  # TranslatorActor
         model_in_actor,    # ModelInActor
         cosyvoice_actor,   # CosyVoiceModelActor (替代tts_token_generator)
-        duration_aligner,
+        simplifier,        # 简化器（通常是TranslatorActor）
         audio_generator,
         timestamp_adjuster,
         mixer,
-        config
+        config,
+        max_speed=1.1      # 最大语速阈值
     ):
         self.logger = logging.getLogger(__name__)
         self.translator_actor = translator_actor  # TranslatorActor引用
         self.model_in_actor = model_in_actor      # ModelInActor引用
         self.cosyvoice_actor = cosyvoice_actor    # CosyVoice模型Actor
-        self.duration_aligner = duration_aligner
+        self.simplifier = simplifier
         self.audio_generator = audio_generator
         self.timestamp_adjuster = timestamp_adjuster
         self.mixer = mixer
         self.config = config
+        self.max_speed = max_speed
 
         self._workers = []
 
     async def start_workers(self, task_state: TaskState):
         """
-        启动后续的异步 worker，不包括翻译、模型输入和TTS Token生成部分（它们通过依赖传递执行）。
+        启动后续的异步 worker，只包含音频生成和混音部分。
+        时长对齐现在直接在push_sentences_to_pipeline中处理。
         """
         self.logger.info(f"[PipelineScheduler] start_workers -> TaskID={task_state.task_id}")
         self._workers = [
-            asyncio.create_task(self._duration_align_worker(task_state)),
+            # 移除了_duration_align_worker
             asyncio.create_task(self._audio_generation_worker(task_state)),
             asyncio.create_task(self._mixing_worker(task_state))
         ]
 
     async def stop_workers(self, task_state: TaskState):
         """
-        停止所有 worker，通过向 duration_align_queue 发送 None 信号。
+        停止所有 worker，通过向 audio_gen_queue 发送 None 信号。
         """
         self.logger.info(f"[PipelineScheduler] stop_workers -> TaskID={task_state.task_id}")
-        await task_state.duration_align_queue.put(None)
+        await task_state.audio_gen_queue.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self.logger.info(f"[PipelineScheduler] 所有Worker已结束 -> TaskID={task_state.task_id}")
         
@@ -82,7 +86,7 @@ class PipelineScheduler:
 
     async def push_sentences_to_pipeline(self, task_state: TaskState, sentences: List[Sentence]):
         """
-        将句子推送到流水线，使用 Ray 的依赖传递执行翻译、模型输入和TTS Token生成，最后放入 duration_align_queue。
+        将句子推送到流水线，使用 Ray 的依赖传递执行翻译、模型输入、TTS Token生成和时长对齐，最后放入 audio_gen_queue。
         """
         self.logger.debug(f"[push_sentences_to_pipeline] 处理 {len(sentences)} 个句子, TaskID={task_state.task_id}")
         
@@ -105,27 +109,26 @@ class PipelineScheduler:
                     self.cosyvoice_actor
                 )
                 
-                # 获取处理后的句子并放入下一阶段队列
-                tts_processed_batch = ray.get(tts_token_ref)
-                self.logger.info(f"TTS token生成完成: {len(tts_processed_batch)}个句子")
-                await task_state.duration_align_queue.put(tts_processed_batch)
+                # 直接创建时长对齐任务，传递TTS token生成任务的引用
+                self.logger.info(f"创建时长对齐任务")
+                aligned_ref = align_durations.remote(
+                    tts_token_ref,
+                    self.simplifier,
+                    self.model_in_actor,
+                    self.cosyvoice_actor,
+                    self.max_speed
+                )
+                
+                # 获取时长对齐任务结果
+                aligned_batch = ray.get(aligned_ref)
+                self.logger.info(f"时长对齐任务完成: {len(aligned_batch) if aligned_batch else 0}个句子")
+                
+                # 放入音频生成队列
+                await task_state.audio_gen_queue.put(aligned_batch)
 
     # ------------------------------
     # 后续 Worker 
     # ------------------------------
-
-    @worker_decorator(
-        input_queue_attr='duration_align_queue',
-        next_queue_attr='audio_gen_queue',
-        worker_name='时长对齐Worker'
-    )
-    async def _duration_align_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
-        if not sentences_batch:
-            return
-        self.logger.debug(f"[时长对齐Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
-
-        await self.duration_aligner.align_durations(sentences_batch)
-        return sentences_batch
 
     @worker_decorator(
         input_queue_attr='audio_gen_queue',

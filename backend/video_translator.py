@@ -13,7 +13,6 @@ from core.cosyvoice_model_actor import CosyVoiceModelActor
 from core.clear_voice_actor import ClearVoiceActor
 from core.translation.translator_actor import TranslatorActor
 from core.audio_gener import AudioGenerator
-from core.timeadjust.duration_aligner import DurationAligner
 from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.media_mixer import MediaMixer
 from utils.media_utils import MediaUtils
@@ -79,13 +78,7 @@ class ViTranslator:
         self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
         self.audio_generator = AudioGenerator(self.cosyvoice_model_actor, sample_rate=self.target_sr)
 
-        # 初始化其他组件
-        self.duration_aligner = DurationAligner(
-            model_in_actor=self.model_in_actor,
-            simplifier=self.translator_actor,
-            cosyvoice_actor=self.cosyvoice_model_actor,
-            max_speed=1.2
-        )
+        # 初始化其他组件（移除了DurationAligner）
         self.timestamp_adjuster = TimestampAdjuster(sample_rate=self.target_sr)
         self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr)
 
@@ -125,11 +118,12 @@ class ViTranslator:
             translator_actor=self.translator_actor,
             model_in_actor=self.model_in_actor,
             cosyvoice_actor=self.cosyvoice_model_actor,
-            duration_aligner=self.duration_aligner,
+            simplifier=self.translator_actor,  # 使用translator_actor作为simplifier
             audio_generator=self.audio_generator,
             timestamp_adjuster=self.timestamp_adjuster,
             mixer=self.mixer,
-            config=self.config
+            config=self.config,
+            max_speed=1.2  # 设置最大语速阈值
         )
         await pipeline.start_workers(task_state)
 
