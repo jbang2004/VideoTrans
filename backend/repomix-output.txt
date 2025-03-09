@@ -56,28 +56,29 @@ core/
     gemini_client.py
     glm4_client.py
     prompt.py
-    translator.py
+    translator_actor.py
   __init__.py
   asr_model_actor.py
   audio_gener.py
   audio_separator.py
   auto_sense.py
+  clear_voice_actor.py
   cosyvoice_model_actor.py
   hls_manager.py
   media_mixer.py
-  model_in.py
+  model_in_actor.py
   sentence_tools.py
   tts_token_gener.py
 utils/
   concurrency.py
   decorators.py
   ffmpeg_utils.py
-  gpu_manager.py
   media_utils.py
   sentence_logger.py
   task_state.py
   task_storage.py
   temp_file_manager.py
+  tensor_utils.py
 __init__.py
 .cursorignore
 .env.example
@@ -95,16 +96,19 @@ Files
 File: core/timeadjust/duration_aligner.py
 ================
 import logging
+import ray
+import torch
+from utils.tensor_utils import ensure_cpu_tensors
 
 class DurationAligner:
-    def __init__(self, model_in=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
+    def __init__(self, model_in_actor=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
         """
-        model_in：生成模型接口，用于更新文本特征  
-        simplifier：简化处理接口（Translator）  
+        model_in_actor：生成模型Actor接口，用于更新文本特征  
+        simplifier：简化处理接口（TranslatorActor）  
         tts_token_gener：TTS token 生成接口  
         max_speed：语速阈值，超过该速率的句子需要进行简化
         """
-        self.model_in = model_in
+        self.model_in_actor = model_in_actor
         self.simplifier = simplifier
         self.tts_token_gener = tts_token_gener
         self.max_speed = max_speed
@@ -150,6 +154,7 @@ class DurationAligner:
         for s in sentences:
             s.adjusted_start = current_time
             diff = s.diff
+            # 确保初始speed不为0
             s.speed = 1.0
             s.silence_duration = 0.0
             s.adjusted_duration = s.duration
@@ -185,20 +190,39 @@ class DurationAligner:
     async def _retry_sentences_batch(self, sentences):
         """
         对语速过快的句子执行精简 + 更新 TTS token。
+        使用TranslatorActor和ModelInActor
         """
         try:
-            # 1. 分批对语速过快的句子进行精简
-            async for _ in self.simplifier.simplify_sentences(sentences, target_speed=self.max_speed):
-                pass
-            # 2. 批量更新文本特征（复用 speaker 与 uuid）
-            async for batch in self.model_in.modelin_maker(
+            # 使用通用工具函数确保所有张量都在CPU上
+            sentences = ensure_cpu_tensors(sentences, path="sentences")
+            self.logger.debug("已将所有张量移动到CPU")
+            
+            # 1. 使用TranslatorActor对语速过快的句子进行精简
+            simplified_batch = None
+            async for simplified_batch_ref in self.simplifier.simplify_sentences.remote(
                 sentences,
+                target_speed=self.max_speed
+            ):
+                simplified_batch = ray.get(simplified_batch_ref)
+            
+            if not simplified_batch:
+                self.logger.warning("简化结果为空")
+                return False
+                
+            # 2. 批量更新文本特征（复用 speaker 与 uuid）
+            updated_batch = None
+            for batch_ref in self.model_in_actor.modelin_maker.remote(
+                simplified_batch,
                 reuse_speaker=True,
                 reuse_uuid=True,
                 batch_size=3
             ):
+                updated_batch = ray.get(batch_ref)
+                
                 # 3. 再生成 token（复用 uuid）
-                updated_batch = await self.tts_token_gener.tts_token_maker(batch, reuse_uuid=True)
+                if updated_batch:
+                    await self.tts_token_gener.tts_token_maker(updated_batch, reuse_uuid=True)
+                
             return True
         except Exception as e:
             self.logger.error(f"_retry_sentences_batch 出错: {e}")
@@ -527,12 +551,13 @@ SIMPLIFICATION_USER_PROMPT = """
 SIMPLIFICATION_SYSTEM_PROMPT = """你将扮演克制严谨的语言专家，致力于将提供的JSON格式文本进行精简，不要对文本进行翻译。"""
 
 ================
-File: core/translation/translator.py
+File: core/translation/translator_actor.py
 ================
 import asyncio
 import logging
-from typing import Dict, List, AsyncGenerator, Protocol, Optional, TypeVar
+from typing import Dict, List, AsyncGenerator, Optional, TypeVar, Generic
 from dataclasses import dataclass
+import ray
 from .prompt import (
     TRANSLATION_SYSTEM_PROMPT,
     TRANSLATION_USER_PROMPT,
@@ -540,17 +565,11 @@ from .prompt import (
     SIMPLIFICATION_USER_PROMPT,
     LANGUAGE_MAP
 )
+from .deepseek_client import DeepSeekClient
+from .gemini_client import GeminiClient
+from utils.tensor_utils import ensure_cpu_tensors
 
 logger = logging.getLogger(__name__)
-
-class TranslationClient(Protocol):
-    async def translate(
-        self,
-        texts: Dict[str, str],
-        system_prompt: str,
-        user_prompt: str
-    ) -> Dict[str, str]:
-        ...
 
 @dataclass
 class BatchConfig:
@@ -562,13 +581,20 @@ class BatchConfig:
 
 T = TypeVar('T')
 
-class Translator:
-    def __init__(self, translation_client: TranslationClient):
-        self.translation_client = translation_client
+@ray.remote
+class TranslatorActor:
+    def __init__(self, api_key: str = None, model_type: str = "deepseek"):
         self.logger = logging.getLogger(__name__)
+        if model_type.lower() == "deepseek":
+            self.client = DeepSeekClient(api_key=api_key)
+        elif model_type.lower() == "gemini":
+            self.client = GeminiClient(api_key=api_key)
+        else:
+            raise ValueError(f"不支持的翻译模型：{model_type}")
+        self.logger.info(f"初始化翻译Actor，使用模型: {model_type}")
 
     async def translate(self, texts: Dict[str, str], target_language: str = "zh") -> Dict[str, str]:
-        """执行翻译并返回包含 "thinking" 与 "output" 字段的 JSON"""
+        """翻译文本"""
         try:
             system_prompt = TRANSLATION_SYSTEM_PROMPT.format(
                 target_language=LANGUAGE_MAP.get(target_language, target_language)
@@ -577,23 +603,17 @@ class Translator:
                 target_language=LANGUAGE_MAP.get(target_language, target_language),
                 json_content=texts
             )
-            return await self.translation_client.translate(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt
-            )
+            return await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
         except Exception as e:
             self.logger.error(f"翻译失败: {str(e)}")
             raise
 
     async def simplify(self, texts: Dict[str, str]) -> Dict[str, str]:
-        """执行简化并返回包含 "thinking"、"slight"、"moderate"、"extreme" 字段的 JSON"""
+        """简化文本"""
         try:
             system_prompt = SIMPLIFICATION_SYSTEM_PROMPT
             user_prompt = SIMPLIFICATION_USER_PROMPT.format(json_content=texts)
-            return await self.translation_client.translate(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt
-            )
+            return await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
         except Exception as e:
             self.logger.error(f"简化失败: {str(e)}")
             raise
@@ -606,6 +626,7 @@ class Translator:
         error_handler: Optional[callable] = None,
         reduce_batch_on_error: bool = True
     ) -> AsyncGenerator[List[T], None]:
+        """动态批处理核心逻辑"""
         if not items:
             return
 
@@ -615,7 +636,7 @@ class Translator:
 
         while i < len(items):
             try:
-                batch = items[i:i+batch_size]
+                batch = items[i:i + batch_size]
                 if not batch:
                     break
 
@@ -624,6 +645,7 @@ class Translator:
                     success_count += 1
                     yield results
                     i += len(batch)
+                    # 如果出错后批次变小，连续成功后恢复初始批次大小
                     if reduce_batch_on_error and batch_size < config.initial_size and success_count >= config.required_successes:
                         self.logger.debug(f"连续成功{success_count}次，恢复到初始批次大小: {config.initial_size}")
                         batch_size = config.initial_size
@@ -650,9 +672,7 @@ class Translator:
         batch_size: int = 100,
         target_language: str = "zh"
     ) -> AsyncGenerator[List, None]:
-        """
-        批量翻译处理，将每个句子的原始文本翻译后赋值给 sentence.trans_text。
-        """
+        """翻译句子，返回异步生成器"""
         if not sentences:
             self.logger.warning("收到空的句子列表")
             return
@@ -687,23 +707,24 @@ class Translator:
         ):
             yield batch_result
 
+    def _ensure_cpu_tensors(self, obj):
+        """递归地确保所有张量都在CPU上"""
+        return ensure_cpu_tensors(obj, path="translator_input")
+
     async def simplify_sentences(
         self,
         sentences: List,
         batch_size: int = 4,
-        target_speed: float = 1.1  # 目标语速设定为 max_speed，此处默认值 1.1
+        target_speed: float = 1.1
     ) -> AsyncGenerator[List, None]:
-        """
-        批量精简处理，对于语速过快的句子（由 DurationAligner 筛选），
-        根据原文本与各精简版本的长度比较，计算理想文本长度后选择最佳候选版本。
-
-        理想文本长度计算公式：
-            ideal_length = len(old_text) * (target_speed / s.speed)
-        当 target_speed = max_speed 时，可确保精简后的文本达到预期的语速要求。
-        """
+        """简化句子，返回异步生成器"""
         if not sentences:
             self.logger.warning("收到空的句子列表")
             return
+
+        # 确保所有句子的张量都在CPU上
+        sentences = self._ensure_cpu_tensors(sentences)
+        self.logger.debug("已将所有张量移动到CPU")
 
         config = BatchConfig(initial_size=batch_size, min_size=1, required_successes=2)
 
@@ -720,12 +741,10 @@ class Translator:
                 old_text = s.trans_text
                 str_i = str(i)
                 
-                # 确保每个句子的简化结果都存在
                 if not any(str_i in batch_result.get(key, {}) for key in ["slight", "moderate", "extreme"]):
                     self.logger.error(f"句子 {i} 的简化结果不完整")
                     continue
 
-                # 根据原文本长度和当前语速计算理想文本长度
                 ideal_length = len(old_text) * (target_speed / s.speed) if s.speed > 0 else len(old_text)
                 
                 acceptable_candidates = {}
@@ -742,10 +761,8 @@ class Translator:
                                 non_acceptable_candidates[key] = candidate_text
                 
                 if acceptable_candidates:
-                    # 在满足候选长度不超过理想长度的版本中，选择文本最长的版本
                     chosen_key, chosen_text = max(acceptable_candidates.items(), key=lambda item: len(item[1]))
                 elif non_acceptable_candidates:
-                    # 若所有候选均超过理想长度，则选择与理想长度差值最小的版本
                     chosen_key, chosen_text = min(non_acceptable_candidates.items(), key=lambda item: abs(len(item[1]) - ideal_length))
                 else:
                     chosen_text = old_text
@@ -757,7 +774,6 @@ class Translator:
             return batch
 
         def handle_error(batch: List) -> List:
-            # 出错时原样返回
             return batch
 
         async for batch_result in self._process_batch(
@@ -1158,6 +1174,66 @@ class SenseAutoModel(BaseAutoModel):
     async def generate_async(self, input, input_len=None, **cfg):
         func = partial(self.generate, input, input_len, **cfg)
         return await concurrency.run_sync(func)
+
+================
+File: core/clear_voice_actor.py
+================
+import ray
+import numpy as np
+from typing import Tuple
+from abc import ABC, abstractmethod
+
+from models.ClearerVoice.clearvoice import ClearVoice
+
+class AudioSeparator(ABC):
+    """音频分离器接口"""
+    @abstractmethod
+    def separate_audio(self, input_path: str, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
+        pass
+
+@ray.remote
+class ClearVoiceActor:
+    """
+    ClearVoice音频分离器的Ray Actor实现
+    使用Ray Actor封装ClearVoice模型，避免重复加载模型
+    """
+    def __init__(self, model_name: str = 'MossFormer2_SE_48K'):
+        """
+        初始化ClearVoice Actor
+        
+        Args:
+            model_name: 使用的ClearVoice模型名称
+        """
+        self.model_name = model_name
+        self.clearvoice = ClearVoice(
+            task='speech_enhancement',
+            model_names=[model_name]
+        )
+    
+    def separate_audio(self, input_path: str) -> Tuple[np.ndarray, np.ndarray, int]:
+        """
+        分离音频中的人声和背景音
+        
+        Args:
+            input_path: 输入音频文件路径
+            
+        Returns:
+            Tuple[np.ndarray, np.ndarray, int]: (人声音频, 背景音频, 采样率)
+        """
+        enhanced_audio, background_audio = self.clearvoice(
+            input_path=input_path,
+            online_write=False,
+            extract_noise=True
+        )
+        
+        if self.model_name.endswith('16K'):
+            sr = 16000
+        elif self.model_name.endswith('48K'):
+            sr = 48000
+        else:
+            sr = 48000
+        
+        return enhanced_audio, background_audio, sr
 
 ================
 File: core/cosyvoice_model_actor.py
@@ -1724,7 +1800,13 @@ class MediaMixer:
                 continue
 
             # 直接使用adjusted_duration作为duration_ms
-            duration_ms = s.duration / s.speed
+            if s.speed <= 0.0001:  # 使用一个很小的阈值而不是直接判断=0
+                # 如果speed接近0，直接使用adjusted_duration
+                duration_ms = s.adjusted_duration
+                logger.warning(f"检测到speed接近0，直接使用adjusted_duration({s.adjusted_duration}ms): {s.trans_text}")
+            else:
+                # 正常情况下使用计算公式
+                duration_ms = s.duration / s.speed
             if duration_ms <= 0:
                 continue
 
@@ -1915,21 +1997,23 @@ class MediaMixer:
         logger.debug("MediaMixer 已重置 full_audio_buffer")
 
 ================
-File: core/model_in.py
+File: core/model_in_actor.py
 ================
 import os
 import logging
 import torch
 import numpy as np
 import librosa
-from typing import List, Optional
+from typing import List, Optional, AsyncGenerator
 import asyncio
 import ray
 
 # [NEW] 统一使用 concurrency.run_sync
 from utils import concurrency
+from utils.tensor_utils import ensure_cpu_tensors
 
-class ModelIn:
+@ray.remote(num_gpus=0.1)  # 分配0.1个GPU资源
+class ModelInActor:
     def __init__(self, cosyvoice_model_actor):
         """
         Args:
@@ -1945,7 +2029,7 @@ class ModelIn:
 
         self.semaphore = asyncio.Semaphore(4)  # max_concurrent_tasks=4
         
-        self.logger.info(f"ModelIn initialized with CosyVoice Actor")
+        self.logger.info(f"ModelInActor initialized with CosyVoice Actor")
 
     def postprocess(self, speech, top_db=60, hop_length=220, win_length=440):
         speech, _ = librosa.effects.trim(
@@ -1996,22 +2080,92 @@ class ModelIn:
         """
         处理单个句子（现在调用Actor）
         """
+        import torch
+        
         speaker_id = sentence.speaker_id
 
         # 1) Speaker处理
         if not reuse_speaker:
             if speaker_id not in self.speaker_cache:
-                # 调用Actor处理音频
-                processed_audio = await concurrency.run_sync(
-                    lambda: ray.get(self.cosyvoice_actor.postprocess_audio.remote(
-                        sentence.audio, max_val=self.max_val
-                    ))
-                )
-                
-                # 调用Actor提取说话人特征
-                self.speaker_cache[speaker_id] = await concurrency.run_sync(
-                    lambda: ray.get(self.cosyvoice_actor.extract_speaker_features.remote(processed_audio))
-                )
+                try:
+                    # 确保音频在CPU上
+                    sentence = ensure_cpu_tensors(sentence, path="sentence")
+                    audio = sentence.audio
+                    
+                    # 调用Actor处理音频
+                    processed_audio = await concurrency.run_sync(
+                        lambda: ray.get(self.cosyvoice_actor.postprocess_audio.remote(
+                            audio, max_val=self.max_val
+                        ))
+                    )
+                    
+                    # 调用Actor提取说话人特征
+                    self.speaker_cache[speaker_id] = await concurrency.run_sync(
+                        lambda: ray.get(self.cosyvoice_actor.extract_speaker_features.remote(processed_audio))
+                    )
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    if "torch.cuda.is_available() is False" in error_msg:
+                        self.logger.error(f"CUDA设备不可用错误: {error_msg}")
+                        # 尝试重新初始化cosyvoice_actor
+                        self.logger.info("尝试重新获取采样率...")
+                        self.cosy_sample_rate = ray.get(self.cosyvoice_actor.get_sample_rate.remote())
+                        # 重试处理音频，确保使用CPU
+                        sentence = ensure_cpu_tensors(sentence, path="sentence_retry")
+                        audio = sentence.audio
+                        
+                        processed_audio = await concurrency.run_sync(
+                            lambda: ray.get(self.cosyvoice_actor.postprocess_audio.remote(
+                                audio, max_val=self.max_val
+                            ))
+                        )
+                        
+                        # 重试提取特征
+                        self.speaker_cache[speaker_id] = await concurrency.run_sync(
+                            lambda: ray.get(self.cosyvoice_actor.extract_speaker_features.remote(processed_audio))
+                        )
+                    elif "Input type" in error_msg and "weight type" in error_msg and "should be the same" in error_msg:
+                        self.logger.error(f"设备不匹配错误: {error_msg}")
+                        # 确保音频在CPU上
+                        sentence = ensure_cpu_tensors(sentence, path="sentence_device_mismatch")
+                        audio = sentence.audio
+                        
+                        # 重新处理音频
+                        processed_audio = await concurrency.run_sync(
+                            lambda: ray.get(self.cosyvoice_actor.postprocess_audio.remote(
+                                audio, max_val=self.max_val
+                            ))
+                        )
+                        
+                        # 确保处理后的音频在CPU上
+                        if isinstance(processed_audio, torch.Tensor) and processed_audio.is_cuda:
+                            processed_audio = processed_audio.cpu()
+                        
+                        # 重试提取特征
+                        self.speaker_cache[speaker_id] = await concurrency.run_sync(
+                            lambda: ray.get(self.cosyvoice_actor.extract_speaker_features.remote(processed_audio))
+                        )
+                    else:
+                        raise
+                except TypeError as e:
+                    if "can't convert cuda:0 device type tensor to numpy" in str(e):
+                        self.logger.error(f"CUDA张量转换错误: {str(e)}")
+                        # 确保音频在CPU上
+                        sentence = ensure_cpu_tensors(sentence, path="sentence_type_error")
+                        audio = sentence.audio
+                        
+                        processed_audio = await concurrency.run_sync(
+                            lambda: ray.get(self.cosyvoice_actor.postprocess_audio.remote(
+                                audio, max_val=self.max_val
+                            ))
+                        )
+                        
+                        # 重试提取特征
+                        self.speaker_cache[speaker_id] = await concurrency.run_sync(
+                            lambda: ray.get(self.cosyvoice_actor.extract_speaker_features.remote(processed_audio))
+                        )
+                    else:
+                        raise
                 
             speaker_features = self.speaker_cache[speaker_id].copy()
             sentence.model_input = speaker_features
@@ -2041,10 +2195,15 @@ class ModelIn:
                             batch_size=3):
         """
         对一批 sentences 做 model_in 处理，分批 yield
+        类似于 translator_actor.translate_sentences，返回 ObjectRef
         """
         if not sentences:
             self.logger.warning("modelin_maker: 收到空的句子列表")
             return
+
+        # 确保所有句子的张量都在CPU上
+        sentences = ensure_cpu_tensors(sentences, path="modelin_sentences")
+        self.logger.debug(f"已将所有张量移动到CPU，处理 {len(sentences)} 个句子")
 
         tasks = []
         for s in sentences:
@@ -2333,10 +2492,8 @@ class TTSTokenGenerator:
                     s.model_input.get('uuid') if reuse_uuid and s.model_input.get('uuid')
                     else str(uuid.uuid1())
                 )
-                # 创建异步任务
-                tasks.append(asyncio.create_task(
-                    self._generate_tts_single_async(s, current_uuid)
-                ))
+                # 直接将协程函数添加到任务列表
+                tasks.append(self._generate_tts_single_async(s, current_uuid))
 
             processed = await asyncio.gather(*tasks)
 
@@ -2357,10 +2514,12 @@ class TTSTokenGenerator:
             self.logger.warning(f"在_generate_tts_single_async中接收到协程，等待...")
             sentence = await sentence
         
-        # 使用直接方式而非run_sync
+        # 使用concurrency.run_sync而非直接调用
         try:
-            # 使用内部同步实现直接生成
-            return self._generate_tts_single(sentence, main_uuid)
+            # 使用concurrency.run_sync实现异步生成
+            return await concurrency.run_sync(
+                self._generate_tts_single, sentence, main_uuid
+            )
         except Exception as e:
             self.logger.error(f"处理失败 (UUID={main_uuid}): {e}")
             raise
@@ -2761,108 +2920,6 @@ class FFmpegTool:
         return float(stdout.decode().strip())
 
 ================
-File: utils/gpu_manager.py
-================
-import ray
-import logging
-import psutil
-import time
-import numpy as np
-from threading import Lock
-
-logger = logging.getLogger(__name__)
-
-class GPUResourceManager:
-    """GPU资源自动分配管理器"""
-    
-    def __init__(self, total_gpus=1.0, min_gpu=0.1, check_interval=5):
-        self.total_gpus = total_gpus  # 总GPU资源
-        self.min_gpu = min_gpu         # 最小分配单位
-        self.check_interval = check_interval  # 检查间隔(秒)
-        self.lock = Lock()
-        self.last_check = 0
-        self.usage_history = []        # 保存历史使用率
-        self.history_window = 3        # 历史窗口大小
-        
-        # 模型优先级和基础资源需求
-        self.model_priority = {
-            "cosyvoice": 0.7,    # TTS模型优先级高，基础资源需求0.7
-            "sense_asr": 0.3,    # ASR模型优先级低，基础资源需求0.3
-        }
-    
-    def _get_current_load(self):
-        """获取当前系统负载"""
-        try:
-            # 1. CPU负载检查
-            cpu_percent = psutil.cpu_percent(interval=0.1)
-            # 2. 内存使用检查
-            memory_percent = psutil.virtual_memory().percent
-            # 3. GPU使用率检查 (可选，需要安装额外库如pynvml)
-            
-            # 综合负载分数 (0-100)
-            load_score = (cpu_percent + memory_percent) / 2
-            return load_score
-        except Exception as e:
-            logger.error(f"获取系统负载失败: {e}")
-            return 50  # 默认中等负载
-    
-    def _check_ray_resources(self):
-        """检查Ray集群资源状态"""
-        try:
-            resources = ray.available_resources()
-            gpu_available = resources.get("GPU", 0)
-            return {
-                "gpu_available": gpu_available,
-                "total_resources": resources
-            }
-        except Exception as e:
-            logger.error(f"获取Ray资源失败: {e}")
-            return {"gpu_available": 0.1, "total_resources": {}}
-    
-    def get_allocation(self, model_type):
-        """根据负载情况为指定模型类型分配GPU资源"""
-        with self.lock:  # 防止并发分配冲突
-            # 避免频繁检查
-            current_time = time.time()
-            if current_time - self.last_check < self.check_interval:
-                # 使用缓存的最近分配决策
-                if len(self.usage_history) > 0:
-                    load_score = np.mean(self.usage_history)
-                else:
-                    load_score = 50  # 默认中等负载
-            else:
-                # 更新负载并缓存
-                load_score = self._get_current_load()
-                self.usage_history.append(load_score)
-                if len(self.usage_history) > self.history_window:
-                    self.usage_history.pop(0)
-                self.last_check = current_time
-            
-            # 检查Ray资源
-            ray_resources = self._check_ray_resources()
-            gpu_available = ray_resources["gpu_available"]
-            
-            # 负载级别分类 (0-100)
-            if load_score < 30:  # 低负载
-                scale_factor = 1.0
-            elif load_score < 70:  # 中等负载 
-                scale_factor = 0.8
-            else:  # 高负载
-                scale_factor = 0.6
-            
-            # 根据模型类型和优先级分配资源
-            base_allocation = self.model_priority.get(model_type, 0.1)
-            allocation = max(self.min_gpu, base_allocation * scale_factor)
-            
-            # 检查是否超出可用资源
-            if allocation > gpu_available and gpu_available > self.min_gpu:
-                logger.warning(f"GPU资源不足，调整分配: {allocation} -> {gpu_available}")
-                allocation = gpu_available
-            
-            logger.info(f"模型 {model_type} 分配GPU: {allocation:.2f} (负载: {load_score:.1f}, 缩放: {scale_factor:.1f})")
-            return allocation
-
-================
 File: utils/media_utils.py
 ================
 # utils/media_utils.py
@@ -2874,6 +2931,7 @@ import torchaudio
 import librosa
 import soundfile as sf
 from pathlib import Path
+import ray
 from typing import List, Tuple, Dict, Union, Optional
 from utils.decorators import handle_errors
 from utils import concurrency
@@ -2884,11 +2942,19 @@ from utils.ffmpeg_utils import FFmpegTool
 logger = logging.getLogger(__name__)
 
 class MediaUtils:
-    def __init__(self, config, audio_separator, target_sr: int = 24000):
+    def __init__(self, config, audio_separator_actor, target_sr: int = 24000):
+        """
+        初始化MediaUtils
+        
+        Args:
+            config: 配置对象
+            audio_separator_actor: ClearVoiceActor引用
+            target_sr: 目标采样率
+        """
         self.config = config
         self.target_sr = target_sr
         self.logger = logging.getLogger(__name__)
-        self.audio_separator = audio_separator
+        self.audio_separator_actor = audio_separator_actor
 
         # 新增 ffmpeg 工具类
         self.ffmpeg_tool = FFmpegTool()
@@ -2979,7 +3045,7 @@ class MediaUtils:
     ) -> Dict[str, Union[str, float]]:
         """
         1) 提取纯视频 + 音频
-        2) 调用 audio_separator 分离人声/背景
+        2) 调用 audio_separator_actor 分离人声/背景
         3) 重采样 + 写音频文件
         4) 返回分段文件信息 (video, vocals, background, duration)
         """
@@ -2996,11 +3062,8 @@ class MediaUtils:
                 self.ffmpeg_tool.extract_video(video_path, silent_video, start, duration)
             )
 
-            # (2) 分离人声
-            def do_separate():
-                return self.audio_separator.separate_audio(full_audio)
-
-            vocals, background, sr = await concurrency.run_sync(do_separate)
+            # (2) 分离人声 - 使用Actor
+            vocals, background, sr = await self.audio_separator_actor.separate_audio.remote(full_audio)
 
             # (3) 重采样
             def do_resample_bg():
@@ -3229,6 +3292,70 @@ class TempFileManager:
         self.temp_files.clear()
 
 ================
+File: utils/tensor_utils.py
+================
+import torch
+import logging
+
+logger = logging.getLogger(__name__)
+
+def ensure_cpu_tensors(obj, depth=0, max_depth=10, path=""):
+    """
+    递归地确保对象中的所有PyTorch张量都在CPU上。
+    
+    Args:
+        obj: 要处理的对象
+        depth: 当前递归深度
+        max_depth: 最大递归深度，防止无限递归
+        path: 当前对象的路径，用于调试
+        
+    Returns:
+        处理后的对象，所有张量都在CPU上
+    """
+    if depth > max_depth:
+        logger.warning(f"达到最大递归深度 {max_depth}，路径: {path}")
+        return obj
+    
+    # 处理None
+    if obj is None:
+        return None
+    
+    # 处理张量
+    if isinstance(obj, torch.Tensor):
+        if obj.is_cuda:
+            logger.debug(f"将CUDA张量移动到CPU，路径: {path}")
+            return obj.cpu()
+        return obj
+    
+    # 处理字典
+    elif isinstance(obj, dict):
+        return {k: ensure_cpu_tensors(v, depth+1, max_depth, f"{path}.{k}") for k, v in obj.items()}
+    
+    # 处理列表或元组
+    elif isinstance(obj, (list, tuple)):
+        cls = type(obj)
+        return cls(ensure_cpu_tensors(item, depth+1, max_depth, f"{path}[{i}]") for i, item in enumerate(obj))
+    
+    # 处理自定义对象
+    elif hasattr(obj, '__dict__'):
+        for attr_name, attr_value in list(obj.__dict__.items()):
+            # 跳过私有属性和方法
+            if attr_name.startswith('_'):
+                continue
+                
+            try:
+                # 尝试处理属性
+                setattr(obj, attr_name, ensure_cpu_tensors(
+                    attr_value, depth+1, max_depth, f"{path}.{attr_name}"
+                ))
+            except Exception as e:
+                logger.warning(f"处理属性 {attr_name} 时出错: {e}")
+        return obj
+    
+    # 其他类型直接返回
+    return obj
+
+================
 File: __init__.py
 ================
 # 空文件即可，标识这是一个 Python 包
@@ -3237,7 +3364,6 @@ File: __init__.py
 File: .cursorignore
 ================
 # 忽略模型文件夹，因为包含大量模型文件和第三方代码
-models/
 
 ================
 File: .env.example
@@ -3594,11 +3720,9 @@ class Config:
 ================
 File: pipeline_scheduler.py
 ================
-# -----------------------------------------
-# backend/pipeline_scheduler.py (节选完整示例)
-# -----------------------------------------
 import asyncio
 import logging
+import ray
 from typing import List
 from utils.decorators import worker_decorator
 from utils.task_state import TaskState
@@ -3609,12 +3733,13 @@ logger = logging.getLogger(__name__)
 class PipelineScheduler:
     """
     多个Worker的调度器，负责翻译->model_in->tts_token->时长对齐->音频生成->混音 ...
+    使用 Ray 的依赖传递重构翻译和模型输入部分，后续部分仍使用队列。
     """
 
     def __init__(
         self,
-        translator,
-        model_in,
+        translator_actor,  # TranslatorActor
+        model_in_actor,    # ModelInActor
         tts_token_generator,
         duration_aligner,
         audio_generator,
@@ -3623,8 +3748,8 @@ class PipelineScheduler:
         config
     ):
         self.logger = logging.getLogger(__name__)
-        self.translator = translator
-        self.model_in = model_in
+        self.translator_actor = translator_actor  # TranslatorActor引用
+        self.model_in_actor = model_in_actor      # ModelInActor引用
         self.tts_token_generator = tts_token_generator
         self.duration_aligner = duration_aligner
         self.audio_generator = audio_generator
@@ -3635,10 +3760,11 @@ class PipelineScheduler:
         self._workers = []
 
     async def start_workers(self, task_state: TaskState):
+        """
+        启动后续的异步 worker，不包括翻译和模型输入部分（它们通过依赖传递执行）。
+        """
         self.logger.info(f"[PipelineScheduler] start_workers -> TaskID={task_state.task_id}")
         self._workers = [
-            asyncio.create_task(self._translation_worker(task_state)),
-            asyncio.create_task(self._modelin_worker(task_state)),
             asyncio.create_task(self._tts_token_worker(task_state)),
             asyncio.create_task(self._duration_align_worker(task_state)),
             asyncio.create_task(self._audio_generation_worker(task_state)),
@@ -3646,56 +3772,41 @@ class PipelineScheduler:
         ]
 
     async def stop_workers(self, task_state: TaskState):
+        """
+        停止所有 worker，通过向 tts_token_queue 发送 None 信号。
+        """
         self.logger.info(f"[PipelineScheduler] stop_workers -> TaskID={task_state.task_id}")
-        # 向translation_queue发送None，让整条流水线停止
-        await task_state.translation_queue.put(None)
+        await task_state.tts_token_queue.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self.logger.info(f"[PipelineScheduler] 所有Worker已结束 -> TaskID={task_state.task_id}")
 
     async def push_sentences_to_pipeline(self, task_state: TaskState, sentences: List[Sentence]):
-        self.logger.debug(f"[push_sentences_to_pipeline] 放入 {len(sentences)} 个句子到 translation_queue, TaskID={task_state.task_id}")
-        await task_state.translation_queue.put(sentences)
+        """
+        将句子推送到流水线，使用 Ray 的依赖传递执行翻译和模型输入，最后放入 tts_token_queue。
+        """
+        self.logger.debug(f"[push_sentences_to_pipeline] 处理 {len(sentences)} 个句子, TaskID={task_state.task_id}")
+        
+        # 迭代获取翻译的 ObjectRef
+        for translated_ref in self.translator_actor.translate_sentences.remote(
+            sentences,
+            target_language=task_state.target_language,
+            batch_size=self.config.TRANSLATION_BATCH_SIZE
+        ):
+            # 直接使用 model_in_actor 处理翻译后的句子
+            for modelin_ref in self.model_in_actor.modelin_maker.remote(
+                translated_ref,
+                reuse_speaker=False,
+                reuse_uuid=False,
+                batch_size=self.config.MODELIN_BATCH_SIZE
+            ):
+                # 获取处理后的句子并放入队列
+                processed_batch = ray.get(modelin_ref)
+                self.logger.debug(f"model_in_actor处理完成: {len(processed_batch)}个句子")
+                await task_state.tts_token_queue.put(processed_batch)
 
     # ------------------------------
-    # 各 Worker 的实现
+    # 后续 Worker 保持不变
     # ------------------------------
-
-    @worker_decorator(
-        input_queue_attr='translation_queue',
-        next_queue_attr='modelin_queue',
-        worker_name='翻译Worker',
-        mode='stream'
-    )
-    async def _translation_worker(self, sentences_list: List[Sentence], task_state: TaskState):
-        if not sentences_list:
-            return
-        self.logger.debug(f"[翻译Worker] 收到 {len(sentences_list)} 句子, TaskID={task_state.task_id}")
-
-        async for translated_batch in self.translator.translate_sentences(
-            sentences_list,
-            batch_size=self.config.TRANSLATION_BATCH_SIZE,
-            target_language=task_state.target_language
-        ):
-            yield translated_batch
-
-    @worker_decorator(
-        input_queue_attr='modelin_queue',
-        next_queue_attr='tts_token_queue',
-        worker_name='模型输入Worker',
-        mode='stream'
-    )
-    async def _modelin_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
-        if not sentences_batch:
-            return
-        self.logger.debug(f"[模型输入Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
-
-        async for updated_batch in self.model_in.modelin_maker(
-            sentences_batch,
-            reuse_speaker=False,
-            reuse_uuid=False,
-            batch_size=self.config.MODELIN_BATCH_SIZE
-        ):
-            yield updated_batch
 
     @worker_decorator(
         input_queue_attr='tts_token_queue',
@@ -3707,7 +3818,7 @@ class PipelineScheduler:
             return
         self.logger.debug(f"[TTS Token生成Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
 
-        # 确保sentences_batch不是协程
+        # 确保 sentences_batch 不是协程
         if asyncio.iscoroutine(sentences_batch):
             sentences_batch = await sentences_batch
         
@@ -3756,8 +3867,6 @@ class PipelineScheduler:
 
         output_path = task_state.task_paths.segments_dir / f"segment_{task_state.batch_counter}.mp4"
 
-        # ========== (修改) ============
-        # 将task_state.generate_subtitle 传给MediaMixer
         success = await self.mixer.mixed_media_maker(
             sentences=sentences_batch,
             task_state=task_state,
@@ -3783,7 +3892,7 @@ File: postcss.config.json
 File: video_translator.py
 ================
 # ---------------------------------
-# backend/video_translator.py (节选完整示例)
+# backend/video_translator.py (重构后)
 # ---------------------------------
 import logging
 import os
@@ -3792,11 +3901,10 @@ from pathlib import Path
 import ray
 import asyncio
 
-from core.auto_sense import SenseAutoModel
-from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
-from core.translation.translator import Translator
-from core.translation.deepseek_client import DeepSeekClient
-from core.translation.gemini_client import GeminiClient
+from core.asr_model_actor import SenseAutoModelActor
+from core.cosyvoice_model_actor import CosyVoiceModelActor
+from core.clear_voice_actor import ClearVoiceActor
+from core.translation.translator_actor import TranslatorActor
 from core.tts_token_gener import TTSTokenGenerator
 from core.audio_gener import AudioGenerator
 from core.timeadjust.duration_aligner import DurationAligner
@@ -3804,14 +3912,12 @@ from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.media_mixer import MediaMixer
 from utils.media_utils import MediaUtils
 from pipeline_scheduler import PipelineScheduler
-from core.audio_separator import ClearVoiceSeparator
-from core.model_in import ModelIn
 from utils.task_storage import TaskPaths
 from config import Config
 from utils.task_state import TaskState
 
 from utils.ffmpeg_utils import FFmpegTool
-from utils.gpu_manager import GPUResourceManager
+from core.model_in_actor import ModelInActor
 
 logger = logging.getLogger(__name__)
 
@@ -3826,64 +3932,52 @@ class ViTranslator:
         # 初始化Ray（如果尚未初始化）
         if not ray.is_initialized():
             ray.init(ignore_reinit_error=True)
-        
-        # 初始化GPU资源管理器
-        self.gpu_manager = GPUResourceManager(
-            total_gpus=1.0,  # 总GPU资源
-            min_gpu=0.1      # 最小分配单位
-        )
             
         self._init_global_models()
 
     def _init_global_models(self):
         self.logger.info("[ViTranslator] 初始化模型和工具...")
         
-        # 音频分离器
-        self.audio_separator = ClearVoiceSeparator(model_name='MossFormer2_SE_48K')
+        # 创建音频分离器Actor
+        self.audio_separator_actor = ClearVoiceActor.options(
+            num_gpus=0.1,
+            name="clear_voice_separator"
+        ).remote(model_name='MossFormer2_SE_48K')
         
-        # 为ASR模型动态分配GPU资源
-        asr_gpu = self.gpu_manager.get_allocation("sense_asr")
-        self.logger.info(f"ASR模型分配GPU: {asr_gpu}")
-        
-        # 创建ASR模型Actor
-        from core.asr_model_actor import SenseAutoModelActor
         self.sense_model_actor = SenseAutoModelActor.options(
-            num_gpus=asr_gpu,
+            num_gpus=0.1,
             name="sense_asr_model"
         ).remote()
         
-        # 为TTS模型动态分配GPU资源
-        tts_gpu = self.gpu_manager.get_allocation("cosyvoice")
-        self.logger.info(f"TTS模型分配GPU: {tts_gpu}")
-        
-        # 创建CosyVoice模型Actor
-        from core.cosyvoice_model_actor import CosyVoiceModelActor
         self.cosyvoice_model_actor = CosyVoiceModelActor.options(
-            num_gpus=tts_gpu,
+            num_gpus=0.7,
             name="cosyvoice_model"
         ).remote("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
         
         # 获取采样率
         self.target_sr = ray.get(self.cosyvoice_model_actor.get_sample_rate.remote())
 
+        # 创建翻译Actor
+        translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
+        api_key = self.config.DEEPSEEK_API_KEY if translation_model == "deepseek" else self.config.GEMINI_API_KEY
+        self.translator_actor = TranslatorActor.options(
+            name="translator"
+        ).remote(api_key=api_key, model_type=translation_model)
+
+        # 创建ModelInActor
+        self.model_in_actor = ModelInActor.options(
+            name="model_in"
+        ).remote(self.cosyvoice_model_actor)
+
         # 其他核心工具
-        self.media_utils = MediaUtils(config=self.config, audio_separator=self.audio_separator, target_sr=self.target_sr)
-        self.model_in = ModelIn(self.cosyvoice_model_actor)
+        self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
         self.tts_generator = TTSTokenGenerator(self.cosyvoice_model_actor, Hz=25)
         self.audio_generator = AudioGenerator(self.cosyvoice_model_actor, sample_rate=self.target_sr)
 
-        # 翻译
-        translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
-        if translation_model == "deepseek":
-            self.translator = Translator(DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY))
-        elif translation_model == "gemini":
-            self.translator = Translator(GeminiClient(api_key=self.config.GEMINI_API_KEY))
-        else:
-            raise ValueError(f"不支持的翻译模型：{translation_model}")
-
+        # 初始化其他组件
         self.duration_aligner = DurationAligner(
-            model_in=self.model_in,
-            simplifier=self.translator,
+            model_in_actor=self.model_in_actor,
+            simplifier=self.translator_actor,
             tts_token_gener=self.tts_generator,
             max_speed=1.2
         )
@@ -3923,8 +4017,8 @@ class ViTranslator:
         )
 
         pipeline = PipelineScheduler(
-            translator=self.translator,
-            model_in=self.model_in,
+            translator_actor=self.translator_actor,
+            model_in_actor=self.model_in_actor,
             tts_token_generator=self.tts_generator,
             duration_aligner=self.duration_aligner,
             audio_generator=self.audio_generator,
@@ -4076,29 +4170,6 @@ class ViTranslator:
         finally:
             if list_txt.exists():
                 list_txt.unlink()
-
-    async def adjust_gpu_allocation(self):
-        """根据当前负载重新调整GPU资源分配"""
-        try:
-            # 重新获取每个模型的适当分配
-            asr_gpu = self.gpu_manager.get_allocation("sense_asr")
-            tts_gpu = self.gpu_manager.get_allocation("cosyvoice")
-            
-            # 向Ray报告新的资源需求
-            # 注意：这需要模型支持在运行时调整资源，可能需要重新创建Actor
-            self.logger.info(f"动态调整GPU分配 - ASR: {asr_gpu}, TTS: {tts_gpu}")
-            
-            # Ray目前不直接支持在运行时调整Actor资源，
-            # 这里只是概念演示，实际使用时可能需要终止并重新创建Actor
-            
-            return {
-                "asr_gpu": asr_gpu,
-                "tts_gpu": tts_gpu,
-                "total": asr_gpu + tts_gpu
-            }
-        except Exception as e:
-            self.logger.error(f"调整GPU分配失败: {e}")
-            return None
 
 
 

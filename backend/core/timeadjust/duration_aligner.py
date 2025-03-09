@@ -1,15 +1,17 @@
 import logging
 import ray
+import torch
+from utils.tensor_utils import ensure_cpu_tensors
 
 class DurationAligner:
-    def __init__(self, model_in=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
+    def __init__(self, model_in_actor=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
         """
-        model_in：生成模型接口，用于更新文本特征  
+        model_in_actor：生成模型Actor接口，用于更新文本特征  
         simplifier：简化处理接口（TranslatorActor）  
         tts_token_gener：TTS token 生成接口  
         max_speed：语速阈值，超过该速率的句子需要进行简化
         """
-        self.model_in = model_in
+        self.model_in_actor = model_in_actor
         self.simplifier = simplifier
         self.tts_token_gener = tts_token_gener
         self.max_speed = max_speed
@@ -91,29 +93,38 @@ class DurationAligner:
     async def _retry_sentences_batch(self, sentences):
         """
         对语速过快的句子执行精简 + 更新 TTS token。
-        使用TranslatorActor而不是原来的Translator
+        使用TranslatorActor和ModelInActor
         """
         try:
+            # 使用通用工具函数确保所有张量都在CPU上
+            sentences = ensure_cpu_tensors(sentences, path="sentences")
+            self.logger.debug("已将所有张量移动到CPU")
+            
             # 1. 使用TranslatorActor对语速过快的句子进行精简
+            simplified_batch = None
             async for simplified_batch_ref in self.simplifier.simplify_sentences.remote(
                 sentences,
                 target_speed=self.max_speed
             ):
-                simplified_batch = await simplified_batch_ref
+                simplified_batch = ray.get(simplified_batch_ref)
             
             if not simplified_batch:
                 self.logger.warning("简化结果为空")
                 return False
                 
             # 2. 批量更新文本特征（复用 speaker 与 uuid）
-            async for batch in self.model_in.modelin_maker(
+            updated_batch = None
+            for batch_ref in self.model_in_actor.modelin_maker.remote(
                 simplified_batch,
                 reuse_speaker=True,
                 reuse_uuid=True,
                 batch_size=3
             ):
+                updated_batch = ray.get(batch_ref)
+                
                 # 3. 再生成 token（复用 uuid）
-                updated_batch = await self.tts_token_gener.tts_token_maker(batch, reuse_uuid=True)
+                if updated_batch:
+                    await self.tts_token_gener.tts_token_maker(updated_batch, reuse_uuid=True)
                 
             return True
         except Exception as e:

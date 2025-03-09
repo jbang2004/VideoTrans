@@ -19,12 +19,12 @@ from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.media_mixer import MediaMixer
 from utils.media_utils import MediaUtils
 from pipeline_scheduler import PipelineScheduler
-from core.model_in import ModelIn
 from utils.task_storage import TaskPaths
 from config import Config
 from utils.task_state import TaskState
 
 from utils.ffmpeg_utils import FFmpegTool
+from core.model_in_actor import ModelInActor
 
 logger = logging.getLogger(__name__)
 
@@ -71,16 +71,20 @@ class ViTranslator:
             name="translator"
         ).remote(api_key=api_key, model_type=translation_model)
 
+        # 创建ModelInActor
+        self.model_in_actor = ModelInActor.options(
+            name="model_in"
+        ).remote(self.cosyvoice_model_actor)
+
         # 其他核心工具
         self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
-        self.model_in = ModelIn(self.cosyvoice_model_actor)
         self.tts_generator = TTSTokenGenerator(self.cosyvoice_model_actor, Hz=25)
         self.audio_generator = AudioGenerator(self.cosyvoice_model_actor, sample_rate=self.target_sr)
 
         # 初始化其他组件
         self.duration_aligner = DurationAligner(
-            model_in=self.model_in,
-            simplifier=self.translator_actor,  # 使用translator_actor替代原来的translator
+            model_in_actor=self.model_in_actor,
+            simplifier=self.translator_actor,
             tts_token_gener=self.tts_generator,
             max_speed=1.2
         )
@@ -120,8 +124,8 @@ class ViTranslator:
         )
 
         pipeline = PipelineScheduler(
-            translator=self.translator_actor,
-            model_in=self.model_in,
+            translator_actor=self.translator_actor,
+            model_in_actor=self.model_in_actor,
             tts_token_generator=self.tts_generator,
             duration_aligner=self.duration_aligner,
             audio_generator=self.audio_generator,

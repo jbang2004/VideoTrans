@@ -8,25 +8,6 @@ from core.sentence_tools import Sentence
 
 logger = logging.getLogger(__name__)
 
-# 定义模型输入任务的远程函数
-@ray.remote
-def modelin_task(model_in, translated_ref, config):
-    """
-    远程任务：处理翻译后的句子，返回模型输入处理后的 ObjectRefGenerator。
-    """
-    # 获取翻译任务的 ObjectRefGenerator
-    translated_gen = ray.get(translated_ref)  # translated_ref 是 ObjectRef
-    # 迭代处理每个翻译批次
-    for translated_batch in translated_gen:
-        # 调用 modelin_maker 处理批次
-        updated_batch = model_in.modelin_maker(
-            translated_batch,
-            reuse_speaker=False,
-            reuse_uuid=False,
-            batch_size=config.MODELIN_BATCH_SIZE
-        )
-        yield updated_batch  # 逐步 yield 处理后的批次
-
 class PipelineScheduler:
     """
     多个Worker的调度器，负责翻译->model_in->tts_token->时长对齐->音频生成->混音 ...
@@ -36,7 +17,7 @@ class PipelineScheduler:
     def __init__(
         self,
         translator_actor,  # TranslatorActor
-        model_in,
+        model_in_actor,    # ModelInActor
         tts_token_generator,
         duration_aligner,
         audio_generator,
@@ -46,7 +27,7 @@ class PipelineScheduler:
     ):
         self.logger = logging.getLogger(__name__)
         self.translator_actor = translator_actor  # TranslatorActor引用
-        self.model_in = model_in
+        self.model_in_actor = model_in_actor      # ModelInActor引用
         self.tts_token_generator = tts_token_generator
         self.duration_aligner = duration_aligner
         self.audio_generator = audio_generator
@@ -89,17 +70,17 @@ class PipelineScheduler:
             target_language=task_state.target_language,
             batch_size=self.config.TRANSLATION_BATCH_SIZE
         ):
-        
-            modelin_ref = modelin_task.remote(
-                self.model_in,
+            # 直接使用 model_in_actor 处理翻译后的句子
+            for modelin_ref in self.model_in_actor.modelin_maker.remote(
                 translated_ref,
-                self.config
-            )
-        
-            modelin_gen = ray.get(modelin_ref)  
-
-            for batch in modelin_gen:
-                await task_state.tts_token_queue.put(ray.get(batch))
+                reuse_speaker=False,
+                reuse_uuid=False,
+                batch_size=self.config.MODELIN_BATCH_SIZE
+            ):
+                # 获取处理后的句子并放入队列
+                processed_batch = ray.get(modelin_ref)
+                self.logger.debug(f"model_in_actor处理完成: {len(processed_batch)}个句子")
+                await task_state.tts_token_queue.put(processed_batch)
 
     # ------------------------------
     # 后续 Worker 保持不变
