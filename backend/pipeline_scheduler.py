@@ -57,6 +57,27 @@ class PipelineScheduler:
         await task_state.tts_token_queue.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self.logger.info(f"[PipelineScheduler] 所有Worker已结束 -> TaskID={task_state.task_id}")
+        
+        # 清理资源，但保留说话人特征
+        await self.cleanup_resources(task_state)
+
+    async def cleanup_resources(self, task_state: TaskState):
+        """
+        清理任务相关的资源，但保留说话人特征
+        """
+        from utils import concurrency
+        
+        try:
+            # 使用concurrency.run_sync调用Actor方法
+            await concurrency.run_sync(
+                lambda: ray.get(self.model_in_actor.cosyvoice_actor.cleanup_feature_cache.remote(
+                    cache_ids=None,  # 清理所有缓存
+                    skip_speaker_features=True  # 跳过说话人特征
+                ))
+            )
+            self.logger.info(f"[PipelineScheduler] 已清理资源（保留说话人特征） -> TaskID={task_state.task_id}")
+        except Exception as e:
+            self.logger.error(f"[PipelineScheduler] 清理资源失败: {e} -> TaskID={task_state.task_id}")
 
     async def push_sentences_to_pipeline(self, task_state: TaskState, sentences: List[Sentence]):
         """
@@ -74,7 +95,6 @@ class PipelineScheduler:
             for modelin_ref in self.model_in_actor.modelin_maker.remote(
                 translated_ref,
                 reuse_speaker=False,
-                reuse_uuid=False,
                 batch_size=self.config.MODELIN_BATCH_SIZE
             ):
                 # 获取处理后的句子并放入队列
@@ -100,7 +120,7 @@ class PipelineScheduler:
         if asyncio.iscoroutine(sentences_batch):
             sentences_batch = await sentences_batch
         
-        await self.tts_token_generator.tts_token_maker(sentences_batch, reuse_uuid=False)
+        await self.tts_token_generator.tts_token_maker(sentences_batch)
         return sentences_batch
 
     @worker_decorator(

@@ -1,7 +1,5 @@
 import logging
 import asyncio
-import uuid
-import torch
 import ray
 
 from utils import concurrency
@@ -17,7 +15,7 @@ class TTSTokenGenerator:
         self.Hz = Hz
         self.logger = logging.getLogger(__name__)
 
-    async def tts_token_maker(self, sentences, reuse_uuid=False):
+    async def tts_token_maker(self, sentences):
         """生成TTS tokens（调用Actor）"""
         try:
             # 确保sentences不是协程
@@ -32,17 +30,13 @@ class TTSTokenGenerator:
                     self.logger.warning(f"句子{id(s)}是协程，等待...")
                     s = await s
                 
-                current_uuid = (
-                    s.model_input.get('uuid') if reuse_uuid and s.model_input.get('uuid')
-                    else str(uuid.uuid1())
-                )
                 # 直接将协程函数添加到任务列表
-                tasks.append(self._generate_tts_single_async(s, current_uuid))
+                tasks.append(self._generate_tts_single_async(s))
 
             processed = await asyncio.gather(*tasks)
 
             for sen in processed:
-                if not sen.model_input.get('segment_speech_tokens'):
+                if not sen.model_input.get('tts_token_id'):
                     self.logger.error(f"TTS token 生成失败: {sen.trans_text}")
 
             return processed
@@ -51,7 +45,7 @@ class TTSTokenGenerator:
             self.logger.error(f"TTS token 生成失败: {e}")
             raise
 
-    async def _generate_tts_single_async(self, sentence, main_uuid):
+    async def _generate_tts_single_async(self, sentence):
         """异步调用Actor生成TTS tokens"""
         # 检查sentence是否为协程
         if asyncio.iscoroutine(sentence):
@@ -62,52 +56,48 @@ class TTSTokenGenerator:
         try:
             # 使用concurrency.run_sync实现异步生成
             return await concurrency.run_sync(
-                self._generate_tts_single, sentence, main_uuid
+                self._generate_tts_single, sentence
             )
         except Exception as e:
-            self.logger.error(f"处理失败 (UUID={main_uuid}): {e}")
+            self.logger.error(f"处理失败: {e}")
             raise
 
-    def _generate_tts_single(self, sentence, main_uuid):
+    def _generate_tts_single(self, sentence):
         """同步调用Actor生成TTS tokens"""
         model_input = sentence.model_input
-        segment_tokens_list = []
-        segment_uuids = []
-        total_token_count = 0
-
+        
         try:
-            for i, (text, text_len) in enumerate(zip(model_input['text'], model_input['text_len'])):
-                seg_uuid = f"{main_uuid}_seg_{i}"
-                
-                # 调用Actor生成TTS tokens
-                prompt_text = model_input.get('prompt_text', torch.zeros(1, 0, dtype=torch.int32))
-                llm_prompt_speech_token = model_input.get('llm_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32))
-                llm_embedding = model_input.get('llm_embedding', torch.zeros(0, 192))
-                
-                seg_tokens = ray.get(self.cosyvoice_actor.generate_tts_tokens.remote(
-                    text, prompt_text, llm_prompt_speech_token, llm_embedding, seg_uuid
-                ))
-
-                segment_tokens_list.append(seg_tokens)
-                segment_uuids.append(seg_uuid)
-                total_token_count += len(seg_tokens)
-
-            total_duration_s = total_token_count / self.Hz
-            sentence.duration = total_duration_s * 1000
-
-            model_input['segment_speech_tokens'] = segment_tokens_list
-            model_input['segment_uuids'] = segment_uuids
-            model_input['uuid'] = main_uuid
+            # 获取特征ID
+            text_feature_id = model_input.get('text_feature_id')
+            speaker_feature_id = model_input.get('speaker_feature_id')
+            
+            if not text_feature_id or not speaker_feature_id:
+                raise ValueError(f"缺少必要的特征ID: text_feature_id={text_feature_id}, speaker_feature_id={speaker_feature_id}")
+            
+            # 获取可能存在的tts_token_id，用于ID复用
+            existing_tts_id = model_input.get('tts_token_id')
+            
+            # 生成新的TTS token特征，如果有现有的tts_token_id则复用ID
+            tts_token_id, duration = ray.get(self.cosyvoice_actor.generate_tts_tokens_and_cache.remote(
+                text_feature_id, speaker_feature_id, existing_tts_id
+            ))
+            
+            # 更新model_input
+            model_input['tts_token_id'] = tts_token_id
+            sentence.duration = duration
 
             self.logger.debug(
-                f"TTS token 生成完成 (UUID={main_uuid}, 时长={total_duration_s:.2f}s, "
-                f"段数={len(segment_uuids)})"
+                f"TTS token 生成完成 (ID={tts_token_id}, 时长={duration:.2f}ms)"
             )
             return sentence
 
         except Exception as e:
-            self.logger.error(f"生成失败 (UUID={main_uuid}): {e}")
-            # 调用Actor清理
-            for seg_uuid in segment_uuids:
-                ray.get(self.cosyvoice_actor.cleanup_tts_tokens.remote(seg_uuid))
+            self.logger.error(f"生成失败: {e}")
+            # 清理可能已创建的TTS token
+            old_tts_token_id = model_input.get('tts_token_id')
+            if old_tts_token_id:
+                try:
+                    ray.get(self.cosyvoice_actor.cleanup_tts_tokens.remote(old_tts_token_id))
+                except Exception as cleanup_error:
+                    self.logger.warning(f"清理TTS token失败: {cleanup_error}")
             raise

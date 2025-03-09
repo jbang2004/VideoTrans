@@ -12,7 +12,6 @@ from .prompt import (
 )
 from .deepseek_client import DeepSeekClient
 from .gemini_client import GeminiClient
-from utils.tensor_utils import ensure_cpu_tensors
 
 logger = logging.getLogger(__name__)
 
@@ -152,10 +151,6 @@ class TranslatorActor:
         ):
             yield batch_result
 
-    def _ensure_cpu_tensors(self, obj):
-        """递归地确保所有张量都在CPU上"""
-        return ensure_cpu_tensors(obj, path="translator_input")
-
     async def simplify_sentences(
         self,
         sentences: List,
@@ -167,9 +162,7 @@ class TranslatorActor:
             self.logger.warning("收到空的句子列表")
             return
 
-        # 确保所有句子的张量都在CPU上
-        sentences = self._ensure_cpu_tensors(sentences)
-        self.logger.debug("已将所有张量移动到CPU")
+        self.logger.debug(f"处理 {len(sentences)} 个句子")
 
         config = BatchConfig(initial_size=batch_size, min_size=1, required_successes=2)
 

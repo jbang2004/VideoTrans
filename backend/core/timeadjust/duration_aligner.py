@@ -1,7 +1,6 @@
 import logging
 import ray
 import torch
-from utils.tensor_utils import ensure_cpu_tensors
 
 class DurationAligner:
     def __init__(self, model_in_actor=None, simplifier=None, tts_token_gener=None, max_speed=1.1):
@@ -20,6 +19,9 @@ class DurationAligner:
     async def align_durations(self, sentences):
         """
         对整批句子进行时长对齐，并检查是否需要精简（语速过快）。
+        
+        Args:
+            sentences: 要处理的句子列表
         """
         if not sentences:
             return
@@ -27,13 +29,17 @@ class DurationAligner:
         # 第一次对齐
         self._align_batch(sentences)
 
-        # 查找语速过快的句子（speed > max_speed）
-        retry_sentences = [s for s in sentences if s.speed > self.max_speed]
-        if retry_sentences:
-            self.logger.info(f"{len(retry_sentences)} 个句子语速过快, 正在精简...")
-            success = await self._retry_sentences_batch(retry_sentences)
+        # 查找语速过快的句子（speed > max_speed）的索引
+        fast_indices = [i for i, sentence in enumerate(sentences) if sentence.speed > self.max_speed]
+        if fast_indices:
+            self.logger.info(f"{len(fast_indices)} 个句子语速过快, 正在精简...")
+            
+            # 调用_retry_sentences_batch处理这些句子，传入原始列表和需要精简的索引
+            success = await self._retry_sentences_batch(sentences, fast_indices)
+            
             if success:
                 # 若精简文本成功，再次对齐
+                self.logger.info("精简文本成功，再次对齐...")
                 self._align_batch(sentences)
             else:
                 self.logger.warning("精简过程失败, 保持原结果")
@@ -90,43 +96,71 @@ class DurationAligner:
                 f"speed: {s.speed}, silence_duration: {s.silence_duration}"
             )
 
-    async def _retry_sentences_batch(self, sentences):
+    async def _retry_sentences_batch(self, all_sentences, fast_indices):
         """
-        对语速过快的句子执行精简 + 更新 TTS token。
-        使用TranslatorActor和ModelInActor
+        对语速过快的句子执行精简 + 更新 TTS token，并直接更新原始句子列表。
+        
+        Args:
+            all_sentences: 所有句子的列表
+            fast_indices: 需要精简的句子索引列表
+            
+        Returns:
+            bool: 是否成功精简
         """
         try:
-            # 使用通用工具函数确保所有张量都在CPU上
-            sentences = ensure_cpu_tensors(sentences, path="sentences")
-            self.logger.debug("已将所有张量移动到CPU")
+            # 提取需要精简的句子
+            fast_sentences = [all_sentences[idx] for idx in fast_indices]
+            self.logger.debug(f"处理 {len(fast_sentences)} 个语速过快的句子")
+            
+            # 记录原始文本，用于日志
+            initial_texts = {idx: all_sentences[idx].trans_text for idx in fast_indices}
             
             # 1. 使用TranslatorActor对语速过快的句子进行精简
-            simplified_batch = None
-            async for simplified_batch_ref in self.simplifier.simplify_sentences.remote(
-                sentences,
+            simplified_ref = None
+            async for batch_ref in self.simplifier.simplify_sentences.remote(
+                fast_sentences,
                 target_speed=self.max_speed
             ):
-                simplified_batch = ray.get(simplified_batch_ref)
+                simplified_ref = batch_ref
             
-            if not simplified_batch:
-                self.logger.warning("简化结果为空")
+            if simplified_ref is None:
+                self.logger.warning("简化过程未返回任何结果")
                 return False
                 
-            # 2. 批量更新文本特征（复用 speaker 与 uuid）
-            updated_batch = None
+            # 2. 使用model_in_actor处理简化后的句子
+            refined_sentences = []
             for batch_ref in self.model_in_actor.modelin_maker.remote(
-                simplified_batch,
+                simplified_ref,
                 reuse_speaker=True,
-                reuse_uuid=True,
                 batch_size=3
             ):
-                updated_batch = ray.get(batch_ref)
+                # 获取处理后的句子
+                refined_batch = ray.get(batch_ref)
                 
-                # 3. 再生成 token（复用 uuid）
-                if updated_batch:
-                    await self.tts_token_gener.tts_token_maker(updated_batch, reuse_uuid=True)
+                # 3. 生成新的TTS token
+                if refined_batch:
+                    await self.tts_token_gener.tts_token_maker(refined_batch)
+                    refined_sentences.extend(refined_batch)
+                    self.logger.info(f"精简后的句子批次: {refined_batch}")
+            
+            # 4. 直接更新原始句子列表
+            if refined_sentences:
+                for i, orig_idx in enumerate(fast_indices):
+                    if i < len(refined_sentences):  # 防止索引越界
+                        # 记录文本变化
+                        old_text = initial_texts[orig_idx]
+                        new_text = refined_sentences[i].trans_text
+                        
+                        # 更新原始列表中的句子
+                        all_sentences[orig_idx] = refined_sentences[i]
+                        
+                        self.logger.info(f"更新句子[{orig_idx}]: {old_text} -> {new_text}")
                 
-            return True
+                return True
+            else:
+                self.logger.warning("没有获取到精简后的句子")
+                return False
+                
         except Exception as e:
             self.logger.error(f"_retry_sentences_batch 出错: {e}")
             return False
