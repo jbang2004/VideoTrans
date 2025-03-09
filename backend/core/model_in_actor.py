@@ -10,7 +10,7 @@ import ray
 # [NEW] 统一使用 concurrency.run_sync
 from utils import concurrency
 
-@ray.remote(num_gpus=0.1)  # 分配0.1个GPU资源
+@ray.remote  # 移除GPU分配
 class ModelInActor:
     def __init__(self, cosyvoice_model_actor):
         """
@@ -28,18 +28,6 @@ class ModelInActor:
         self.semaphore = asyncio.Semaphore(4)  # max_concurrent_tasks=4
         
         self.logger.info(f"ModelInActor initialized with CosyVoice Actor")
-
-    def postprocess(self, speech, top_db=60, hop_length=220, win_length=440):
-        speech, _ = librosa.effects.trim(
-            speech, top_db=top_db,
-            frame_length=win_length,
-            hop_length=hop_length
-        )
-        if speech.abs().max() > self.max_val:
-            speech = speech / speech.abs().max() * self.max_val
-        
-        speech = torch.concat([speech, torch.zeros(1, int(self.cosy_sample_rate * 0.2))], dim=1)
-        return speech
 
     async def _update_text_features_sync(self, sentence):
         """
@@ -63,9 +51,9 @@ class ModelInActor:
             self.logger.error(f"更新文本特征失败: {str(e)}")
             raise
 
-    async def _process_sentence_sync(self, sentence, reuse_speaker=False):
+    async def _modelin_sentence_sync(self, sentence, reuse_speaker=False):
         """
-        处理单个句子（使用Actor缓存）
+        对单个句子进行模型输入处理（使用Actor缓存）
         """
         speaker_id = sentence.speaker_id
 
@@ -73,7 +61,7 @@ class ModelInActor:
         if not reuse_speaker:
             if speaker_id not in self.speaker_cache:
                 try:
-                    # 处理音频并缓存
+                    # 准备音频
                     audio = sentence.audio
                     
                     # 调用Actor处理音频并缓存
@@ -92,25 +80,25 @@ class ModelInActor:
                     self.speaker_cache[speaker_id] = speaker_feature_id
                     
                 except Exception as e:
-                    self.logger.error(f"处理音频或提取特征失败: {str(e)}")
+                    self.logger.error(f"模型输入音频处理失败: {str(e)}")
                     raise
                 
             # 保存speaker_feature_id到sentence
             sentence.model_input['speaker_feature_id'] = self.speaker_cache[speaker_id]
 
-        # 3) 文本特征更新
+        # 2) 文本特征更新
         await self._update_text_features_sync(sentence)
         return sentence
 
-    async def _process_sentence_async(self, sentence, reuse_speaker=False):
-        """在异步方法中，对单个 sentence 做同步处理"""
+    async def _modelin_sentence_async(self, sentence, reuse_speaker=False):
+        """在异步方法中，对单个 sentence 进行模型输入处理"""
         async with self.semaphore:
             # 确保sentence是真实对象，不是协程
             if asyncio.iscoroutine(sentence):
                 sentence = await sentence  # 等待协程完成
             
             # 然后执行处理
-            return await self._process_sentence_sync(sentence, reuse_speaker)
+            return await self._modelin_sentence_sync(sentence, reuse_speaker)
 
     async def modelin_maker(self,
                             sentences,
@@ -124,22 +112,21 @@ class ModelInActor:
             self.logger.warning("modelin_maker: 收到空的句子列表")
             return
 
-        # 不再需要ensure_cpu_tensors
-        self.logger.debug(f"处理 {len(sentences)} 个句子")
+        self.logger.debug(f"模型输入处理 {len(sentences)} 个句子")
 
         tasks = []
         for s in sentences:
             tasks.append(
                 asyncio.create_task(
-                    self._process_sentence_async(s, reuse_speaker)
+                    self._modelin_sentence_async(s, reuse_speaker)
                 )
             )
 
         try:
             results = []
             for i, task in enumerate(tasks, start=1):
-                updated_sentence = await task
-                results.append(updated_sentence)
+                modelin_sentence = await task
+                results.append(modelin_sentence)
 
                 if i % batch_size == 0:
                     yield results
