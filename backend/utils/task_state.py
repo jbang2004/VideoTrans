@@ -32,7 +32,7 @@ class TaskState:
     # 各个异步队列
     translation_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     modelin_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    audio_gen_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
+    # audio_gen_queue已移除，直接从TTS token生成和时长对齐流向mixing_queue
     mixing_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
 
     # 记录 mixing_worker 产出的每个 segment_xxx.mp4

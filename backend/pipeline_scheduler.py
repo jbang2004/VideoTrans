@@ -8,6 +8,8 @@ from core.sentence_tools import Sentence
 from core.tts_token_gener import generate_tts_tokens
 from utils import concurrency
 from core.timeadjust.duration_aligner import align_durations
+from core.audio_gener import generate_audio
+from core.timeadjust.timestamp_adjuster import adjust_timestamps
 
 logger = logging.getLogger(__name__)
 
@@ -23,10 +25,9 @@ class PipelineScheduler:
         model_in_actor,    # ModelInActor
         cosyvoice_actor,   # CosyVoiceModelActor (替代tts_token_generator)
         simplifier,        # 简化器（通常是TranslatorActor）
-        audio_generator,
-        timestamp_adjuster,
         mixer,
         config,
+        sample_rate=None,  # 采样率，如果为None则使用cosyvoice_actor的采样率
         max_speed=1.1      # 最大语速阈值
     ):
         self.logger = logging.getLogger(__name__)
@@ -34,32 +35,30 @@ class PipelineScheduler:
         self.model_in_actor = model_in_actor      # ModelInActor引用
         self.cosyvoice_actor = cosyvoice_actor    # CosyVoice模型Actor
         self.simplifier = simplifier
-        self.audio_generator = audio_generator
-        self.timestamp_adjuster = timestamp_adjuster
         self.mixer = mixer
         self.config = config
+        self.sample_rate = sample_rate
         self.max_speed = max_speed
 
         self._workers = []
 
     async def start_workers(self, task_state: TaskState):
         """
-        启动后续的异步 worker，只包含音频生成和混音部分。
-        时长对齐现在直接在push_sentences_to_pipeline中处理。
+        启动后续的异步 worker，只包含混音部分。
+        时长对齐和音频生成现在直接在push_sentences_to_pipeline中处理。
         """
         self.logger.info(f"[PipelineScheduler] start_workers -> TaskID={task_state.task_id}")
         self._workers = [
-            # 移除了_duration_align_worker
-            asyncio.create_task(self._audio_generation_worker(task_state)),
+            # 移除了_audio_generation_worker，只保留_mixing_worker
             asyncio.create_task(self._mixing_worker(task_state))
         ]
 
     async def stop_workers(self, task_state: TaskState):
         """
-        停止所有 worker，通过向 audio_gen_queue 发送 None 信号。
+        停止所有 worker，通过向 mixing_queue 发送 None 信号。
         """
         self.logger.info(f"[PipelineScheduler] stop_workers -> TaskID={task_state.task_id}")
-        await task_state.audio_gen_queue.put(None)
+        await task_state.mixing_queue.put(None)
         await asyncio.gather(*self._workers, return_exceptions=True)
         self.logger.info(f"[PipelineScheduler] 所有Worker已结束 -> TaskID={task_state.task_id}")
         
@@ -68,25 +67,21 @@ class PipelineScheduler:
 
     async def cleanup_resources(self, task_state: TaskState):
         """
-        清理任务相关的资源，但保留说话人特征
+        清理任务相关的资源，但保留说话人特征（可重用）
         """
-        from utils import concurrency
-        
+        self.logger.info(f"[PipelineScheduler] cleanup_resources -> TaskID={task_state.task_id}")
         try:
-            # 使用concurrency.run_sync调用Actor方法
-            await concurrency.run_sync(
-                lambda: ray.get(self.model_in_actor.cosyvoice_actor.cleanup_feature_cache.remote(
-                    cache_ids=None,  # 清理所有缓存
-                    skip_speaker_features=True  # 跳过说话人特征
-                ))
-            )
+            # 清理各种特征缓存，但保留说话人特征
+            await ray.get(self.cosyvoice_actor.cleanup_text_features.remote())
+            await ray.get(self.cosyvoice_actor.cleanup_tts_tokens.remote())
+            await ray.get(self.cosyvoice_actor.cleanup_processed_audio.remote())
             self.logger.info(f"[PipelineScheduler] 已清理资源（保留说话人特征） -> TaskID={task_state.task_id}")
         except Exception as e:
             self.logger.error(f"[PipelineScheduler] 清理资源失败: {e} -> TaskID={task_state.task_id}")
 
     async def push_sentences_to_pipeline(self, task_state: TaskState, sentences: List[Sentence]):
         """
-        将句子推送到流水线，使用 Ray 的依赖传递执行翻译、模型输入、TTS Token生成和时长对齐，最后放入 audio_gen_queue。
+        将句子推送到流水线，使用 Ray 的依赖传递执行翻译、模型输入、TTS Token生成、时长对齐和音频生成，最后放入 mixing_queue。
         """
         self.logger.debug(f"[push_sentences_to_pipeline] 处理 {len(sentences)} 个句子, TaskID={task_state.task_id}")
         
@@ -105,47 +100,52 @@ class PipelineScheduler:
                 # 使用 generate_tts_tokens task 处理模型输入后的句子
                 self.logger.info(f"TTS token生成开始")
                 tts_token_ref = generate_tts_tokens.remote(
-                    modelin_ref,  # 直接传递引用，不使用ray.get()
+                    modelin_ref,  # 参数名已改为sentences，但这里仍传递modelin_ref引用
                     self.cosyvoice_actor
                 )
                 
                 # 直接创建时长对齐任务，传递TTS token生成任务的引用
                 self.logger.info(f"创建时长对齐任务")
                 aligned_ref = align_durations.remote(
-                    tts_token_ref,
+                    tts_token_ref,  # 参数名已改为sentences，但这里仍传递tts_token_ref引用
                     self.simplifier,
                     self.model_in_actor,
                     self.cosyvoice_actor,
                     self.max_speed
                 )
                 
-                # 获取时长对齐任务结果
-                aligned_batch = ray.get(aligned_ref)
-                self.logger.info(f"时长对齐任务完成: {len(aligned_batch) if aligned_batch else 0}个句子")
+                # 直接创建音频生成任务，传递时长对齐任务的引用
+                self.logger.info(f"创建音频生成任务")
+                audio_ref = generate_audio.remote(
+                    aligned_ref,  # 直接传递aligned_ref引用
+                    self.cosyvoice_actor,
+                    self.sample_rate
+                )
                 
-                # 放入音频生成队列
-                await task_state.audio_gen_queue.put(aligned_batch)
+                # 创建时间戳调整任务，传递音频生成任务的引用
+                self.logger.info(f"创建时间戳调整任务")
+                timestamp_ref = adjust_timestamps.remote(
+                    audio_ref,  # 直接传递audio_ref引用
+                    self.sample_rate,  # 直接使用sample_rate，不再需要timestamp_adjuster
+                    task_state.current_time
+                )
+                
+                # 获取时间戳调整任务结果
+                sentences_with_timestamps = ray.get(timestamp_ref)
+                
+                # 更新当前时间（使用最后一个句子的结束时间）
+                if sentences_with_timestamps:
+                    last_sentence = sentences_with_timestamps[-1]
+                    task_state.current_time = last_sentence.adjusted_start + last_sentence.adjusted_duration
+                
+                self.logger.info(f"时间戳调整任务完成: {len(sentences_with_timestamps) if sentences_with_timestamps else 0}个句子")
+                
+                # 直接放入混音队列
+                await task_state.mixing_queue.put(sentences_with_timestamps)
 
     # ------------------------------
     # 后续 Worker 
     # ------------------------------
-
-    @worker_decorator(
-        input_queue_attr='audio_gen_queue',
-        next_queue_attr='mixing_queue',
-        worker_name='音频生成Worker'
-    )
-    async def _audio_generation_worker(self, sentences_batch: List[Sentence], task_state: TaskState):
-        if not sentences_batch:
-            return
-        self.logger.debug(f"[音频生成Worker] 收到 {len(sentences_batch)} 句子, TaskID={task_state.task_id}")
-
-        await self.audio_generator.vocal_audio_maker(sentences_batch)
-        task_state.current_time = self.timestamp_adjuster.update_timestamps(sentences_batch, start_time=task_state.current_time)
-        valid = self.timestamp_adjuster.validate_timestamps(sentences_batch)
-        if not valid:
-            self.logger.warning(f"[音频生成Worker] 检测到时间戳不连续, TaskID={task_state.task_id}")
-        return sentences_batch
 
     @worker_decorator(
         input_queue_attr='mixing_queue',

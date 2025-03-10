@@ -3,12 +3,12 @@ import ray
 import torch
 
 @ray.remote(num_cpus=0.1)
-def align_durations(tts_token_ref, simplifier=None, model_in_actor=None, cosyvoice_actor=None, max_speed=1.1):
+def align_durations(sentences, simplifier=None, model_in_actor=None, cosyvoice_actor=None, max_speed=1.1):
     """
     对句子进行时长对齐处理（Ray Task版本）
     
     Args:
-        tts_token_ref: TTS token生成任务的引用或句子列表
+        sentences: 句子列表或句子列表的ObjectRef
         simplifier: 简化器Actor引用
         model_in_actor: 模型输入Actor引用
         cosyvoice_actor: CosyVoice模型Actor引用
@@ -19,9 +19,6 @@ def align_durations(tts_token_ref, simplifier=None, model_in_actor=None, cosyvoi
     """
     logger = logging.getLogger("duration_aligner")
     
-    # 获取输入句子
-    sentences = ray.get(tts_token_ref) if not isinstance(tts_token_ref, list) else tts_token_ref
-    
     if not sentences:
         logger.warning("align_durations: 收到空的句子列表")
         return sentences
@@ -30,7 +27,7 @@ def align_durations(tts_token_ref, simplifier=None, model_in_actor=None, cosyvoi
     
     try:
         # 第一次对齐
-        sentences = _align_batch(sentences, logger)
+        sentences = _align_batch(sentences)
         
         # 查找语速过快的句子
         fast_indices = [i for i, sentence in enumerate(sentences) if sentence.speed > max_speed]
@@ -43,28 +40,34 @@ def align_durations(tts_token_ref, simplifier=None, model_in_actor=None, cosyvoi
             fast_sentences = [sentences[idx] for idx in fast_indices]
             
             # 1. 使用TranslatorActor对语速过快的句子进行精简
-            simplified_sentences = None
-            for batch_ref in ray.get(simplifier.simplify_sentences.remote(
+            simplified_ref = None
+            for simplified_ref in simplifier.simplify_sentences.remote(
                 fast_sentences,
                 target_speed=max_speed
-            )):
-                simplified_sentences = batch_ref
+            ):
+                pass  # 获取最后一个引用
             
-            if simplified_sentences:
+            if simplified_ref:
                 # 2. 使用model_in_actor处理简化后的句子
                 refined_sentences = []
                 
-                for batch_ref in ray.get(model_in_actor.modelin_maker.remote(
-                    simplified_sentences,
+                # 直接传递simplified_ref引用
+                for modelined_ref in model_in_actor.modelin_maker.remote(
+                    simplified_ref,
                     reuse_speaker=True,
                     batch_size=3
-                )):
+                ):
                     # 3. 使用generate_tts_tokens生成新的TTS token
                     from core.tts_token_gener import generate_tts_tokens
-                    processed_batch = ray.get(generate_tts_tokens.remote(
-                        batch_ref,
+                    
+                    # 直接传递modelined_ref引用
+                    tts_token_ref = generate_tts_tokens.remote(
+                        modelined_ref,
                         cosyvoice_actor
-                    ))
+                    )
+                    
+                    # 这里需要获取结果，因为我们需要合并多个批次的结果
+                    processed_batch = ray.get(tts_token_ref)
                     refined_sentences.extend(processed_batch)
                 
                 # 4. 创建新的句子列表，替换精简后的句子
@@ -80,7 +83,7 @@ def align_durations(tts_token_ref, simplifier=None, model_in_actor=None, cosyvoi
                     
                     # 对更新后的句子再次对齐
                     logger.info("精简完成，进行最终对齐...")
-                    result_sentences = _align_batch(result_sentences, logger)
+                    result_sentences = _align_batch(result_sentences)
                     return result_sentences
             
             logger.warning("精简过程未能生成有效句子，保持原句子")
@@ -92,7 +95,7 @@ def align_durations(tts_token_ref, simplifier=None, model_in_actor=None, cosyvoi
         logger.error(f"时长对齐处理失败: {e}")
         raise
 
-def _align_batch(sentences, logger):
+def _align_batch(sentences):
     """
     同批次句子进行时长对齐的内部实现
     """
@@ -143,11 +146,5 @@ def _align_batch(sentences, logger):
 
         s.diff = s.duration - s.adjusted_duration
         current_time += s.adjusted_duration
-
-        logger.info(
-            f"对齐后: {s.trans_text}, duration: {s.duration}, "
-            f"target_duration: {s.target_duration}, diff: {s.diff}, "
-            f"speed: {s.speed}, silence_duration: {s.silence_duration}"
-        )
     
     return aligned_sentences

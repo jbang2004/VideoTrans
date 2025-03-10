@@ -12,8 +12,8 @@ from core.asr_model_actor import SenseAutoModelActor
 from core.cosyvoice_model_actor import CosyVoiceModelActor
 from core.clear_voice_actor import ClearVoiceActor
 from core.translation.translator_actor import TranslatorActor
-from core.audio_gener import AudioGenerator
-from core.timeadjust.timestamp_adjuster import TimestampAdjuster
+from core.audio_gener import generate_audio
+from core.timeadjust.timestamp_adjuster import adjust_timestamps
 from core.media_mixer import MediaMixer
 from utils.media_utils import MediaUtils
 from pipeline_scheduler import PipelineScheduler
@@ -76,10 +76,8 @@ class ViTranslator:
 
         # 其他核心工具
         self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
-        self.audio_generator = AudioGenerator(self.cosyvoice_model_actor, sample_rate=self.target_sr)
 
         # 初始化其他组件（移除了DurationAligner）
-        self.timestamp_adjuster = TimestampAdjuster(sample_rate=self.target_sr)
         self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr)
 
         self.ffmpeg_tool = FFmpegTool()
@@ -119,10 +117,9 @@ class ViTranslator:
             model_in_actor=self.model_in_actor,
             cosyvoice_actor=self.cosyvoice_model_actor,
             simplifier=self.translator_actor,  # 使用translator_actor作为simplifier
-            audio_generator=self.audio_generator,
-            timestamp_adjuster=self.timestamp_adjuster,
             mixer=self.mixer,
             config=self.config,
+            sample_rate=self.target_sr,  # 使用target_sr作为采样率
             max_speed=1.2  # 设置最大语速阈值
         )
         await pipeline.start_workers(task_state)
