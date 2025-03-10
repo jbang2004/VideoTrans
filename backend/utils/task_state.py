@@ -14,7 +14,6 @@ class TaskState:
     task_id: str
     video_path: str
     task_paths: TaskPaths
-    hls_manager: Any = None
     target_language: str = "zh"
 
     # 已处理到的句子计数

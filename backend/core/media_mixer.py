@@ -9,6 +9,7 @@ import asyncio
 from contextlib import ExitStack
 from tempfile import NamedTemporaryFile
 from typing import List
+from pathlib import Path
 
 import pysubs2  # 用于简化字幕处理
 
@@ -29,7 +30,7 @@ class MediaMixer:
       - 基于 pysubs2 生成 .ass 字幕(“YouTube风格”)
       - 按语言自动决定单行最大长度
     """
-    def __init__(self, config: Config, sample_rate: int):
+    def __init__(self, config: Config, sample_rate: int, ffmpeg_tool=None):
         self.config = config
         self.sample_rate = sample_rate
 
@@ -42,7 +43,8 @@ class MediaMixer:
         # 全局缓存, 可按需使用
         self.full_audio_buffer = np.array([], dtype=np.float32)
 
-        self.ffmpeg_tool = FFmpegTool()
+        # 使用传入的ffmpeg_tool或创建新的
+        self.ffmpeg_tool = ffmpeg_tool or FFmpegTool()
 
     @handle_errors(logger)
     async def mixed_media_maker(
@@ -133,6 +135,76 @@ class MediaMixer:
 
         logger.warning("mixed_media_maker: 本片段无video_path可用")
         return False
+
+    @handle_errors(logger)
+    async def process_and_add_segment(
+        self,
+        sentences_batch: List[Sentence],
+        task_state: TaskState,
+        hls_manager=None
+    ) -> bool:
+        """
+        整合了_mixing_worker的逻辑，处理一批句子并添加到HLS流中。
+        
+        Args:
+            sentences_batch: 要处理的句子批次
+            task_state: 任务状态对象
+            hls_manager: HLS管理器实例（可选）
+            
+        Returns:
+            处理是否成功
+        """
+        if not sentences_batch:
+            logger.warning("process_and_add_segment: 收到空的句子列表")
+            return False
+            
+        try:
+            # 获取分段索引用于日志
+            seg_index = sentences_batch[0].segment_index
+            logger.info(f"[MediaMixer] 开始处理分段 {seg_index}, 批次 {task_state.batch_counter}, 句子数 {len(sentences_batch)}")
+            
+            # 生成输出路径
+            output_path = task_state.task_paths.segments_dir / f"segment_{task_state.batch_counter}.mp4"
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 调用混音处理
+            start_time = asyncio.get_event_loop().time()
+            success = await self.mixed_media_maker(
+                sentences=sentences_batch,
+                task_state=task_state,
+                output_path=str(output_path),
+                generate_subtitle=task_state.generate_subtitle
+            )
+            processing_time = asyncio.get_event_loop().time() - start_time
+            
+            # 如果成功且有HLS管理器，添加到HLS流
+            if success:
+                if hls_manager:
+                    hls_start_time = asyncio.get_event_loop().time()
+                    await hls_manager.add_segment(str(output_path), task_state.batch_counter)
+                    hls_time = asyncio.get_event_loop().time() - hls_start_time
+                    logger.info(
+                        f"[MediaMixer] 分段 {task_state.batch_counter} 已加入 HLS, "
+                        f"处理耗时: {processing_time:.2f}s, HLS耗时: {hls_time:.2f}s, "
+                        f"TaskID={task_state.task_id}"
+                    )
+                else:
+                    logger.info(
+                        f"[MediaMixer] 分段 {task_state.batch_counter} 处理完成 (无HLS), "
+                        f"处理耗时: {processing_time:.2f}s, TaskID={task_state.task_id}"
+                    )
+                
+                # 记录已合并的段落
+                task_state.merged_segments.append(str(output_path))
+                task_state.batch_counter += 1
+                return True
+            else:
+                logger.error(f"[MediaMixer] 分段 {task_state.batch_counter} 处理失败, TaskID={task_state.task_id}")
+                return False
+                
+        except Exception as e:
+            logger.exception(f"[MediaMixer] 处理分段时发生异常: {str(e)}, TaskID={task_state.task_id}")
+            return False
 
     # -------------------------------------------------------------------------
     # 辅助函数: 做音频淡入淡出
@@ -510,3 +582,75 @@ class MediaMixer:
         """
         self.full_audio_buffer = np.array([], dtype=np.float32)
         logger.debug("MediaMixer 已重置 full_audio_buffer")
+
+    @handle_errors(logger)
+    async def concat_segments(self, task_state: TaskState, hls_manager=None) -> Path:
+        """
+        合并所有处理后的视频分段，生成最终视频文件。
+        
+        Args:
+            task_state: 任务状态对象
+            hls_manager: HLS管理器实例（可选）
+            
+        Returns:
+            最终视频文件的路径，如果失败则返回None
+        """
+        if not task_state.merged_segments:
+            logger.warning(f"[MediaMixer] 无可合并的视频分段, TaskID={task_state.task_id}")
+            return None
+            
+        try:
+            logger.info(f"[MediaMixer] 开始合并 {len(task_state.merged_segments)} 个视频分段, TaskID={task_state.task_id}")
+            
+            # 如果有HLS管理器，确保播放列表已完成
+            if hls_manager and hls_manager.has_segments:
+                await hls_manager.finalize_playlist()
+                logger.info(f"[MediaMixer] HLS播放列表已完成, TaskID={task_state.task_id}")
+            
+            # 创建最终输出路径
+            final_path = task_state.task_paths.output_dir / f"final_{task_state.task_id}.mp4"
+            final_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 创建合并列表文件
+            list_txt = final_path.parent / f"concat_{task_state.task_id}.txt"
+            with open(list_txt, 'w', encoding='utf-8') as f:
+                for seg_mp4 in task_state.merged_segments:
+                    abs_path = Path(seg_mp4).resolve()
+                    f.write(f"file '{abs_path}'\n")
+            
+            # 执行合并命令
+            start_time = asyncio.get_event_loop().time()
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(list_txt),
+                "-c", "copy",
+                str(final_path)
+            ]
+            
+            # 使用ffmpeg_tool执行命令
+            success = await self.ffmpeg_tool.run_command(cmd)
+            processing_time = asyncio.get_event_loop().time() - start_time
+            
+            if success and final_path.exists():
+                logger.info(
+                    f"[MediaMixer] 视频分段合并成功, 耗时: {processing_time:.2f}s, "
+                    f"输出文件: {final_path}, TaskID={task_state.task_id}"
+                )
+                
+                # 可选：清理临时文件
+                try:
+                    list_txt.unlink(missing_ok=True)
+                    logger.debug(f"[MediaMixer] 已删除临时合并列表文件: {list_txt}")
+                except Exception as e:
+                    logger.warning(f"[MediaMixer] 清理临时文件失败: {e}")
+                
+                return final_path
+            else:
+                logger.error(f"[MediaMixer] 视频分段合并失败, TaskID={task_state.task_id}")
+                return None
+                
+        except Exception as e:
+            logger.exception(f"[MediaMixer] 合并视频分段时发生异常: {str(e)}, TaskID={task_state.task_id}")
+            return None

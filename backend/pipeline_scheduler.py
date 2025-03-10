@@ -28,7 +28,8 @@ class PipelineScheduler:
         mixer,
         config,
         sample_rate=None,  # 采样率，如果为None则使用cosyvoice_actor的采样率
-        max_speed=1.1      # 最大语速阈值
+        max_speed=1.1,      # 最大语速阈值
+        hls_manager=None    # HLS管理器实例（可选）
     ):
         self.logger = logging.getLogger(__name__)
         self.translator_actor = translator_actor  # TranslatorActor引用
@@ -39,6 +40,7 @@ class PipelineScheduler:
         self.config = config
         self.sample_rate = sample_rate
         self.max_speed = max_speed
+        self.hls_manager = hls_manager
 
         self._workers = []
 
@@ -157,20 +159,11 @@ class PipelineScheduler:
         seg_index = sentences_batch[0].segment_index
         self.logger.debug(f"[混音Worker] 收到 {len(sentences_batch)} 句, segment={seg_index}, TaskID={task_state.task_id}")
 
-        output_path = task_state.task_paths.segments_dir / f"segment_{task_state.batch_counter}.mp4"
-
-        success = await self.mixer.mixed_media_maker(
-            sentences=sentences_batch,
+        # 直接调用mixer的process_and_add_segment方法，简化逻辑
+        await self.mixer.process_and_add_segment(
+            sentences_batch=sentences_batch,
             task_state=task_state,
-            output_path=str(output_path),
-            generate_subtitle=task_state.generate_subtitle
+            hls_manager=self.hls_manager if hasattr(self, 'hls_manager') else None
         )
-
-        if success and task_state.hls_manager:
-            await task_state.hls_manager.add_segment(str(output_path), task_state.batch_counter)
-            self.logger.info(f"[混音Worker] 分段 {task_state.batch_counter} 已加入 HLS, TaskID={task_state.task_id}")
-
-            task_state.merged_segments.append(str(output_path))
-
-        task_state.batch_counter += 1
+        
         return None

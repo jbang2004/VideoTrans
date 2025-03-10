@@ -74,13 +74,15 @@ class ViTranslator:
             name="model_in"
         ).remote(self.cosyvoice_model_actor)
 
+        # 创建FFmpegTool实例，用于共享
+        self.ffmpeg_tool = FFmpegTool()
+
         # 其他核心工具
         self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
 
-        # 初始化其他组件（移除了DurationAligner）
-        self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr)
+        # 初始化其他组件，传入ffmpeg_tool
+        self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr, ffmpeg_tool=self.ffmpeg_tool)
 
-        self.ffmpeg_tool = FFmpegTool()
         self.logger.info("[ViTranslator] 初始化完成")
 
     async def trans_video(
@@ -101,12 +103,11 @@ class ViTranslator:
             f"[trans_video] 开始处理视频: {video_path}, task_id={task_id}, target_language={target_language}, generate_subtitle={generate_subtitle}"
         )
 
-        # 初始化任务状态 + 管线
+        # 初始化任务状态，不再包含hls_manager
         task_state = TaskState(
             task_id=task_id,
             video_path=video_path,
             task_paths=task_paths,
-            hls_manager=hls_manager,
             target_language=target_language,
             # =========== (新增) ===========
             generate_subtitle=generate_subtitle
@@ -120,7 +121,8 @@ class ViTranslator:
             mixer=self.mixer,
             config=self.config,
             sample_rate=self.target_sr,  # 使用target_sr作为采样率
-            max_speed=1.2  # 设置最大语速阈值
+            max_speed=1.2,  # 设置最大语速阈值
+            hls_manager=hls_manager  # 将hls_manager作为参数传递
         )
         await pipeline.start_workers(task_state)
 
@@ -143,14 +145,12 @@ class ViTranslator:
             # 4. 所有段结束后，停止流水线
             await pipeline.stop_workers(task_state)
 
-            # 5. 如果有 HLS Manager，标记完成
-            if hls_manager and hls_manager.has_segments:
-                await hls_manager.finalize_playlist()
-                self.logger.info(f"[trans_video] 任务ID={task_id} 完成并已生成HLS。")
+            # 5. 如果有 HLS Manager，标记完成 - 现在在concat_segments中处理
+            # 不再需要在这里处理hls_manager.finalize_playlist
 
             # 6. 现在合并 `_mixing_worker` 产出的所有 segment_xxx.mp4
             #    并在成功后自动删除它们
-            final_video_path = await self._concat_segment_mp4s(task_state)
+            final_video_path = await self._concat_segment_mp4s(task_state, hls_manager)
             if final_video_path is not None and final_video_path.exists():
                 self.logger.info(f"翻译后的完整视频已生成: {final_video_path}")
                 
@@ -219,50 +219,11 @@ class ViTranslator:
 
         await pipeline.push_sentences_to_pipeline(task_state, asr_result)
 
-    async def _concat_segment_mp4s(self, task_state: TaskState) -> Path:
+    async def _concat_segment_mp4s(self, task_state: TaskState, hls_manager=None) -> Path:
         """
         把 pipeline_scheduler _mixing_worker 产出的所有 segment_xxx.mp4
         用 ffmpeg concat 合并成 final_{task_state.task_id}.mp4
         如果成功再删除这些小片段。
         """
-        if not task_state.merged_segments:
-            self.logger.warning("无可合并的 segment MP4, 可能任务中断或没有生成混音段.")
-            return None
-
-        final_path = task_state.task_paths.output_dir / f"final_{task_state.task_id}.mp4"
-        final_path.parent.mkdir(parents=True, exist_ok=True)
-
-        list_txt = final_path.parent / f"concat_{task_state.task_id}.txt"
-        with open(list_txt, 'w', encoding='utf-8') as f:
-            for seg_mp4 in task_state.merged_segments:
-                abs_path = Path(seg_mp4).resolve()
-                f.write(f"file '{abs_path}'\n")
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(list_txt),
-            "-c", "copy",
-            str(final_path)
-        ]
-        try:
-            self.logger.info(f"开始合并 {len(task_state.merged_segments)} 个MP4 -> {final_path}")
-            await self.ffmpeg_tool.run_command(cmd)
-            self.logger.info(f"合并完成: {final_path}")
-
-            # 合并成功后，自动删除这些 segment
-            for seg_mp4 in task_state.merged_segments:
-                try:
-                    Path(seg_mp4).unlink(missing_ok=True)
-                    self.logger.debug(f"已删除分段文件: {seg_mp4}")
-                except Exception as ex:
-                    self.logger.warning(f"删除分段文件 {seg_mp4} 失败: {ex}")
-
-            return final_path
-        except Exception as e:
-            self.logger.error(f"ffmpeg concat 失败: {e}")
-            return None
-        finally:
-            if list_txt.exists():
-                list_txt.unlink()
+        # 使用mixer的concat_segments方法，传入hls_manager
+        return await self.mixer.concat_segments(task_state, hls_manager)
