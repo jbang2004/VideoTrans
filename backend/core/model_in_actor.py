@@ -7,9 +7,6 @@ from typing import List, Optional, AsyncGenerator
 import asyncio
 import ray
 
-# [NEW] 统一使用 concurrency.run_sync
-from utils import concurrency
-
 @ray.remote  # 移除GPU分配
 class ModelInActor:
     def __init__(self, cosyvoice_model_actor):
@@ -37,7 +34,7 @@ class ModelInActor:
             tts_text = sentence.trans_text
             
             # 调用Actor提取文本token并缓存
-            text_feature_id, normalized_segments = await concurrency.run_sync(
+            text_feature_id, normalized_segments = await asyncio.to_thread(
                 lambda: ray.get(self.cosyvoice_actor.extract_text_tokens_and_cache.remote(tts_text))
             )
             
@@ -65,14 +62,14 @@ class ModelInActor:
                     audio = sentence.audio
                     
                     # 调用Actor处理音频并缓存
-                    processed_audio_id = await concurrency.run_sync(
+                    processed_audio_id = await asyncio.to_thread(
                         lambda: ray.get(self.cosyvoice_actor.process_and_cache_audio.remote(
                             audio, max_val=self.max_val
                         ))
                     )
                     
                     # 调用Actor提取说话人特征并缓存
-                    speaker_feature_id = await concurrency.run_sync(
+                    speaker_feature_id = await asyncio.to_thread(
                         lambda: ray.get(self.cosyvoice_actor.extract_speaker_features_and_cache.remote(processed_audio_id))
                     )
                     

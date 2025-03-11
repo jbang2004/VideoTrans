@@ -17,8 +17,8 @@ from .sentence_tools import get_sentences
 from funasr.utils.vad_utils import slice_padding_audio_samples
 from funasr.utils.load_utils import load_audio_text_image_video
 
-# [MODIFIED] 新增以下导入，用于在 async 函数中包装同步调用
-from utils import concurrency
+# 新增以下导入，用于在 async 函数中包装同步调用
+import asyncio
 from functools import partial
 
 class SenseAutoModel(BaseAutoModel):
@@ -162,7 +162,7 @@ class SenseAutoModel(BaseAutoModel):
                         result[k] += v
         return result
 
-    # [MODIFIED] 统一使用 concurrency.run_sync 来执行 self.generate
+    # [MODIFIED] 统一使用 asyncio.to_thread 来执行 self.generate
     async def generate_async(self, input, input_len=None, **cfg):
         func = partial(self.generate, input, input_len, **cfg)
-        return await concurrency.run_sync(func)
+        return await asyncio.to_thread(func)

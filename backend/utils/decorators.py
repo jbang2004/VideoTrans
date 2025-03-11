@@ -9,26 +9,6 @@ T = TypeVar('T')
 WorkerResult = Union[T, AsyncGenerator[T, None]]
 WorkerMode = Literal['base', 'stream']
 
-def handle_errors(custom_logger: Optional[logging.Logger] = None) -> Callable:
-    """错误处理装饰器。可应用于需要统一捕获日志的异步函数。"""
-    def decorator(func: Callable) -> Callable:
-        @functools.wraps(func)
-        async def wrapper(*args, **kwargs) -> Any:
-            # 如果当前对象有 logger 属性则使用，否则用传入的或全局 logger
-            actual_logger = custom_logger if custom_logger else (getattr(args[0], 'logger', logger) if args else logger)
-            start_time = time.time()
-            try:
-                result = await func(*args, **kwargs)
-                elapsed = time.time() - start_time
-                actual_logger.debug(f"{func.__name__} 正常结束，耗时 {elapsed:.2f}s")
-                return result
-            except Exception as e:
-                elapsed = time.time() - start_time
-                actual_logger.error(f"{func.__name__} 执行出错，耗时 {elapsed:.2f}s, 错误: {e}", exc_info=True)
-                raise
-        return wrapper
-    return decorator
-
 def worker_decorator(
     input_queue_attr: str,
     next_queue_attr: Optional[str] = None,

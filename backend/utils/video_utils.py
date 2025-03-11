@@ -13,7 +13,7 @@ from utils.subtitle_utils import generate_subtitles_for_segment
 
 logger = logging.getLogger(__name__)
 
-async def add_video_segment(
+def add_video_segment(
     video_path: str,
     start_time: float,
     duration: float,
@@ -56,22 +56,21 @@ async def add_video_segment(
         end_time = start_time + duration
 
         # 1) 截取视频 (无音轨)
-        await ffmpeg_tool.cut_video_track(
+        asyncio.run(ffmpeg_tool.cut_video_track(
             input_path=video_path,
             output_path=temp_video.name,
             start=start_time,
             end=end_time
-        )
+        ))
 
         # 2) 写合成音频到临时文件
-        await asyncio.to_thread(sf.write, temp_audio.name, audio_data, sample_rate)
+        sf.write(temp_audio.name, audio_data, sample_rate)
 
         # 3) 如果需要字幕，则构建 .ass 并用 ffmpeg "烧"进去
         if generate_subtitle:
             temp_ass = stack.enter_context(NamedTemporaryFile(suffix='.ass'))
             # 调用生成字幕的函数
-            await asyncio.to_thread(
-                generate_subtitles_for_segment,
+            generate_subtitles_for_segment(
                 sentences,
                 start_time * 1000,   # segment_start_ms
                 temp_ass.name,
@@ -79,19 +78,19 @@ async def add_video_segment(
             )
 
             # 生成带字幕的视频
-            await ffmpeg_tool.cut_video_with_subtitles_and_audio(
+            asyncio.run(ffmpeg_tool.cut_video_with_subtitles_and_audio(
                 input_video_path=temp_video.name,
                 input_audio_path=temp_audio.name,
                 subtitles_path=temp_ass.name,
                 output_path=output_path
-            )
+            ))
         else:
             # 不加字幕，仅合并音频
-            await ffmpeg_tool.cut_video_with_audio(
+            asyncio.run(ffmpeg_tool.cut_video_with_audio(
                 input_video_path=temp_video.name,
                 input_audio_path=temp_audio.name,
                 output_path=output_path
-            )
+            ))
 
 async def concat_video_segments(
     task_state: Any,

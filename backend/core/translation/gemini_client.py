@@ -1,13 +1,11 @@
 import logging
 from typing import Dict
+import asyncio
 
 import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 
 from json_repair import loads
-
-# 引入统一线程管理，与 deepseek_client 用法一致
-from utils import concurrency
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +28,7 @@ class GeminiClient:
         直接调用 Gemini API，要求返回 JSON 格式的内容。
         """
         try:
-            response = await concurrency.run_sync(
+            response = await asyncio.to_thread(
                 self.model.generate_content,
                 [system_prompt, user_prompt],
                 generation_config=GenerationConfig(temperature=0.3)

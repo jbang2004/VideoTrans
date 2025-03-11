@@ -6,15 +6,11 @@ import os
 from typing import List, Dict, Any
 from pathlib import Path
 import ray
-import asyncio
 
 from core.asr_model_actor import SenseAutoModelActor
 from core.cosyvoice_model_actor import CosyVoiceModelActor
 from core.clear_voice_actor import ClearVoiceActor
 from core.translation.translator_actor import TranslatorActor
-from core.audio_gener import generate_audio
-from core.timeadjust.timestamp_adjuster import adjust_timestamps
-from core.media_mixer import MediaMixer
 from utils.media_utils import MediaUtils
 from pipeline_scheduler import PipelineScheduler
 from utils.task_storage import TaskPaths
@@ -23,6 +19,7 @@ from utils.task_state import TaskState
 
 from utils.ffmpeg_utils import FFmpegTool
 from core.model_in_actor import ModelInActor
+from utils.video_utils import concat_video_segments
 
 logger = logging.getLogger(__name__)
 
@@ -80,9 +77,6 @@ class ViTranslator:
         # 其他核心工具
         self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
 
-        # 初始化其他组件，传入ffmpeg_tool
-        self.mixer = MediaMixer(config=self.config, sample_rate=self.target_sr, ffmpeg_tool=self.ffmpeg_tool)
-
         self.logger.info("[ViTranslator] 初始化完成")
 
     async def trans_video(
@@ -92,7 +86,6 @@ class ViTranslator:
         task_paths: TaskPaths,
         hls_manager=None,
         target_language="zh",
-        # =========== (新增) ===========
         generate_subtitle: bool = False,
     ) -> Dict[str, Any]:
         """
@@ -109,7 +102,6 @@ class ViTranslator:
             video_path=video_path,
             task_paths=task_paths,
             target_language=target_language,
-            # =========== (新增) ===========
             generate_subtitle=generate_subtitle
         )
 
@@ -118,7 +110,6 @@ class ViTranslator:
             model_in_actor=self.model_in_actor,
             cosyvoice_actor=self.cosyvoice_model_actor,
             simplifier=self.translator_actor,  # 使用translator_actor作为simplifier
-            mixer=self.mixer,
             config=self.config,
             sample_rate=self.target_sr,  # 使用target_sr作为采样率
             max_speed=1.2,  # 设置最大语速阈值
@@ -145,11 +136,7 @@ class ViTranslator:
             # 4. 所有段结束后，停止流水线
             await pipeline.stop_workers(task_state)
 
-            # 5. 如果有 HLS Manager，标记完成 - 现在在concat_segments中处理
-            # 不再需要在这里处理hls_manager.finalize_playlist
-
-            # 6. 现在合并 `_mixing_worker` 产出的所有 segment_xxx.mp4
-            #    并在成功后自动删除它们
+            # 5. 合并所有处理后的视频段落
             final_video_path = await self._concat_segment_mp4s(task_state, hls_manager)
             if final_video_path is not None and final_video_path.exists():
                 self.logger.info(f"翻译后的完整视频已生成: {final_video_path}")
@@ -158,11 +145,6 @@ class ViTranslator:
                 import torch
                 torch.cuda.empty_cache()
                 self.logger.info("调用 torch.cuda.empty_cache()，已释放未使用的 GPU 显存")
-                
-                # 如果有临时目录需要清理（例如 task_state.task_paths 里存放了临时文件），可以进行删除：
-                # import shutil
-                # shutil.rmtree(task_state.task_paths.temp_dir, ignore_errors=True)
-                # self.logger.info("已清理视频处理临时目录")
 
                 return {
                     "status": "success",
@@ -225,5 +207,14 @@ class ViTranslator:
         用 ffmpeg concat 合并成 final_{task_state.task_id}.mp4
         如果成功再删除这些小片段。
         """
-        # 使用mixer的concat_segments方法，传入hls_manager
-        return await self.mixer.concat_segments(task_state, hls_manager)
+        # 创建最终输出路径
+        final_path = task_state.task_paths.output_dir / f"final_{task_state.task_id}.mp4"
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 直接使用video_utils中的concat_video_segments
+        return await concat_video_segments(
+            task_state=task_state,
+            output_path=final_path,
+            ffmpeg_tool=self.ffmpeg_tool,
+            hls_manager=hls_manager
+        )

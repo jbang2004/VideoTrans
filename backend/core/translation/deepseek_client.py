@@ -1,12 +1,10 @@
 # =========================== deepseek_client.py ===========================
 import json
 import logging
+import asyncio
 from openai import OpenAI
 from typing import Dict
 from json_repair import loads
-
-# [MODIFIED] 引入统一线程管理
-from utils import concurrency
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +29,7 @@ class DeepSeekClient:
         直接调用 DeepSeek API，要求返回 JSON 格式的内容。
         """
         try:
-            response = await concurrency.run_sync(
+            response = await asyncio.to_thread(
                 self.client.chat.completions.create,
                 model="deepseek-chat",
                 messages=[
