@@ -1,17 +1,11 @@
 # ---------------------------------------------------
-# backend/core/media_mixer.py (最终改进版)
+# backend/core/media_mixer.py (精简版)
 # ---------------------------------------------------
 import numpy as np
 import logging
-import soundfile as sf
-import os
 import asyncio
-from contextlib import ExitStack
-from tempfile import NamedTemporaryFile
-from typing import List
+from typing import List, Optional
 from pathlib import Path
-
-import pysubs2  # 用于简化字幕处理
 
 from utils.decorators import handle_errors
 from utils.ffmpeg_utils import FFmpegTool
@@ -30,23 +24,17 @@ class MediaMixer:
     支持:
       - 音频淡入淡出
       - 背景音乐混合
-      - 基于 pysubs2 生成 .ass 字幕(“YouTube风格”)
+      - 基于 pysubs2 生成 .ass 字幕("YouTube风格")
       - 按语言自动决定单行最大长度
     """
     def __init__(self, config: Config, sample_rate: int, ffmpeg_tool=None):
         self.config = config
         self.sample_rate = sample_rate
-
-        # 音量相关
         self.max_val = 1.0
         self.overlap = self.config.AUDIO_OVERLAP
         self.vocals_volume = self.config.VOCALS_VOLUME
         self.background_volume = self.config.BACKGROUND_VOLUME
-
-        # 全局缓存, 可按需使用
         self.full_audio_buffer = np.array([], dtype=np.float32)
-
-        # 使用传入的ffmpeg_tool或创建新的
         self.ffmpeg_tool = ffmpeg_tool or FFmpegTool()
 
     @handle_errors(logger)
@@ -60,15 +48,6 @@ class MediaMixer:
         """
         主入口: 处理一批句子的音频与视频，输出一段带音频的 MP4。
         根据 generate_subtitle 决定是否烧制字幕。
-
-        Args:
-            sentences: 本片段内的所有句子对象
-            task_state: 任务状态，内部包含 target_language 等
-            output_path: 生成的 MP4 文件路径
-            generate_subtitle: 是否在最终视频里烧制字幕
-
-        Returns:
-            True / False 表示成功或失败
         """
         if not sentences:
             logger.warning("mixed_media_maker: 收到空的句子列表")
@@ -80,69 +59,84 @@ class MediaMixer:
             logger.error(f"找不到分段 {segment_index} 对应的媒体文件信息")
             return False
 
-        # =========== (1) 拼接所有句子的合成音频 =============
+        # 1. 拼接所有句子的合成音频
+        full_audio = self._concat_audio_segments(sentences)
+        if len(full_audio) == 0:
+            logger.error("mixed_media_maker: 没有有效的合成音频数据")
+            return False
+
+        # 2. 计算时间参数
+        start_time, duration = self._calculate_time_params(sentences)
+
+        # 3. 背景音乐混合
+        background_audio_path = segment_files.get('background')
+        if background_audio_path:
+            full_audio = self._process_background_audio(
+                background_audio_path, start_time, duration, full_audio
+            )
+
+        # 4. 更新全局音频缓冲区
+        self.full_audio_buffer = np.concatenate((self.full_audio_buffer, full_audio))
+
+        # 5. 处理视频
+        video_path = segment_files.get('video')
+        if not video_path:
+            logger.warning("mixed_media_maker: 本片段无video_path可用")
+            return False
+            
+        await add_video_segment(
+            video_path=video_path,
+            start_time=start_time,
+            duration=duration,
+            audio_data=full_audio,
+            output_path=output_path,
+            sentences=sentences,
+            generate_subtitle=generate_subtitle,
+            task_state=task_state,
+            sample_rate=self.sample_rate,
+            ffmpeg_tool=self.ffmpeg_tool
+        )
+        return True
+
+    def _concat_audio_segments(self, sentences: List[Sentence]) -> np.ndarray:
+        """拼接所有句子的合成音频"""
         full_audio = np.array([], dtype=np.float32)
         for sentence in sentences:
             if sentence.generated_audio is not None:
                 audio_data = np.asarray(sentence.generated_audio, dtype=np.float32)
-                # 如果已经有前面累积的音频，做淡入淡出衔接
                 if len(full_audio) > 0:
                     audio_data = apply_fade_effect(audio_data, self.full_audio_buffer, self.overlap)
                 full_audio = np.concatenate((full_audio, audio_data))
             else:
                 logger.warning(
                     "句子音频生成失败: text=%r, UUID=%s",
-                    sentence.raw_text,  # 或 sentence.trans_text
+                    sentence.raw_text,
                     sentence.model_input.get("uuid", "unknown")
                 )
+        return full_audio
 
-        if len(full_audio) == 0:
-            logger.error("mixed_media_maker: 没有有效的合成音频数据")
-            return False
-
-        # 计算当前片段的起始时间和时长(秒)
+    def _calculate_time_params(self, sentences: List[Sentence]) -> tuple:
+        """计算时间参数"""
         start_time = 0.0
         if not sentences[0].is_first:
             start_time = (sentences[0].adjusted_start - sentences[0].segment_start * 1000) / 1000.0
-
         duration = sum(s.adjusted_duration for s in sentences) / 1000.0
+        return start_time, duration
 
-        # =========== (2) 背景音乐混合 (可选) =============
-        background_audio_path = segment_files['background']
-        if background_audio_path is not None:
-            full_audio = mix_with_background(
-                bg_path=background_audio_path,
-                start_time=start_time,
-                duration=duration,
-                audio_data=full_audio,
-                sample_rate=self.sample_rate,
-                vocals_volume=self.vocals_volume,
-                background_volume=self.background_volume
-            )
-            full_audio = normalize_audio(full_audio, self.max_val)
-
-        # (可按需储存到全局 mixer 缓存)
-        self.full_audio_buffer = np.concatenate((self.full_audio_buffer, full_audio))
-
-        # =========== (3) 如果有视频，就把音频合并到视频里 ============
-        video_path = segment_files['video']
-        if video_path:
-            await add_video_segment(
-                video_path=video_path,
-                start_time=start_time,
-                duration=duration,
-                audio_data=full_audio,
-                output_path=output_path,
-                sentences=sentences,
-                generate_subtitle=generate_subtitle,
-                task_state=task_state,  # 传入以获取 target_language
-                sample_rate=self.sample_rate,
-                ffmpeg_tool=self.ffmpeg_tool
-            )
-            return True
-
-        logger.warning("mixed_media_maker: 本片段无video_path可用")
-        return False
+    def _process_background_audio(
+        self, bg_path: str, start_time: float, duration: float, audio_data: np.ndarray
+    ) -> np.ndarray:
+        """处理背景音频"""
+        audio_data = mix_with_background(
+            bg_path=bg_path,
+            start_time=start_time,
+            duration=duration,
+            audio_data=audio_data,
+            sample_rate=self.sample_rate,
+            vocals_volume=self.vocals_volume,
+            background_volume=self.background_volume
+        )
+        return normalize_audio(audio_data, self.max_val)
 
     @handle_errors(logger)
     async def process_and_add_segment(
@@ -151,31 +145,21 @@ class MediaMixer:
         task_state: TaskState,
         hls_manager=None
     ) -> bool:
-        """
-        整合了_mixing_worker的逻辑，处理一批句子并添加到HLS流中。
-        
-        Args:
-            sentences_batch: 要处理的句子批次
-            task_state: 任务状态对象
-            hls_manager: HLS管理器实例（可选）
-            
-        Returns:
-            处理是否成功
-        """
+        """处理一批句子并添加到HLS流中"""
         if not sentences_batch:
             logger.warning("process_and_add_segment: 收到空的句子列表")
             return False
             
         try:
-            # 获取分段索引用于日志
             seg_index = sentences_batch[0].segment_index
-            logger.info(f"[MediaMixer] 开始处理分段 {seg_index}, 批次 {task_state.batch_counter}, 句子数 {len(sentences_batch)}")
+            batch_counter = task_state.batch_counter
+            logger.info(f"[MediaMixer] 开始处理分段 {seg_index}, 批次 {batch_counter}, 句子数 {len(sentences_batch)}")
             
             # 生成输出路径
-            output_path = task_state.task_paths.segments_dir / f"segment_{task_state.batch_counter}.mp4"
+            output_path = task_state.task_paths.segments_dir / f"segment_{batch_counter}.mp4"
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # 调用混音处理
+            # 处理音视频
             start_time = asyncio.get_event_loop().time()
             success = await self.mixed_media_maker(
                 sentences=sentences_batch,
@@ -183,59 +167,47 @@ class MediaMixer:
                 output_path=str(output_path),
                 generate_subtitle=task_state.generate_subtitle
             )
+            
+            if not success:
+                logger.error(f"[MediaMixer] 分段 {batch_counter} 处理失败, TaskID={task_state.task_id}")
+                return False
+                
+            # 处理成功后的操作
             processing_time = asyncio.get_event_loop().time() - start_time
             
-            # 如果成功且有HLS管理器，添加到HLS流
-            if success:
-                if hls_manager:
-                    hls_start_time = asyncio.get_event_loop().time()
-                    await hls_manager.add_segment(str(output_path), task_state.batch_counter)
-                    hls_time = asyncio.get_event_loop().time() - hls_start_time
-                    logger.info(
-                        f"[MediaMixer] 分段 {task_state.batch_counter} 已加入 HLS, "
-                        f"处理耗时: {processing_time:.2f}s, HLS耗时: {hls_time:.2f}s, "
-                        f"TaskID={task_state.task_id}"
-                    )
-                else:
-                    logger.info(
-                        f"[MediaMixer] 分段 {task_state.batch_counter} 处理完成 (无HLS), "
-                        f"处理耗时: {processing_time:.2f}s, TaskID={task_state.task_id}"
-                    )
-                
-                # 记录已合并的段落
-                task_state.merged_segments.append(str(output_path))
-                task_state.batch_counter += 1
-                return True
+            # 添加到HLS流
+            if hls_manager:
+                hls_start_time = asyncio.get_event_loop().time()
+                await hls_manager.add_segment(str(output_path), batch_counter)
+                hls_time = asyncio.get_event_loop().time() - hls_start_time
+                logger.info(
+                    f"[MediaMixer] 分段 {batch_counter} 已加入 HLS, "
+                    f"处理耗时: {processing_time:.2f}s, HLS耗时: {hls_time:.2f}s, "
+                    f"TaskID={task_state.task_id}"
+                )
             else:
-                logger.error(f"[MediaMixer] 分段 {task_state.batch_counter} 处理失败, TaskID={task_state.task_id}")
-                return False
+                logger.info(
+                    f"[MediaMixer] 分段 {batch_counter} 处理完成 (无HLS), "
+                    f"处理耗时: {processing_time:.2f}s, TaskID={task_state.task_id}"
+                )
+            
+            # 更新任务状态
+            task_state.merged_segments.append(str(output_path))
+            task_state.batch_counter += 1
+            return True
                 
         except Exception as e:
             logger.exception(f"[MediaMixer] 处理分段时发生异常: {str(e)}, TaskID={task_state.task_id}")
             return False
 
-    # -------------------------------------------------------------------------
-    # 重置mixer状态(可选调用)
-    # -------------------------------------------------------------------------
     async def reset(self):
-        """
-        重置 full_audio_buffer, 适合在一次任务结束后做清理。
-        """
+        """重置 full_audio_buffer"""
         self.full_audio_buffer = np.array([], dtype=np.float32)
         logger.debug("MediaMixer 已重置 full_audio_buffer")
 
     @handle_errors(logger)
-    async def concat_segments(self, task_state: TaskState, hls_manager=None) -> Path:
-        """
-        合并所有处理后的视频分段，生成最终视频文件。
-        
-        Args:
-            task_state: 任务状态对象
-            hls_manager: HLS管理器实例（可选）
-            
-        Returns:
-            最终视频文件的路径，如果失败则返回None
-        """
+    async def concat_segments(self, task_state: TaskState, hls_manager=None) -> Optional[Path]:
+        """合并所有处理后的视频分段"""
         if not task_state.merged_segments:
             logger.warning(f"[MediaMixer] 无可合并的视频分段, TaskID={task_state.task_id}")
             return None
