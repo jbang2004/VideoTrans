@@ -79,24 +79,22 @@ class ViTranslator:
 
         self.logger.info("[ViTranslator] 初始化完成")
 
-    async def trans_video(
+    async def init_task_state(
         self,
         video_path: str,
         task_id: str,
         task_paths: TaskPaths,
-        hls_manager=None,
         target_language="zh",
         generate_subtitle: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> TaskState:
         """
-        入口：对整段视频进行处理。包括分段、ASR、翻译、TTS、混音、生成 HLS 等。
-        generate_subtitle: 是否需要在最终生成的视频里烧制字幕
+        初始化任务状态并返回
         """
         self.logger.info(
-            f"[trans_video] 开始处理视频: {video_path}, task_id={task_id}, target_language={target_language}, generate_subtitle={generate_subtitle}"
+            f"[init_task_state] 初始化任务: {video_path}, task_id={task_id}, target_language={target_language}, generate_subtitle={generate_subtitle}"
         )
-
-        # 初始化任务状态，不再包含hls_manager
+        
+        # 初始化任务状态
         task_state = TaskState(
             task_id=task_id,
             video_path=video_path,
@@ -104,7 +102,21 @@ class ViTranslator:
             target_language=target_language,
             generate_subtitle=generate_subtitle
         )
+        
+        return task_state
 
+    async def trans_video(
+        self,
+        task_state: TaskState,
+        hls_manager_actor=None,
+    ) -> Dict[str, Any]:
+        """
+        入口：对整段视频进行处理。包括分段、ASR、翻译、TTS、混音、生成 HLS 等。
+        """
+        self.logger.info(
+            f"[trans_video] 开始处理视频: {task_state.video_path}, task_id={task_state.task_id}, target_language={task_state.target_language}, generate_subtitle={task_state.generate_subtitle}"
+        )
+        
         pipeline = PipelineScheduler(
             translator_actor=self.translator_actor,
             model_in_actor=self.model_in_actor,
@@ -113,19 +125,19 @@ class ViTranslator:
             config=self.config,
             sample_rate=self.target_sr,  # 使用target_sr作为采样率
             max_speed=1.2,  # 设置最大语速阈值
-            hls_manager=hls_manager  # 将hls_manager作为参数传递
+            hls_manager_actor=hls_manager_actor  # 将hls_manager_actor作为参数传递
         )
         await pipeline.start_workers(task_state)
 
         try:
             # 1. 获取视频总时长
-            duration = await self.media_utils.get_video_duration(video_path)
+            duration = await self.media_utils.get_video_duration(task_state.video_path)
             # 2. 划分分段
             segments = await self.media_utils.get_audio_segments(duration)
-            self.logger.info(f"总长度={duration:.2f}s, 分段数={len(segments)}, 任务ID={task_id}")
+            self.logger.info(f"总长度={duration:.2f}s, 分段数={len(segments)}, 任务ID={task_state.task_id}")
 
             if not segments:
-                self.logger.warning(f"没有可用分段 -> 任务ID={task_id}")
+                self.logger.warning(f"没有可用分段 -> 任务ID={task_state.task_id}")
                 await pipeline.stop_workers(task_state)
                 return {"status": "error", "message": "无法获取有效分段"}
 
@@ -137,7 +149,7 @@ class ViTranslator:
             await pipeline.stop_workers(task_state)
 
             # 5. 合并所有处理后的视频段落
-            final_video_path = await self._concat_segment_mp4s(task_state, hls_manager)
+            final_video_path = await self._concat_segment_mp4s(task_state, hls_manager_actor)
             if final_video_path is not None and final_video_path.exists():
                 self.logger.info(f"翻译后的完整视频已生成: {final_video_path}")
                 
@@ -156,7 +168,7 @@ class ViTranslator:
                 return {"status": "error", "message": "HLS完成，但无法合并出最终MP4"}
 
         except Exception as e:
-            self.logger.exception(f"[trans_video] 任务ID={task_id} 出错: {e}")
+            self.logger.exception(f"[trans_video] 任务ID={task_state.task_id} 出错: {e}")
             return {"status": "error", "message": str(e)}
 
     async def _process_segment(
@@ -201,7 +213,7 @@ class ViTranslator:
 
         await pipeline.push_sentences_to_pipeline(task_state, asr_result)
 
-    async def _concat_segment_mp4s(self, task_state: TaskState, hls_manager=None) -> Path:
+    async def _concat_segment_mp4s(self, task_state: TaskState, hls_manager_actor=None) -> Path:
         """
         把 pipeline_scheduler _mixing_worker 产出的所有 segment_xxx.mp4
         用 ffmpeg concat 合并成 final_{task_state.task_id}.mp4
@@ -216,5 +228,5 @@ class ViTranslator:
             task_state=task_state,
             output_path=final_path,
             ffmpeg_tool=self.ffmpeg_tool,
-            hls_manager=hls_manager
+            hls_manager_actor=hls_manager_actor
         )

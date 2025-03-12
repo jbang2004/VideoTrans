@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from video_translator import ViTranslator
-from core.hls_manager import HLSManager
+from core.hls_manager_actor import HLSManagerActor
 from utils.task_storage import TaskPaths
 from fastapi import BackgroundTasks
 
@@ -49,6 +49,38 @@ templates = Jinja2Templates(directory=str(current_dir / "templates"))
 
 vi_translator = ViTranslator(config=config)
 task_results: Dict[str, dict] = {}
+task_states = {}  # 存储任务状态对象引用
+
+# 新增：后台状态更新任务
+async def update_task_status_worker():
+    """后台任务，定期更新task_results中的状态"""
+    logger.info("启动任务状态更新工作器")
+    try:
+        while True:
+            for task_id, task_state in list(task_states.items()):
+                if task_id in task_results:
+                    # 从task_state更新hls_ready状态到task_results
+                    if task_state.hls_ready and not task_results[task_id].get("hls_ready", False):
+                        logger.info(f"更新任务状态：任务{task_id}的HLS流已就绪")
+                        task_results[task_id]["hls_ready"] = True
+                    
+                    # 更新进度信息
+                    if task_state.batch_counter > 0:
+                        # 估计进度百分比，假设最多25个批次
+                        progress = min(95, int(task_state.batch_counter * 4))
+                        task_results[task_id]["progress"] = progress
+            
+            # 每0.5秒更新一次状态，提高响应速度
+            await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+        logger.info("任务状态更新工作器已停止")
+    except Exception as e:
+        logger.error(f"任务状态更新工作器异常: {str(e)}")
+
+# 启动后台状态更新任务
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(update_task_status_worker())
 
 @app.get("/")
 async def index(request: Request):
@@ -88,24 +120,33 @@ async def upload_video(
             logger.error(f"保存文件失败: {str(e)}")
             raise HTTPException(status_code=500, detail="文件保存失败")
         
-        hls_manager = HLSManager(config, task_id, task_paths)
+        # 创建HLSManagerActor
+        hls_manager_actor = HLSManagerActor.remote(config, task_id, task_paths)
         
         # ===================
         # 在这里传递 generate_subtitle 给 translator
         # ===================
-        task = asyncio.create_task(vi_translator.trans_video(
+        task_state = await vi_translator.init_task_state(
             video_path=str(video_path),
             task_id=task_id,
             task_paths=task_paths,
-            hls_manager=hls_manager,
             target_language=target_language,
             generate_subtitle=generate_subtitle,
+        )
+        
+        # 保存任务状态引用以便后台更新
+        task_states[task_id] = task_state
+        
+        task = asyncio.create_task(vi_translator.trans_video(
+            task_state=task_state,
+            hls_manager_actor=hls_manager_actor,
         ))
         
         task_results[task_id] = {
             "status": "processing",
             "message": "视频处理中",
-            "progress": 0
+            "progress": 0,
+            "hls_ready": False
         }
         
         async def on_task_complete(t):
@@ -115,21 +156,30 @@ async def upload_video(
                     task_results[task_id].update({
                         "status": "success",
                         "message": "处理完成",
-                        "progress": 100
+                        "progress": 100,
+                        "hls_ready": True
                     })
                 else:
                     task_results[task_id].update({
                         "status": "error",
                         "message": result.get('message', '处理失败'),
-                        "progress": 0
+                        "progress": 0,
+                        "hls_ready": False
                     })
+                # 清理状态引用
+                if task_id in task_states:
+                    del task_states[task_id]
             except Exception as e:
                 logger.error(f"任务处理失败: {str(e)}")
                 task_results[task_id].update({
                     "status": "error",
                     "message": str(e),
-                    "progress": 0
+                    "progress": 0,
+                    "hls_ready": False
                 })
+                # 清理状态引用
+                if task_id in task_states:
+                    del task_states[task_id]
         
         task.add_done_callback(lambda t: asyncio.create_task(on_task_complete(t)))
         
@@ -170,11 +220,16 @@ app.mount("/segments",
 @app.get("/playlists/{task_id}/{filename}")
 async def serve_playlist(task_id: str, filename: str):
     try:
-        playlist_path = config.PUBLIC_DIR / "playlists" / filename
+        # 修改路径，使用task_id子目录
+        playlist_path = config.PUBLIC_DIR / "playlists" / task_id / filename
         if not playlist_path.exists():
-            logger.error(f"播放列表未找到: {playlist_path}")
-            raise HTTPException(status_code=404, detail="播放列表未找到")
+            # 尝试不带task_id的路径（向后兼容）
+            playlist_path = config.PUBLIC_DIR / "playlists" / filename
+            if not playlist_path.exists():
+                logger.error(f"播放列表未找到: {playlist_path}")
+                raise HTTPException(status_code=404, detail="播放列表未找到")
         
+        logger.info(f"提供播放列表: {playlist_path}")
         async with aiofiles.open(playlist_path, mode='rb') as f:
             content = await f.read()
             

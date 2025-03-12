@@ -24,8 +24,10 @@ export default function VideoPlayer() {
   // ========== 新增: 由useTranslation()管理字幕Wanted等 ==========
   const { state: translationState, setState: setTranslationState, controls: translationControls } = useTranslation((taskId) => {
     if (taskId) {
+      console.log(`准备初始化HLS播放器，任务ID: ${taskId}`)
       hlsInstance.initHLS(taskId)
     } else {
+      console.log('销毁HLS播放器')
       hlsInstance.destroyHLS()
     }
   })
@@ -42,32 +44,10 @@ export default function VideoPlayer() {
       isTranslating: false,
       isProcessing: false,
       taskId: null,
-      isCompleted: false
+      isCompleted: false,
+      hlsReady: false
     }))
   }
-
-  const toggleFullscreen = () => {
-    if (!containerRef.current) return
-    if (!isFullscreen) {
-      if (containerRef.current.requestFullscreen) {
-        containerRef.current.requestFullscreen()
-      }
-    } else {
-      if (document.exitFullscreen) {
-        document.exitFullscreen()
-      }
-    }
-  }
-
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(document.fullscreenElement !== null)
-    }
-    document.addEventListener('fullscreenchange', handleFullscreenChange)
-    return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange)
-    }
-  }, [])
 
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!playerState.localVideoUrl && !translationState.taskId) return
@@ -94,11 +74,43 @@ export default function VideoPlayer() {
     }, 3000)
   }
 
+  // 全屏切换
+  const toggleFullscreen = () => {
+    if (!containerRef.current) return
+    
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().then(() => {
+        setIsFullscreen(true)
+      }).catch(err => {
+        console.error(`全屏请求失败: ${err.message}`)
+      })
+    } else {
+      document.exitFullscreen().then(() => {
+        setIsFullscreen(false)
+      }).catch(err => {
+        console.error(`退出全屏失败: ${err.message}`)
+      })
+    }
+  }
+
+  // 自动清理控制器超时
   useEffect(() => {
     return () => {
       if (controlsTimeoutRef.current) {
         clearTimeout(controlsTimeoutRef.current)
       }
+    }
+  }, [])
+
+  // 监听全屏变化
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement)
+    }
+    
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange)
     }
   }, [])
 
@@ -124,6 +136,16 @@ export default function VideoPlayer() {
               className="absolute inset-0 w-full h-full object-contain"
               playsInline
             />
+
+            {/* 加载中状态提示 - 当任务已创建但HLS尚未就绪时显示 */}
+            {translationState.isTranslating && translationState.taskId && !translationState.hlsReady && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-70 z-10">
+                <div className="text-center">
+                  <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-current border-r-transparent align-[-0.125em] text-primary motion-reduce:animate-[spin_1.5s_linear_infinite]"></div>
+                  <p className="mt-4 text-white">正在准备视频流，请稍候...</p>
+                </div>
+              </div>
+            )}
 
             {/* Overlay: 当没选视频时，中心显示Upload */}
             <div className="absolute inset-0 flex items-center justify-center">

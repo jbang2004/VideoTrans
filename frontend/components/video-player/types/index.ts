@@ -26,8 +26,11 @@ export interface TranslationState {
   selectedFile: File | null
   isCompleted: boolean
 
-  // 是否“想要烧制字幕”
+  // 是否"想要烧制字幕"
   subtitleWanted: boolean
+  
+  // HLS播放列表是否已就绪
+  hlsReady: boolean
 }
 
 // ====================== (新增方法) ======================
@@ -36,7 +39,7 @@ export interface TranslationControls {
   stopTranslation: () => void
   setLanguage: (language: string) => void
 
-  // 切换“字幕Wanted”的布尔值
+  // 切换"字幕Wanted"的布尔值
   toggleSubtitleWanted: () => void
 }
 

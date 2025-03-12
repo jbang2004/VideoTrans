@@ -17,7 +17,9 @@ class TaskPaths:
         self.output_dir = self.task_dir / "output"
 
         self.segments_dir = config.PUBLIC_DIR / "segments" / task_id
-        self.playlist_path = config.PUBLIC_DIR / "playlists" / f"playlist_{task_id}.m3u8"
+        playlists_dir = config.PUBLIC_DIR / "playlists" / task_id
+        playlists_dir.mkdir(parents=True, exist_ok=True)
+        self.playlist_path = playlists_dir / f"playlist_{task_id}.m3u8"
 
         self.media_dir = self.processing_dir / "media"
         self.processing_segments_dir = self.processing_dir / "segments"

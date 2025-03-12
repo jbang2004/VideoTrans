@@ -96,7 +96,7 @@ async def concat_video_segments(
     task_state: Any,
     output_path: Path,
     ffmpeg_tool: FFmpegTool,
-    hls_manager=None
+    hls_manager_actor=None
 ) -> Path:
     """
     合并所有处理后的视频分段，生成最终视频文件。
@@ -105,7 +105,7 @@ async def concat_video_segments(
         task_state: 任务状态对象
         output_path: 输出文件路径
         ffmpeg_tool: FFmpeg工具实例
-        hls_manager: HLS管理器实例（可选）
+        hls_manager_actor: HLSManagerActor的Ray引用
         
     Returns:
         最终视频文件的路径，如果失败则返回None
@@ -117,10 +117,14 @@ async def concat_video_segments(
     try:
         logger.info(f"[VideoUtils] 开始合并 {len(task_state.merged_segments)} 个视频分段, TaskID={task_state.task_id}")
         
-        # 如果有HLS管理器，确保播放列表已完成
-        if hls_manager and hls_manager.has_segments:
-            await hls_manager.finalize_playlist()
-            logger.info(f"[VideoUtils] HLS播放列表已完成, TaskID={task_state.task_id}")
+        # 移除此处的finalize_playlist调用，避免过早标记播放列表完成
+        # 只检查是否有分段，但不调用finalize_playlist
+        if hls_manager_actor:
+            import ray
+            # 使用Ray Actor方式调用
+            has_segments = ray.get(hls_manager_actor.get_has_segments.remote())
+            if has_segments:
+                logger.info(f"[VideoUtils] HLS播放列表已有分段, TaskID={task_state.task_id}")
         
         # 创建合并列表文件
         list_txt = output_path.parent / f"concat_{task_state.task_id}.txt"
@@ -131,37 +135,29 @@ async def concat_video_segments(
         
         # 执行合并命令
         start_time = asyncio.get_event_loop().time()
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(list_txt),
-            "-c", "copy",
-            str(output_path)
-        ]
+        output_path = await ffmpeg_tool.concat_videos(
+            input_list=str(list_txt),
+            output_path=str(output_path)
+        )
+        duration = asyncio.get_event_loop().time() - start_time
         
-        # 使用ffmpeg_tool执行命令
-        success = await ffmpeg_tool.run_command(cmd)
-        processing_time = asyncio.get_event_loop().time() - start_time
+        # 视频合并完成后，再标记播放列表为完成状态
+        if hls_manager_actor and output_path and output_path.exists():
+            import ray
+            success = ray.get(hls_manager_actor.finalize_playlist.remote())
+            if success:
+                logger.info(f"[VideoUtils] HLS播放列表已标记为完成, TaskID={task_state.task_id}")
+            else:
+                logger.warning(f"[VideoUtils] HLS播放列表标记完成失败, TaskID={task_state.task_id}")
         
-        if success and output_path.exists():
-            logger.info(
-                f"[VideoUtils] 视频分段合并成功, 耗时: {processing_time:.2f}s, "
-                f"输出文件: {output_path}, TaskID={task_state.task_id}"
-            )
+        # 清理合并列表文件
+        if list_txt.exists():
+            list_txt.unlink()
             
-            # 可选：清理临时文件
-            try:
-                list_txt.unlink(missing_ok=True)
-                logger.debug(f"[VideoUtils] 已删除临时合并列表文件: {list_txt}")
-            except Exception as e:
-                logger.warning(f"[VideoUtils] 清理临时文件失败: {e}")
-            
-            return output_path
-        else:
-            logger.error(f"[VideoUtils] 视频分段合并失败, TaskID={task_state.task_id}")
-            return None
-            
+        logger.info(f"[VideoUtils] 视频合并完成, 耗时={duration:.2f}s, TaskID={task_state.task_id}")
+        return output_path
     except Exception as e:
-        logger.exception(f"[VideoUtils] 合并视频分段时发生异常: {str(e)}, TaskID={task_state.task_id}")
+        logger.error(f"[VideoUtils] 视频合并失败: {e}, TaskID={task_state.task_id}")
+        if output_path.exists():
+            output_path.unlink()
         return None 

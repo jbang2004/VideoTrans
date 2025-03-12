@@ -216,7 +216,7 @@ class FFmpegTool:
 
     async def get_duration(self, input_path: str) -> float:
         """
-        调用 ffprobe 获取输入文件的时长(秒)。
+        获取视频/音频文件的持续时长（秒）。
         """
         cmd = [
             "ffprobe",
@@ -225,5 +225,36 @@ class FFmpegTool:
             "-of", "default=noprint_wrappers=1:nokey=1",
             input_path
         ]
-        stdout, stderr = await self.run_command(cmd)
-        return float(stdout.decode().strip())
+        try:
+            stdout, _ = await self.run_command(cmd)
+            return float(stdout.decode().strip())
+        except (ValueError, RuntimeError) as e:
+            logger.error(f"[FFmpegTool] 获取时长失败: {str(e)}, 输入: {input_path}")
+            raise
+
+    async def concat_videos(self, input_list: str, output_path: str) -> Path:
+        """
+        根据合并列表文件合并视频片段。
+        
+        Args:
+            input_list: 合并列表文件路径
+            output_path: 输出视频路径
+            
+        Returns:
+            Path: 合并后的视频文件路径，若失败则返回None
+        """
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", input_list,
+            "-c", "copy",
+            output_path
+        ]
+        
+        try:
+            await self.run_command(cmd)
+            return Path(output_path)
+        except Exception as e:
+            logger.error(f"[FFmpegTool] 合并视频失败: {e}")
+            return None

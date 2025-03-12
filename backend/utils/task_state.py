@@ -25,14 +25,11 @@ class TaskState:
     # 第几个 HLS 批次 (混音后输出)
     batch_counter: int = 0
 
+    # HLS就绪状态
+    hls_ready: bool = False
+
     # 每个分段对应的媒体文件信息
     segment_media_files: Dict[int, Dict[str, Any]] = field(default_factory=dict)
-
-    # 各个异步队列
-    translation_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    modelin_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
-    # audio_gen_queue已移除，直接从TTS token生成和时长对齐流向mixing_queue
-    mixing_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
 
     # 记录 mixing_worker 产出的每个 segment_xxx.mp4
     merged_segments: list = field(default_factory=list)
