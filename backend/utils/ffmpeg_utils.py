@@ -2,8 +2,8 @@
 # utils/ffmpeg_utils.py
 # 彻底移除 force_style, 仅使用 .ass 内部样式
 # --------------------------------------
-import asyncio
 import logging
+import subprocess
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -12,21 +12,21 @@ logger = logging.getLogger(__name__)
 class FFmpegTool:
     """
     统一封装 FFmpeg 常见用法的工具类。
-    通过异步方式执行 ffmpeg 命令，并在出错时抛出异常。
+    通过同步方式执行 ffmpeg 命令，并在出错时抛出异常。
     """
 
-    async def run_command(self, cmd: List[str]) -> Tuple[bytes, bytes]:
+    def run_command(self, cmd: List[str]) -> Tuple[bytes, bytes]:
         """
         运行 ffmpeg 命令，返回 (stdout, stderr)。
         若命令返回码非 0，则抛出 RuntimeError。
         """
         logger.debug(f"[FFmpegTool] Running command: {' '.join(cmd)}")
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
         )
-        stdout, stderr = await process.communicate()
+        stdout, stderr = process.communicate()
 
         if process.returncode != 0:
             error_msg = stderr.decode() or "Unknown error"
@@ -35,7 +35,7 @@ class FFmpegTool:
 
         return stdout, stderr
 
-    async def extract_audio(
+    def extract_audio(
         self,
         input_path: str,
         output_path: str,
@@ -58,9 +58,9 @@ class FFmpegTool:
             "-ac", "1",
             output_path
         ]
-        await self.run_command(cmd)
+        self.run_command(cmd)
 
-    async def extract_video(
+    def extract_video(
         self,
         input_path: str,
         output_path: str,
@@ -84,9 +84,9 @@ class FFmpegTool:
             "-tune", "fastdecode",
             output_path
         ]
-        await self.run_command(cmd)
+        self.run_command(cmd)
 
-    async def hls_segment(
+    def hls_segment(
         self,
         input_path: str,
         segment_pattern: str,
@@ -109,9 +109,9 @@ class FFmpegTool:
             "-hls_segment_filename", segment_pattern,
             playlist_path
         ]
-        await self.run_command(cmd)
+        self.run_command(cmd)
 
-    async def cut_video_track(
+    def cut_video_track(
         self,
         input_path: str,
         output_path: str,
@@ -136,9 +136,9 @@ class FFmpegTool:
             "-vsync", "vfr",
             output_path
         ]
-        await self.run_command(cmd)
+        self.run_command(cmd)
 
-    async def cut_video_with_audio(
+    def cut_video_with_audio(
         self,
         input_video_path: str,
         input_audio_path: str,
@@ -155,9 +155,9 @@ class FFmpegTool:
             "-c:a", "aac",
             output_path
         ]
-        await self.run_command(cmd)
+        self.run_command(cmd)
 
-    async def cut_video_with_subtitles_and_audio(
+    def cut_video_with_subtitles_and_audio(
         self,
         input_video_path: str,
         input_audio_path: str,
@@ -198,7 +198,7 @@ class FFmpegTool:
                 "-c:a", "aac",
                 output_path
             ]
-            await self.run_command(cmd)
+            self.run_command(cmd)
 
         except RuntimeError as e:
             logger.warning(f"[FFmpegTool] subtitles滤镜方案失败: {str(e)}")
@@ -211,10 +211,10 @@ class FFmpegTool:
                 "-c:a", "aac",
                 output_path
             ]
-            await self.run_command(cmd)
+            self.run_command(cmd)
             logger.warning("[FFmpegTool] 已跳过字幕，仅合并音视频")
 
-    async def get_duration(self, input_path: str) -> float:
+    def get_duration(self, input_path: str) -> float:
         """
         获取视频/音频文件的持续时长（秒）。
         """
@@ -226,13 +226,13 @@ class FFmpegTool:
             input_path
         ]
         try:
-            stdout, _ = await self.run_command(cmd)
+            stdout, _ = self.run_command(cmd)
             return float(stdout.decode().strip())
         except (ValueError, RuntimeError) as e:
             logger.error(f"[FFmpegTool] 获取时长失败: {str(e)}, 输入: {input_path}")
             raise
 
-    async def concat_videos(self, input_list: str, output_path: str) -> Path:
+    def concat_videos(self, input_list: str, output_path: str) -> Path:
         """
         根据合并列表文件合并视频片段。
         
@@ -253,7 +253,7 @@ class FFmpegTool:
         ]
         
         try:
-            await self.run_command(cmd)
+            self.run_command(cmd)
             return Path(output_path)
         except Exception as e:
             logger.error(f"[FFmpegTool] 合并视频失败: {e}")

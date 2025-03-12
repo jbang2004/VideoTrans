@@ -1,5 +1,4 @@
 import os
-import asyncio
 import soundfile as sf
 import numpy as np
 import logging
@@ -7,6 +6,7 @@ from contextlib import ExitStack
 from tempfile import NamedTemporaryFile
 from typing import List, Any
 from pathlib import Path
+import time
 
 from utils.ffmpeg_utils import FFmpegTool
 from utils.subtitle_utils import generate_subtitles_for_segment
@@ -56,12 +56,12 @@ def add_video_segment(
         end_time = start_time + duration
 
         # 1) 截取视频 (无音轨)
-        asyncio.run(ffmpeg_tool.cut_video_track(
+        ffmpeg_tool.cut_video_track(
             input_path=video_path,
             output_path=temp_video.name,
             start=start_time,
             end=end_time
-        ))
+        )
 
         # 2) 写合成音频到临时文件
         sf.write(temp_audio.name, audio_data, sample_rate)
@@ -78,21 +78,21 @@ def add_video_segment(
             )
 
             # 生成带字幕的视频
-            asyncio.run(ffmpeg_tool.cut_video_with_subtitles_and_audio(
+            ffmpeg_tool.cut_video_with_subtitles_and_audio(
                 input_video_path=temp_video.name,
                 input_audio_path=temp_audio.name,
                 subtitles_path=temp_ass.name,
                 output_path=output_path
-            ))
+            )
         else:
             # 不加字幕，仅合并音频
-            asyncio.run(ffmpeg_tool.cut_video_with_audio(
+            ffmpeg_tool.cut_video_with_audio(
                 input_video_path=temp_video.name,
                 input_audio_path=temp_audio.name,
                 output_path=output_path
-            ))
+            )
 
-async def concat_video_segments(
+def concat_video_segments(
     task_state: Any,
     output_path: Path,
     ffmpeg_tool: FFmpegTool,
@@ -134,12 +134,12 @@ async def concat_video_segments(
                 f.write(f"file '{abs_path}'\n")
         
         # 执行合并命令
-        start_time = asyncio.get_event_loop().time()
-        output_path = await ffmpeg_tool.concat_videos(
+        start_time = time.time()
+        output_path = ffmpeg_tool.concat_videos(
             input_list=str(list_txt),
             output_path=str(output_path)
         )
-        duration = asyncio.get_event_loop().time() - start_time
+        duration = time.time() - start_time
         
         # 视频合并完成后，再标记播放列表为完成状态
         if hls_manager_actor and output_path and output_path.exists():

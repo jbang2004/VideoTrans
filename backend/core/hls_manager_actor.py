@@ -4,7 +4,6 @@ import m3u8
 import os.path
 import shutil
 import time
-import asyncio
 from pathlib import Path
 from typing import Union, Optional
 import ray
@@ -78,13 +77,13 @@ class HLSManagerActor:
             segment_pattern = str(self.segments_dir / segment_filename)
             temp_playlist_path = self.task_paths.processing_dir / f'temp_{part_index}.m3u8'
 
-            # 使用asyncio.run()运行原来的异步hls_segment方法
-            asyncio.run(self.ffmpeg_tool.hls_segment(
+            # 直接使用同步版本的hls_segment方法
+            self.ffmpeg_tool.hls_segment(
                 input_path=str(video_path),
                 segment_pattern=segment_pattern,
                 playlist_path=str(temp_playlist_path),
                 hls_time=self.segment_time
-            ))
+            )
 
             # 加入分段
             temp_m3u8 = m3u8.load(str(temp_playlist_path))

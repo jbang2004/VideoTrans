@@ -33,10 +33,9 @@ class ModelInActor:
         try:
             tts_text = sentence.trans_text
             
-            # 调用Actor提取文本token并缓存
-            text_feature_id, normalized_segments = await asyncio.to_thread(
-                lambda: ray.get(self.cosyvoice_actor.extract_text_tokens_and_cache.remote(tts_text))
-            )
+            # 直接使用await处理Ray对象引用
+            text_feature_ref = self.cosyvoice_actor.extract_text_tokens_and_cache.remote(tts_text)
+            text_feature_id, normalized_segments = await text_feature_ref
             
             # 保存文本特征ID
             sentence.model_input['text_feature_id'] = text_feature_id
@@ -61,17 +60,9 @@ class ModelInActor:
                     # 准备音频
                     audio = sentence.audio
                     
-                    # 调用Actor处理音频并缓存
-                    processed_audio_id = await asyncio.to_thread(
-                        lambda: ray.get(self.cosyvoice_actor.process_and_cache_audio.remote(
-                            audio, max_val=self.max_val
-                        ))
-                    )
-                    
-                    # 调用Actor提取说话人特征并缓存
-                    speaker_feature_id = await asyncio.to_thread(
-                        lambda: ray.get(self.cosyvoice_actor.extract_speaker_features_and_cache.remote(processed_audio_id))
-                    )
+                    # 直接使用await处理Ray对象引用
+                    processed_audio_id = await self.cosyvoice_actor.process_and_cache_audio.remote(audio, max_val=self.max_val)
+                    speaker_feature_id = await self.cosyvoice_actor.extract_speaker_features_and_cache.remote(processed_audio_id)
                     
                     # 保存特征ID到本地缓存
                     self.speaker_cache[speaker_id] = speaker_feature_id

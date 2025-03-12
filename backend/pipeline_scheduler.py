@@ -1,14 +1,17 @@
-import asyncio
-import logging
 import ray
-from typing import List
-from utils.task_state import TaskState
+import logging
+import asyncio
+from typing import List, Optional
+from config import Config
 from core.sentence_tools import Sentence
+from core.translation.translator_actor import TranslatorActor
+from core.model_in_actor import ModelInActor
+from core.media_mixer_actor import MediaMixerActor
 from core.tts_token_gener import generate_tts_tokens
 from core.timeadjust.duration_aligner import align_durations
 from core.audio_gener import generate_audio
 from core.timeadjust.timestamp_adjuster import adjust_timestamps
-from core.media_mixer_actor import MediaMixerActor
+from utils.task_state import TaskState
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +55,58 @@ class PipelineScheduler:
         except Exception as e:
             self.logger.error(f"[PipelineScheduler] 清理资源失败: {e} -> TaskID={task_state.task_id}")
 
-    async def push_sentences_to_pipeline(self, task_state: TaskState, sentences: List[Sentence]):
+    async def push_sentences_to_pipeline(
+        self, 
+        task_state: TaskState, 
+        segment_index: int, 
+        segment_start: float, 
+        sense_model_actor
+    ):
         """
         将句子推送到流水线进行处理。
-        使用Ray的依赖传递机制执行翻译、模型输入、TTS Token生成、时长对齐、
-        音频生成和媒体混合等步骤。
+        执行ASR识别，并处理结果。
+        
+        Args:
+            task_state: 任务状态对象
+            segment_index: 分段索引
+            segment_start: 分段开始时间
+            sense_model_actor: ASR模型Actor引用
         """
+        # 获取该分段的媒体文件信息
+        media_files = task_state.segment_media_files.get(segment_index)
+        if not media_files or 'vocals' not in media_files:
+            self.logger.error(f"[push_sentences_to_pipeline] 找不到分段 {segment_index} 的vocals文件, TaskID={task_state.task_id}")
+            return
+        
+        try:
+            # 执行ASR识别
+            sentences = await sense_model_actor.generate_async.remote(
+                input=media_files['vocals'],
+                cache={},
+                language="auto",
+                use_itn=True,
+                batch_size_s=60,
+                merge_vad=False
+            )
+            
+            self.logger.info(f"[push_sentences_to_pipeline] ASR识别完成: {len(sentences)} 条句子, seg={segment_index}, TaskID={task_state.task_id}")
+            
+            if not sentences:
+                self.logger.warning(f"[push_sentences_to_pipeline] ASR结果为空, seg={segment_index}, TaskID={task_state.task_id}")
+                return
+            
+            # 为句子添加元数据
+            for s in sentences:
+                s.segment_index = segment_index
+                s.segment_start = segment_start
+                s.task_id = task_state.task_id
+                s.sentence_id = task_state.sentence_counter
+                task_state.sentence_counter += 1
+                
+        except Exception as e:
+            self.logger.error(f"[push_sentences_to_pipeline] ASR处理失败: {str(e)}, seg={segment_index}, TaskID={task_state.task_id}")
+            return
+            
         self.logger.debug(f"[push_sentences_to_pipeline] 处理 {len(sentences)} 个句子, TaskID={task_state.task_id}")
         
         # 迭代获取翻译的 ObjectRef

@@ -11,7 +11,7 @@ from core.asr_model_actor import SenseAutoModelActor
 from core.cosyvoice_model_actor import CosyVoiceModelActor
 from core.clear_voice_actor import ClearVoiceActor
 from core.translation.translator_actor import TranslatorActor
-from utils.media_utils import MediaUtils
+from utils.media_utils import get_video_duration, get_audio_segments, extract_segment_task
 from pipeline_scheduler import PipelineScheduler
 from utils.task_storage import TaskPaths
 from config import Config
@@ -74,9 +74,6 @@ class ViTranslator:
         # 创建FFmpegTool实例，用于共享
         self.ffmpeg_tool = FFmpegTool()
 
-        # 其他核心工具
-        self.media_utils = MediaUtils(config=self.config, audio_separator_actor=self.audio_separator_actor, target_sr=self.target_sr)
-
         self.logger.info("[ViTranslator] 初始化完成")
 
     async def init_task_state(
@@ -127,29 +124,29 @@ class ViTranslator:
             max_speed=1.2,  # 设置最大语速阈值
             hls_manager_actor=hls_manager_actor  # 将hls_manager_actor作为参数传递
         )
-        await pipeline.start_workers(task_state)
 
         try:
             # 1. 获取视频总时长
-            duration = await self.media_utils.get_video_duration(task_state.video_path)
+            duration = await get_video_duration.remote(task_state.video_path)
+            
             # 2. 划分分段
-            segments = await self.media_utils.get_audio_segments(duration)
+            segments = await get_audio_segments.remote(
+                duration=duration, 
+                segment_minutes=self.config.SEGMENT_MINUTES, 
+                min_segment_minutes=self.config.MIN_SEGMENT_MINUTES
+            )
             self.logger.info(f"总长度={duration:.2f}s, 分段数={len(segments)}, 任务ID={task_state.task_id}")
 
             if not segments:
                 self.logger.warning(f"没有可用分段 -> 任务ID={task_state.task_id}")
-                await pipeline.stop_workers(task_state)
                 return {"status": "error", "message": "无法获取有效分段"}
 
             # 3. 遍历所有分段：提取、ASR、推送后续流水线
             for i, (seg_start, seg_dur) in enumerate(segments):
                 await self._process_segment(pipeline, task_state, i, seg_start, seg_dur)
 
-            # 4. 所有段结束后，停止流水线
-            await pipeline.stop_workers(task_state)
-
             # 5. 合并所有处理后的视频段落
-            final_video_path = await self._concat_segment_mp4s(task_state, hls_manager_actor)
+            final_video_path = self._concat_segment_mp4s(task_state, hls_manager_actor)
             if final_video_path is not None and final_video_path.exists():
                 self.logger.info(f"翻译后的完整视频已生成: {final_video_path}")
                 
@@ -179,41 +176,27 @@ class ViTranslator:
         start: float,
         seg_duration: float,
     ):
-        # 1. 提取并分离人声/背景
-        media_files = await self.media_utils.extract_segment(
+        # 1. 提取并分离人声/背景 - 使用Ray任务
+        media_files = await extract_segment_task.remote(
             video_path=task_state.video_path,
             start=start,
             duration=seg_duration,
-            output_dir=task_state.task_paths.processing_dir,
-            segment_index=segment_index
+            output_dir=str(task_state.task_paths.processing_dir),
+            segment_index=segment_index,
+            audio_separator_actor=self.audio_separator_actor,
+            target_sr=self.target_sr
         )
         task_state.segment_media_files[segment_index] = media_files
 
-        # 2. ASR - 使用与Ray官方示例一致的语法
-        asr_result = await self.sense_model_actor.generate_async.remote(
-            input=media_files['vocals'],
-            cache={},
-            language="auto",
-            use_itn=True,
-            batch_size_s=60,
-            merge_vad=False
+        # 2. 直接调用pipeline处理ASR和后续流程
+        await pipeline.push_sentences_to_pipeline(
+            task_state=task_state,
+            segment_index=segment_index,
+            segment_start=start,
+            sense_model_actor=self.sense_model_actor
         )
-        
-        self.logger.info(f"[_process_segment] ASR识别到 {len(asr_result)} 条句子, seg={segment_index}, TaskID={task_state.task_id}")
 
-        if not asr_result:
-            return
-
-        for s in asr_result:
-            s.segment_index = segment_index
-            s.segment_start = start
-            s.task_id = task_state.task_id
-            s.sentence_id = task_state.sentence_counter
-            task_state.sentence_counter += 1
-
-        await pipeline.push_sentences_to_pipeline(task_state, asr_result)
-
-    async def _concat_segment_mp4s(self, task_state: TaskState, hls_manager_actor=None) -> Path:
+    def _concat_segment_mp4s(self, task_state: TaskState, hls_manager_actor=None) -> Path:
         """
         把 pipeline_scheduler _mixing_worker 产出的所有 segment_xxx.mp4
         用 ffmpeg concat 合并成 final_{task_state.task_id}.mp4
@@ -224,7 +207,7 @@ class ViTranslator:
         final_path.parent.mkdir(parents=True, exist_ok=True)
         
         # 直接使用video_utils中的concat_video_segments
-        return await concat_video_segments(
+        return concat_video_segments(
             task_state=task_state,
             output_path=final_path,
             ffmpeg_tool=self.ffmpeg_tool,
