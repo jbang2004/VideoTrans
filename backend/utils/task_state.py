@@ -37,3 +37,6 @@ class TaskState:
     # =========== (新增) ===========
     # 用户是否选择烧制字幕
     generate_subtitle: bool = False
+
+    # 分段信息
+    segments: list = field(default_factory=list)

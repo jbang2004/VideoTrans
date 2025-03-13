@@ -42,32 +42,34 @@ class ViTranslator:
         
         # 创建音频分离器Actor
         self.audio_separator_actor = ClearVoiceActor.options(
-            num_gpus=0.1,
+            num_gpus=self.config.CLEARVOICE_ACTOR_NUM_GPUS,
             name="clear_voice_separator"
         ).remote(model_name='MossFormer2_SE_48K')
         
         self.sense_model_actor = SenseAutoModelActor.options(
-            num_gpus=0.1,
+            num_gpus=self.config.ASR_ACTOR_NUM_GPUS,
             name="sense_asr_model"
         ).remote()
         
         self.cosyvoice_model_actor = CosyVoiceModelActor.options(
-            num_gpus=0.7,
+            num_gpus=self.config.COSYVOICE_ACTOR_NUM_GPUS,
             name="cosyvoice_model"
         ).remote("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
         
-        # 获取采样率
-        self.target_sr = ray.get(self.cosyvoice_model_actor.get_sample_rate.remote())
+        # 使用配置中的目标采样率
+        self.target_sr = self.config.TARGET_SR
 
         # 创建翻译Actor
         translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
         api_key = self.config.DEEPSEEK_API_KEY if translation_model == "deepseek" else self.config.GEMINI_API_KEY
         self.translator_actor = TranslatorActor.options(
+            num_cpus=self.config.TRANSLATOR_ACTOR_NUM_CPUS,
             name="translator"
         ).remote(api_key=api_key, model_type=translation_model)
 
         # 创建ModelInActor
         self.model_in_actor = ModelInActor.options(
+            num_cpus=self.config.MODELIN_ACTOR_NUM_CPUS,
             name="model_in"
         ).remote(self.cosyvoice_model_actor)
 
@@ -122,7 +124,8 @@ class ViTranslator:
             config=self.config,
             sample_rate=self.target_sr,  # 使用target_sr作为采样率
             max_speed=1.2,  # 设置最大语速阈值
-            hls_manager_actor=hls_manager_actor  # 将hls_manager_actor作为参数传递
+            hls_manager_actor=hls_manager_actor,  # 将hls_manager_actor作为参数传递
+            audio_separator_actor=self.audio_separator_actor  # 传递audio_separator_actor
         )
 
         try:
@@ -141,9 +144,18 @@ class ViTranslator:
                 self.logger.warning(f"没有可用分段 -> 任务ID={task_state.task_id}")
                 return {"status": "error", "message": "无法获取有效分段"}
 
-            # 3. 遍历所有分段：提取、ASR、推送后续流水线
+            # 保存分段信息到task_state
+            task_state.segments = segments
+            
+            # 3. 遍历所有分段：直接调用pipeline处理
             for i, (seg_start, seg_dur) in enumerate(segments):
-                await self._process_segment(pipeline, task_state, i, seg_start, seg_dur)
+                await pipeline.push_sentences_to_pipeline(
+                    task_state=task_state,
+                    segment_index=i,
+                    segment_start=seg_start,
+                    sense_model_actor=self.sense_model_actor,
+                    segment_duration=seg_dur
+                )
 
             # 5. 合并所有处理后的视频段落
             final_video_path = self._concat_segment_mp4s(task_state, hls_manager_actor)
@@ -167,34 +179,6 @@ class ViTranslator:
         except Exception as e:
             self.logger.exception(f"[trans_video] 任务ID={task_state.task_id} 出错: {e}")
             return {"status": "error", "message": str(e)}
-
-    async def _process_segment(
-        self,
-        pipeline: PipelineScheduler,
-        task_state: TaskState,
-        segment_index: int,
-        start: float,
-        seg_duration: float,
-    ):
-        # 1. 提取并分离人声/背景 - 使用Ray任务
-        media_files = await extract_segment_task.remote(
-            video_path=task_state.video_path,
-            start=start,
-            duration=seg_duration,
-            output_dir=str(task_state.task_paths.processing_dir),
-            segment_index=segment_index,
-            audio_separator_actor=self.audio_separator_actor,
-            target_sr=self.target_sr
-        )
-        task_state.segment_media_files[segment_index] = media_files
-
-        # 2. 直接调用pipeline处理ASR和后续流程
-        await pipeline.push_sentences_to_pipeline(
-            task_state=task_state,
-            segment_index=segment_index,
-            segment_start=start,
-            sense_model_actor=self.sense_model_actor
-        )
 
     def _concat_segment_mp4s(self, task_state: TaskState, hls_manager_actor=None) -> Path:
         """

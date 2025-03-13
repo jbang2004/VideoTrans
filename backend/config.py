@@ -25,6 +25,9 @@ class Config:
     BACKGROUND_VOLUME = 0.3
     AUDIO_OVERLAP = 1024
     NORMALIZATION_THRESHOLD = 0.9
+    
+    # 目标采样率，统一设置为24000
+    TARGET_SR = 24000
 
     SEGMENT_MINUTES = 5
     MIN_SEGMENT_MINUTES = 3
@@ -84,8 +87,13 @@ class Config:
     # 控制同时处理多少个视频分段
     MAX_PARALLEL_SEGMENTS = 2
 
-    # 只保留Actor配置，方便Ray资源管理
-    ASR_ACTOR_NUM_GPUS = 0.3  # 分配GPU比例，根据需要调整
+    # Actor资源配置
+    CLEARVOICE_ACTOR_NUM_GPUS = 0.2  # 音频分离器
+    ASR_ACTOR_NUM_GPUS = 0.2  # ASR模型
+    COSYVOICE_ACTOR_NUM_GPUS = 0.6  # CosyVoice模型（TTS核心）
+    TRANSLATOR_ACTOR_NUM_CPUS = 1.0  # 翻译Actor（CPU密集）
+    MODELIN_ACTOR_NUM_CPUS = 1.0  # ModelIn处理Actor（CPU密集）
+    MEDIA_MIXER_ACTOR_NUM_CPUS = 1.0  # 媒体混合Actor（CPU密集）
 
     # ASR流程配置
     ASR_BATCH_SIZE_S = 60  # 音频批处理大小(秒)

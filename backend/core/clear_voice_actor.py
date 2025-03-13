@@ -1,7 +1,10 @@
 import ray
+import logging
+import torch
 import numpy as np
 from typing import Tuple
 from abc import ABC, abstractmethod
+from config import Config
 
 from models.ClearerVoice.clearvoice import ClearVoice
 
@@ -11,19 +14,15 @@ class AudioSeparator(ABC):
     def separate_audio(self, input_path: str, **kwargs) -> Tuple[np.ndarray, np.ndarray]:
         pass
 
-@ray.remote
+@ray.remote(num_gpus=Config().CLEARVOICE_ACTOR_NUM_GPUS)
 class ClearVoiceActor:
     """
-    ClearVoice音频分离器的Ray Actor实现
-    使用Ray Actor封装ClearVoice模型，避免重复加载模型
+    音频分离Actor，负责分离人声和背景音乐
     """
-    def __init__(self, model_name: str = 'MossFormer2_SE_48K'):
-        """
-        初始化ClearVoice Actor
+    def __init__(self, model_name='MossFormer2_SE_48K'):
+        self.logger = logging.getLogger(__name__)
+        self.logger.info(f"初始化音频分离Actor: {model_name}")
         
-        Args:
-            model_name: 使用的ClearVoice模型名称
-        """
         self.model_name = model_name
         self.clearvoice = ClearVoice(
             task='speech_enhancement',

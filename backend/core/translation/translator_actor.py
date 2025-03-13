@@ -12,7 +12,7 @@ from .prompt import (
 )
 from .deepseek_client import DeepSeekClient
 from .gemini_client import GeminiClient
-
+from config import Config
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -25,7 +25,7 @@ class BatchConfig:
 
 T = TypeVar('T')
 
-@ray.remote
+@ray.remote(num_cpus=Config().TRANSLATOR_ACTOR_NUM_CPUS)
 class TranslatorActor:
     def __init__(self, api_key: str = None, model_type: str = "deepseek"):
         self.logger = logging.getLogger(__name__)

@@ -5,8 +5,10 @@ import threading
 import sys
 import uuid
 import numpy as np
+import os
+from config import Config
 
-@ray.remote(num_gpus=0.9)
+@ray.remote(num_gpus=Config().COSYVOICE_ACTOR_NUM_GPUS)
 class CosyVoiceModelActor:
     """
     将CosyVoice模型封装为Ray Actor，提供所有与模型相关的操作

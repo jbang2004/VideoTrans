@@ -12,6 +12,7 @@ from core.timeadjust.duration_aligner import align_durations
 from core.audio_gener import generate_audio
 from core.timeadjust.timestamp_adjuster import adjust_timestamps
 from utils.task_state import TaskState
+from utils.media_utils import extract_segment_task
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +29,10 @@ class PipelineScheduler:
         cosyvoice_actor,   # CosyVoiceModelActor
         simplifier,        # 简化器（通常是TranslatorActor）
         config,
-        sample_rate=None,  # 采样率，如果为None则使用cosyvoice_actor的采样率
+        sample_rate=None,  # 采样率，如果为None则使用config.TARGET_SR
         max_speed=1.1,     # 最大语速阈值
-        hls_manager_actor=None  # HLS管理器Actor引用（可选）
+        hls_manager_actor=None,  # HLS管理器Actor引用（可选）
+        audio_separator_actor=None  # AudioSeparatorActor引用（可选）
     ):
         self.logger = logging.getLogger(__name__)
         self.translator_actor = translator_actor  # TranslatorActor引用
@@ -38,12 +40,15 @@ class PipelineScheduler:
         self.cosyvoice_actor = cosyvoice_actor    # CosyVoice模型Actor
         self.simplifier = simplifier
         self.config = config
-        self.sample_rate = sample_rate if sample_rate else ray.get(cosyvoice_actor.get_sample_rate.remote())
+        self.sample_rate = sample_rate if sample_rate else config.TARGET_SR
         self.max_speed = max_speed
         self.hls_manager_actor = hls_manager_actor  # HLSManagerActor引用
+        self.audio_separator_actor = audio_separator_actor  # AudioSeparatorActor引用
         
         # 初始化MediaMixerActor
-        self.media_mixer_actor = MediaMixerActor.remote(config, self.sample_rate)
+        self.media_mixer_actor = MediaMixerActor.options(
+            num_cpus=config.MEDIA_MIXER_ACTOR_NUM_CPUS
+        ).remote(config, self.sample_rate)
         self.logger.info(f"PipelineScheduler初始化完成，采样率={self.sample_rate}")
 
     async def cleanup_resources(self, task_state: TaskState):
@@ -60,7 +65,8 @@ class PipelineScheduler:
         task_state: TaskState, 
         segment_index: int, 
         segment_start: float, 
-        sense_model_actor
+        sense_model_actor,
+        segment_duration: float = None
     ):
         """
         将句子推送到流水线进行处理。
@@ -71,14 +77,27 @@ class PipelineScheduler:
             segment_index: 分段索引
             segment_start: 分段开始时间
             sense_model_actor: ASR模型Actor引用
+            segment_duration: 分段持续时间（可选）
         """
-        # 获取该分段的媒体文件信息
-        media_files = task_state.segment_media_files.get(segment_index)
-        if not media_files or 'vocals' not in media_files:
-            self.logger.error(f"[push_sentences_to_pipeline] 找不到分段 {segment_index} 的vocals文件, TaskID={task_state.task_id}")
-            return
-        
         try:
+            # 1. 提取并分离人声/背景 - 使用Ray任务
+            media_files = await extract_segment_task.remote(
+                video_path=task_state.video_path,
+                start=segment_start,
+                duration=segment_duration,
+                output_dir=str(task_state.task_paths.processing_dir),
+                segment_index=segment_index,
+                audio_separator_actor=self.audio_separator_actor,
+                target_sr=self.sample_rate
+            )
+            task_state.segment_media_files[segment_index] = media_files
+            
+            # 获取该分段的媒体文件信息
+            media_files = task_state.segment_media_files.get(segment_index)
+            if not media_files or 'vocals' not in media_files:
+                self.logger.error(f"[push_sentences_to_pipeline] 找不到分段 {segment_index} 的vocals文件, TaskID={task_state.task_id}")
+                return
+            
             # 执行ASR识别
             sentences = await sense_model_actor.generate_async.remote(
                 input=media_files['vocals'],

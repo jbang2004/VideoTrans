@@ -1,18 +1,17 @@
 import ray
 import sys
 import logging
+from config import Config
 
-@ray.remote(num_gpus=0.3)  # 直接指定GPU资源
+@ray.remote(num_gpus=Config().ASR_ACTOR_NUM_GPUS)  # 使用配置中的GPU资源分配
 class SenseAutoModelActor:
-    """ASR模型Actor封装 - 为原始SenseAutoModel提供Ray远程接口"""
-    
+    """
+    ASR模型Actor，负责语音识别
+    """
     def __init__(self):
         """初始化ASR模型Actor"""
         self.logger = logging.getLogger(__name__)
         self.logger.info("初始化ASR模型Actor")
-        
-        # 导入Config并设置系统路径
-        from config import Config
         self.config = Config()
         
         # 添加系统路径

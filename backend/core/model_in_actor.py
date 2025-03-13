@@ -6,6 +6,7 @@ import librosa
 from typing import List, Optional, AsyncGenerator
 import asyncio
 import ray
+from config import Config
 
 @ray.remote  # 移除GPU分配
 class ModelInActor:
@@ -17,8 +18,8 @@ class ModelInActor:
         self.cosyvoice_actor = cosyvoice_model_actor
         self.logger = logging.getLogger(__name__)
 
-        # 获取采样率（同步调用，只在初始化时执行一次）
-        self.cosy_sample_rate = ray.get(self.cosyvoice_actor.get_sample_rate.remote())
+        # 使用配置中的目标采样率
+        self.cosy_sample_rate = Config().TARGET_SR
         self.speaker_cache = {}  # 存储speaker_id到特征缓存ID的映射
         self.max_val = 0.8
 

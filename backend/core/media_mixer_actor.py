@@ -27,16 +27,19 @@ if not logger.handlers:  # 如果没有处理器，添加一个控制台处理�
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-@ray.remote
+@ray.remote(num_cpus=Config().MEDIA_MIXER_ACTOR_NUM_CPUS)
 class MediaMixerActor:
     """
-    媒体混合器Actor，负责处理音视频混合，并保持音频缓冲区状态
+    媒体混合Actor，负责混合音频和视频
     """
-    def __init__(self, config: Config, sample_rate: int):
+    def __init__(self, config, sample_rate):
         self.config = config
         self.sample_rate = sample_rate
-        self.full_audio_buffer = np.array([], dtype=np.float32)
         self.ffmpeg_tool = FFmpegTool()
+        self.max_val = 0.8  # 音频最大值
+        self.logger = logging.getLogger(__name__)
+        self.logger.info(f"MediaMixerActor初始化完成，采样率={sample_rate}")
+        self.full_audio_buffer = np.array([], dtype=np.float32)
     
     def mix_media(
         self,
