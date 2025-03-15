@@ -33,7 +33,8 @@ class ViTranslator:
         
         # 初始化Ray（如果尚未初始化）
         if not ray.is_initialized():
-            ray.init(ignore_reinit_error=True)
+            context = ray.init(ignore_reinit_error=True)
+            self.logger.info(f"Ray 初始化完成，Dashboard URL: {context.dashboard_url}")
             
         self._init_global_models()
 

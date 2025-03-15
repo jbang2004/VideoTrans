@@ -11,8 +11,7 @@ import ray
 
 from utils.ffmpeg_utils import FFmpegTool
 from utils.audio_utils import apply_fade_effect, mix_with_background, normalize_audio
-from utils.subtitle_utils import generate_subtitles_for_segment
-from utils.video_utils import add_video_segment, concat_video_segments
+from utils.video_utils import add_video_segment 
 from config import Config
 from core.sentence_tools import Sentence
 from utils.task_state import TaskState
