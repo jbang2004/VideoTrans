@@ -135,3 +135,10 @@ npm run start
 5. **依赖版本冲突**：
    - 建议使用虚拟环境隔离项目依赖：`python -m venv venv`
    - 如遇到兼容性问题，可尝试降级某些包版本 
+如果服务器的npm版本太低，使用以下命令安装nvm
+curl -o- https://cdn.jsdelivr.net/gh/nvm-sh/nvm@v0.40.2/install.sh | bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+nvm install 20
+nvm use 20

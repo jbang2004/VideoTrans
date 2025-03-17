@@ -61,3 +61,11 @@ wandb==0.19.8
 WeTextProcessing==1.0.3
 wget==3.2
 yamlargparse==1.31.1
+google.generativeai
+pysubs2
+dotenv
+ray[default]
+openai
+json_repair
+m3u8
+funasr
