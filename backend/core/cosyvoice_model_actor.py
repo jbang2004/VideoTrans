@@ -31,7 +31,7 @@ class CosyVoiceModelActor:
         # 导入并加载模型
         try:
             from models.CosyVoice.cosyvoice.cli.cosyvoice import CosyVoice2
-            self.cosyvoice = CosyVoice2(model_path, load_jit=True, load_trt=False, fp16=False)
+            self.cosyvoice = CosyVoice2(model_path, load_jit=True, load_trt=True, fp16=True)
             self.model = self.cosyvoice.model
             self.sample_rate = self.cosyvoice.sample_rate
             self.frontend = self.cosyvoice.frontend
