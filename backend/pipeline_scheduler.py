@@ -7,9 +7,9 @@ from core.sentence_tools import Sentence
 from core.translation.translator_actor import TranslatorActor
 from core.model_in_actor import ModelInActor
 from core.media_mixer_actor import MediaMixerActor
-from core.tts_token_gener import generate_tts_tokens
+from core.tts_token_gen_actor import TtsTokenGenActor
+from core.audio_gen_actor import AudioGenActor
 from core.timeadjust.duration_aligner import align_durations
-from core.audio_gener import generate_audio
 from core.timeadjust.timestamp_adjuster import adjust_timestamps
 from utils.task_state import TaskState
 from utils.media_utils import extract_segment_task
@@ -24,20 +24,23 @@ class PipelineScheduler:
 
     def __init__(
         self,
-        translator_actor,  # TranslatorActor
-        model_in_actor,    # ModelInActor
-        cosyvoice_actor,   # CosyVoiceModelActor
-        simplifier,        # 简化器（通常是TranslatorActor）
+        translator_actor,       # TranslatorActor
+        model_in_actor,         # ModelInActor
+        tts_token_gen_actor,    # TtsTokenGenActor（新增）
+        audio_gen_actor,        # AudioGenActor（新增）
+        simplifier,             # 简化器（通常是TranslatorActor）
         config,
-        sample_rate=None,  # 采样率，如果为None则使用config.TARGET_SR
-        max_speed=1.1,     # 最大语速阈值
-        hls_manager_actor=None,  # HLS管理器Actor引用（可选）
+        sample_rate=None,       # 采样率，如果为None则使用config.TARGET_SR
+        max_speed=1.1,          # 最大语速阈值
+        hls_manager_actor=None, # HLS管理器Actor引用（可选）
         audio_separator_actor=None  # AudioSeparatorActor引用（可选）
     ):
         self.logger = logging.getLogger(__name__)
-        self.translator_actor = translator_actor  # TranslatorActor引用
-        self.model_in_actor = model_in_actor      # ModelInActor引用
-        self.cosyvoice_actor = cosyvoice_actor    # CosyVoice模型Actor
+        self.translator_actor = translator_actor      # TranslatorActor引用
+        self.model_in_actor = model_in_actor         # ModelInActor引用
+        # 替换cosyvoice_actor为新的Actor
+        self.tts_token_gen_actor = tts_token_gen_actor  # TTS Token生成Actor
+        self.audio_gen_actor = audio_gen_actor        # 音频生成Actor
         self.simplifier = simplifier
         self.config = config
         self.sample_rate = sample_rate if sample_rate else config.TARGET_SR
@@ -52,11 +55,10 @@ class PipelineScheduler:
         self.logger.info(f"PipelineScheduler初始化完成，采样率={self.sample_rate}")
 
     async def cleanup_resources(self, task_state: TaskState):
-        """清理资源"""
+        """清理资源 - 这个方法可以保留但不必实现复杂的清理，因为资源现在分散在不同actor中"""
         try:
-            # 清理各种特征缓存，但保留说话人特征
-            await self.cosyvoice_actor.cleanup_feature_cache.remote(cache_ids=None, skip_speaker_features=True)
-            self.logger.info(f"[PipelineScheduler] 已清理资源（保留说话人特征） -> TaskID={task_state.task_id}")
+            # 清理临时文件等操作（如果需要）
+            self.logger.info(f"[PipelineScheduler] 已清理资源 -> TaskID={task_state.task_id}")
         except Exception as e:
             self.logger.error(f"[PipelineScheduler] 清理资源失败: {e} -> TaskID={task_state.task_id}")
 
@@ -140,11 +142,10 @@ class PipelineScheduler:
                 reuse_speaker=False,
                 batch_size=self.config.MODELIN_BATCH_SIZE
             ):
-                # 使用 generate_tts_tokens task 处理模型输入后的句子
+                # 使用 TtsTokenGenActor 处理模型输入后的句子（修改）
                 self.logger.info(f"TTS token生成开始")
-                tts_token_ref = generate_tts_tokens.remote(
-                    modelin_ref,
-                    self.cosyvoice_actor
+                tts_token_ref = self.tts_token_gen_actor.generate_tts_tokens.remote(
+                    modelin_ref
                 )
                 
                 # 直接创建时长对齐任务，传递TTS token生成任务的引用
@@ -153,16 +154,14 @@ class PipelineScheduler:
                     tts_token_ref,
                     self.simplifier,
                     self.model_in_actor,
-                    self.cosyvoice_actor,
+                    self.tts_token_gen_actor,  # 替换cosyvoice_actor
                     self.max_speed
                 )
                 
-                # 直接创建音频生成任务，传递时长对齐任务的引用
+                # 直接创建音频生成任务，使用新的AudioGenActor
                 self.logger.info(f"创建音频生成任务")
-                audio_ref = generate_audio.remote(
-                    aligned_ref,
-                    self.cosyvoice_actor,
-                    self.sample_rate
+                audio_ref = self.audio_gen_actor.generate_audio.remote(
+                    aligned_ref
                 )
                 
                 # 创建时间戳调整任务，传递音频生成任务的引用

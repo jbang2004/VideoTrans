@@ -8,9 +8,11 @@ from pathlib import Path
 import ray
 
 from core.asr_model_actor import SenseAutoModelActor
-from core.cosyvoice_model_actor import CosyVoiceModelActor
 from core.clear_voice_actor import ClearVoiceActor
 from core.translation.translator_actor import TranslatorActor
+from core.model_in_actor import ModelInActor
+from core.tts_token_gen_actor import TtsTokenGenActor  # 新导入
+from core.audio_gen_actor import AudioGenActor  # 新导入
 from utils.media_utils import get_video_duration, get_audio_segments, extract_segment_task
 from pipeline_scheduler import PipelineScheduler
 from utils.task_storage import TaskPaths
@@ -18,7 +20,6 @@ from config import Config
 from utils.task_state import TaskState
 
 from utils.ffmpeg_utils import FFmpegTool
-from core.model_in_actor import ModelInActor
 from utils.video_utils import concat_video_segments
 
 logger = logging.getLogger(__name__)
@@ -52,10 +53,16 @@ class ViTranslator:
             name="sense_asr_model"
         ).remote()
         
-        self.cosyvoice_model_actor = CosyVoiceModelActor.options(
-            num_gpus=self.config.COSYVOICE_ACTOR_NUM_GPUS,
-            name="cosyvoice_model"
-        ).remote("models/CosyVoice/pretrained_models/CosyVoice2-0.5B")
+        # 移除cosyvoice_model_actor，替换为TtsTokenGenActor和AudioGenActor
+        self.tts_token_gen_actor = TtsTokenGenActor.options(
+            num_gpus=0.2,
+            name="tts_token_generator"
+        ).remote()
+        
+        self.audio_gen_actor = AudioGenActor.options(
+            num_gpus=0.3,
+            name="audio_generator"
+        ).remote()
         
         # 使用配置中的目标采样率
         self.target_sr = self.config.TARGET_SR
@@ -68,11 +75,11 @@ class ViTranslator:
             name="translator"
         ).remote(api_key=api_key, model_type=translation_model)
 
-        # 创建ModelInActor
+        # 修改ModelInActor初始化方式，不再传递cosyvoice_actor
         self.model_in_actor = ModelInActor.options(
             num_cpus=self.config.MODELIN_ACTOR_NUM_CPUS,
             name="model_in"
-        ).remote(self.cosyvoice_model_actor)
+        ).remote()
 
         # 创建FFmpegTool实例，用于共享
         self.ffmpeg_tool = FFmpegTool()
@@ -117,10 +124,12 @@ class ViTranslator:
             f"[trans_video] 开始处理视频: {task_state.video_path}, task_id={task_state.task_id}, target_language={task_state.target_language}, generate_subtitle={task_state.generate_subtitle}"
         )
         
+        # 修改pipeline初始化，传递新的actor
         pipeline = PipelineScheduler(
             translator_actor=self.translator_actor,
             model_in_actor=self.model_in_actor,
-            cosyvoice_actor=self.cosyvoice_model_actor,
+            tts_token_gen_actor=self.tts_token_gen_actor,  # 新参数
+            audio_gen_actor=self.audio_gen_actor,  # 新参数
             simplifier=self.translator_actor,  # 使用translator_actor作为simplifier
             config=self.config,
             sample_rate=self.target_sr,  # 使用target_sr作为采样率

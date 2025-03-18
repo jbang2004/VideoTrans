@@ -99,3 +99,5 @@ class Config:
     ASR_BATCH_SIZE_S = 60  # 音频批处理大小(秒)
     ASR_USE_ITN = True     # 使用逆文本规范化
     ASR_MERGE_VAD = False  # 是否合并VAD结果
+
+    COSYVOICE_MODEL_PATH = "models/CosyVoice/pretrained_models/CosyVoice2-0.5B"

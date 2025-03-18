@@ -3,7 +3,7 @@ import ray
 import torch
 
 @ray.remote(num_cpus=0.1)
-def align_durations(sentences, simplifier=None, model_in_actor=None, cosyvoice_actor=None, max_speed=1.1):
+def align_durations(sentences, simplifier=None, model_in_actor=None, tts_token_gen_actor=None, max_speed=1.1):
     """
     对句子进行时长对齐处理（Ray Task版本）
     
@@ -11,7 +11,7 @@ def align_durations(sentences, simplifier=None, model_in_actor=None, cosyvoice_a
         sentences: 句子列表或句子列表的ObjectRef
         simplifier: 简化器Actor引用
         model_in_actor: 模型输入Actor引用
-        cosyvoice_actor: CosyVoice模型Actor引用
+        tts_token_gen_actor: TTS令牌生成Actor引用（替换原cosyvoice_actor）
         max_speed: 最大语速阈值
         
     Returns:
@@ -33,7 +33,7 @@ def align_durations(sentences, simplifier=None, model_in_actor=None, cosyvoice_a
         fast_indices = [i for i, sentence in enumerate(sentences) if sentence.speed > max_speed]
         
         # 如果有语速过快的句子，进行精简处理
-        if fast_indices and simplifier and model_in_actor and cosyvoice_actor:
+        if fast_indices and simplifier and model_in_actor and tts_token_gen_actor:
             logger.info(f"发现 {len(fast_indices)} 个语速过快的句子，进行精简...")
             
             # 提取需要精简的句子
@@ -57,13 +57,10 @@ def align_durations(sentences, simplifier=None, model_in_actor=None, cosyvoice_a
                     reuse_speaker=True,
                     batch_size=3
                 ):
-                    # 3. 使用generate_tts_tokens生成新的TTS token
-                    from core.tts_token_gener import generate_tts_tokens
-                    
-                    # 直接传递modelined_ref引用
-                    tts_token_ref = generate_tts_tokens.remote(
-                        modelined_ref,
-                        cosyvoice_actor
+                    # 3. 使用tts_token_gen_actor生成新的TTS token（修改部分）
+                    # 直接调用TtsTokenGenActor的generate_tts_tokens方法
+                    tts_token_ref = tts_token_gen_actor.generate_tts_tokens.remote(
+                        modelined_ref
                     )
                     
                     # 这里需要获取结果，因为我们需要合并多个批次的结果
