@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Union, Optional
 import ray
+from ray import serve
 
 from utils.ffmpeg_utils import FFmpegTool
 from utils.task_storage import TaskPaths
@@ -14,8 +15,7 @@ from config import Config
 
 logger = logging.getLogger(__name__)
 
-@ray.remote
-class HLSManagerActor:
+class HLSManager:
     """处理 HLS 流媒体相关的功能"""
     def __init__(self, config, task_id: str, task_paths: TaskPaths):
         self.config = config

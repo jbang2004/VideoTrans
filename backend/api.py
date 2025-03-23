@@ -1,20 +1,21 @@
-# ------------------------------
-# backend/api.py  (完整可复制版本)
-# ------------------------------
 import sys
 from pathlib import Path
 import logging
 import uuid
 import asyncio
-from typing import Dict
+from typing import Dict, Any, Optional
 
 import uvicorn
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form, Query
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import aiofiles
+import ray
+from ray import serve
+import os
+import time
 
 from config import Config
 config = Config()
@@ -29,10 +30,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-from video_translator import ViTranslator
-from core.hls_manager_actor import HLSManagerActor
-from utils.task_storage import TaskPaths
-from fastapi import BackgroundTasks
+# 引入StateManager和VideoTransPipe
+from core.state_manager import StateManager
+from pipeline_scheduler import VideoTransPipe
 
 app = FastAPI(debug=True)
 
@@ -47,164 +47,177 @@ app.add_middleware(
 current_dir = Path(__file__).parent
 templates = Jinja2Templates(directory=str(current_dir / "templates"))
 
-vi_translator = ViTranslator(config=config)
-task_results: Dict[str, dict] = {}
-task_states = {}  # 存储任务状态对象引用
-
-# 新增：后台状态更新任务
-async def update_task_status_worker():
-    """后台任务，定期更新task_results中的状态"""
-    logger.info("启动任务状态更新工作器")
-    try:
-        while True:
-            for task_id, task_state in list(task_states.items()):
-                if task_id in task_results:
-                    # 从task_state更新hls_ready状态到task_results
-                    if task_state.hls_ready and not task_results[task_id].get("hls_ready", False):
-                        logger.info(f"更新任务状态：任务{task_id}的HLS流已就绪")
-                        task_results[task_id]["hls_ready"] = True
-                    
-                    # 更新进度信息
-                    if task_state.batch_counter > 0:
-                        # 估计进度百分比，假设最多25个批次
-                        progress = min(95, int(task_state.batch_counter * 4))
-                        task_results[task_id]["progress"] = progress
-            
-            # 每0.5秒更新一次状态，提高响应速度
-            await asyncio.sleep(0.5)
-    except asyncio.CancelledError:
-        logger.info("任务状态更新工作器已停止")
-    except Exception as e:
-        logger.error(f"任务状态更新工作器异常: {str(e)}")
-
-# 启动后台状态更新任务
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(update_task_status_worker())
-
-@app.get("/")
-async def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
-
-@app.post("/upload")
-async def upload_video(
-    video: UploadFile = File(...),
-    target_language: str = Form("zh"),
-    # =============== (新增) ================
-    generate_subtitle: bool = Form(False),  # 是否烧制字幕
-):
+@serve.deployment(
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 0.5}  # 减少CPU需求
+)
+@serve.ingress(app)
+class VideoTransAPI:
     """
-    上传视频接口：
-    - generate_subtitle: 用户是否选择生成并烧制字幕
+    视频翻译API服务
+    使用StateManager进行任务状态管理，PipelineEngine进行视频翻译
     """
-    try:
-        if not video:
-            raise HTTPException(status_code=400, detail="没有文件上传")
+    def __init__(self, state_manager_handle=None, pipeline_handle=None):
+        """初始化API服务，接收StateManager和PipelineEngine的handles"""
+        self.state_manager = state_manager_handle or serve.get_deployment_handle("StateManager", app_name="StateManager")
+        self.pipeline = pipeline_handle or serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
+        self.logger = logger
+        self.logger.info("VideoTransAPI初始化完成")
+
+    @app.get("/")
+    async def index(self, request: Request):
+        """首页"""
+        return templates.TemplateResponse("index.html", {"request": request})
+
+    @app.post("/upload")
+    async def upload_video(
+        self,
+        video: UploadFile = File(...),
+        target_language: str = Form("zh"),
+        generate_subtitle: bool = Form(False),  # 是否烧制字幕
+    ):
+        """
+        上传视频接口
         
-        if not video.content_type.startswith('video/'):
-            raise HTTPException(status_code=400, detail="只支持视频文件")
-            
-        if target_language not in ["zh", "en", "ja", "ko"]:
-            raise HTTPException(status_code=400, detail=f"不支持的目标语言: {target_language}")
-        
-        task_id = str(uuid.uuid4())
-        task_paths = TaskPaths(config, task_id)
-        task_paths.create_directories()
-        
-        video_path = task_paths.input_dir / f"original_{video.filename}"
+        Args:
+            video: 视频文件
+            target_language: 目标语言
+            generate_subtitle: 是否生成字幕
+        """
         try:
-            async with aiofiles.open(video_path, "wb") as f:
-                content = await video.read()
-                await f.write(content)
-        except Exception as e:
-            logger.error(f"保存文件失败: {str(e)}")
-            raise HTTPException(status_code=500, detail="文件保存失败")
-        
-        # 创建HLSManagerActor
-        hls_manager_actor = HLSManagerActor.remote(config, task_id, task_paths)
-        
-        # ===================
-        # 在这里传递 generate_subtitle 给 translator
-        # ===================
-        task_state = await vi_translator.init_task_state(
-            video_path=str(video_path),
-            task_id=task_id,
-            task_paths=task_paths,
-            target_language=target_language,
-            generate_subtitle=generate_subtitle,
-        )
-        
-        # 保存任务状态引用以便后台更新
-        task_states[task_id] = task_state
-        
-        task = asyncio.create_task(vi_translator.trans_video(
-            task_state=task_state,
-            hls_manager_actor=hls_manager_actor,
-        ))
-        
-        task_results[task_id] = {
-            "status": "processing",
-            "message": "视频处理中",
-            "progress": 0,
-            "hls_ready": False
-        }
-        
-        async def on_task_complete(t):
+            if not video:
+                raise HTTPException(status_code=400, detail="没有文件上传")
+            
+            if not video.content_type.startswith('video/'):
+                raise HTTPException(status_code=400, detail="只支持视频文件")
+                
+            if target_language not in ["zh", "en", "ja", "ko"]:
+                raise HTTPException(status_code=400, detail=f"不支持的目标语言: {target_language}")
+            
+            # 生成任务ID
+            task_id = str(uuid.uuid4())
+            self.logger.info(f"新建任务ID: {task_id}, 目标语言: {target_language}, 生成字幕: {generate_subtitle}")
+            
+            # 保存上传的视频文件
+            input_dir = config.TASKS_DIR / task_id / "input"
+            input_dir.mkdir(parents=True, exist_ok=True)
+            
+            video_path = input_dir / f"original_{video.filename}"
             try:
-                result = await t
-                if result.get('status') == 'success':
-                    task_results[task_id].update({
-                        "status": "success",
-                        "message": "处理完成",
-                        "progress": 100,
-                        "hls_ready": True
-                    })
-                else:
-                    task_results[task_id].update({
-                        "status": "error",
-                        "message": result.get('message', '处理失败'),
-                        "progress": 0,
-                        "hls_ready": False
-                    })
-                # 清理状态引用
-                if task_id in task_states:
-                    del task_states[task_id]
+                async with aiofiles.open(video_path, "wb") as f:
+                    content = await video.read()
+                    await f.write(content)
             except Exception as e:
-                logger.error(f"任务处理失败: {str(e)}")
-                task_results[task_id].update({
-                    "status": "error",
-                    "message": str(e),
-                    "progress": 0,
-                    "hls_ready": False
-                })
-                # 清理状态引用
-                if task_id in task_states:
-                    del task_states[task_id]
-        
-        task.add_done_callback(lambda t: asyncio.create_task(on_task_complete(t)))
-        
-        return {
-            'status': 'processing',
-            'task_id': task_id,
-            'message': '视频上传成功，开始处理'
-        }
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.error(f"上传处理失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+                self.logger.error(f"保存文件失败: {str(e)}")
+                raise HTTPException(status_code=500, detail="文件保存失败")
+            
+            self.logger.info(f"正在创建任务状态: {task_id}")
+            # 通过StateManager创建任务状态
+            task_data = await self.state_manager.create_task.remote(
+                task_id=task_id,
+                video_path=str(video_path),
+                target_language=target_language,
+                generate_subtitle=generate_subtitle
+            )
+            
+            # 在调用VideoTransPipe之前添加日志
+            self.logger.info(f"正在调用VideoTransPipe处理任务: {task_id}")
+            try:
+                # 确保正确调用并等待结果
+                result = await self.pipeline.remote(task_id)
+                self.logger.info(f"成功触发VideoTransPipe处理: {task_id}, 结果: {result}")
+            except Exception as e:
+                self.logger.error(f"调用VideoTransPipe失败: {str(e)}", exc_info=True)
+            
+            return JSONResponse(content={
+                'status': 'processing',
+                'task_id': task_id,
+                'message': '视频上传成功，开始翻译'
+            })
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            self.logger.error(f"上传处理失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/task/{task_id}")
-async def get_task_status(task_id: str):
-    result = task_results.get(task_id)
-    if not result:
-        return {
-            "status": "error",
-            "message": "任务不存在",
-            "progress": 0
-        }
-    return result
+    @app.get("/task/{task_id}")
+    async def get_task_status(self, task_id: str):
+        """获取任务状态"""
+        result = await self.state_manager.get_task_status.remote(task_id)
+        if not result:
+            return JSONResponse(content={
+                "status": "error",
+                "message": "任务不存在",
+                "progress": 0
+            })
+        return JSONResponse(content=result)
 
+    @app.get("/playlists/{task_id}/{filename}")
+    async def serve_playlist(self, task_id: str, filename: str):
+        """提供HLS播放列表"""
+        try:
+            # 修改路径，使用task_id子目录
+            playlist_path = config.PUBLIC_DIR / "playlists" / task_id / filename
+            if not playlist_path.exists():
+                # 尝试不带task_id的路径（向后兼容）
+                playlist_path = config.PUBLIC_DIR / "playlists" / filename
+                if not playlist_path.exists():
+                    logger.error(f"播放列表未找到: {playlist_path}")
+                    raise HTTPException(status_code=404, detail="播放列表未找到")
+            
+            logger.info(f"提供播放列表: {playlist_path}")
+            async with aiofiles.open(playlist_path, mode='rb') as f:
+                content = await f.read()
+                
+            return Response(
+                content=content,
+                media_type='application/vnd.apple.mpegurl',
+                headers={
+                    "Cache-Control": "public, max-age=3600",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
+        except Exception as e:
+            logger.error(f"服务播放列表失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/segments/{task_id}/{filename}")
+    async def serve_segments(self, task_id: str, filename: str):
+        """提供HLS视频片段"""
+        try:
+            segment_path = config.PUBLIC_DIR / "segments" / task_id / filename
+            if not segment_path.exists():
+                logger.error(f"片段文件未找到: {segment_path}")
+                raise HTTPException(status_code=404, detail="片段文件未找到")
+            
+            # 使用StreamingResponse而非静态文件
+            return StreamingResponse(
+                open(segment_path, mode="rb"),
+                media_type='video/MP2T',
+                headers={
+                    "Cache-Control": "no-cache, no-store, must-revalidate",
+                    "Pragma": "no-cache",
+                    "Expires": "0",
+                    "Access-Control-Allow-Origin": "*"
+                }
+            )
+        except Exception as e:
+            logger.error(f"服务视频片段失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/download/{task_id}")
+    async def download_translated_video(self, task_id: str):
+        """下载翻译后的视频"""
+        final_video_path = config.TASKS_DIR / task_id / "output" / f"final_{task_id}.mp4"
+        if not final_video_path.exists():
+            raise HTTPException(status_code=404, detail="最终视频文件尚未生成或已被删除")
+        return FileResponse(
+            str(final_video_path),
+            media_type='video/mp4',
+            filename=f"final_{task_id}.mp4",
+        )
+
+# 静态文件挂载
 app.mount("/playlists", 
     StaticFiles(directory=str(config.PUBLIC_DIR / "playlists"), 
     check_dir=True), 
@@ -217,72 +230,38 @@ app.mount("/segments",
     ), 
     name="segments")
 
-@app.get("/playlists/{task_id}/{filename}")
-async def serve_playlist(task_id: str, filename: str):
-    try:
-        # 修改路径，使用task_id子目录
-        playlist_path = config.PUBLIC_DIR / "playlists" / task_id / filename
-        if not playlist_path.exists():
-            # 尝试不带task_id的路径（向后兼容）
-            playlist_path = config.PUBLIC_DIR / "playlists" / filename
-            if not playlist_path.exists():
-                logger.error(f"播放列表未找到: {playlist_path}")
-                raise HTTPException(status_code=404, detail="播放列表未找到")
-        
-        logger.info(f"提供播放列表: {playlist_path}")
-        async with aiofiles.open(playlist_path, mode='rb') as f:
-            content = await f.read()
-            
-        return Response(
-            content=content,
-            media_type='application/vnd.apple.mpegurl',
-            headers={
-                "Cache-Control": "public, max-age=3600",
-                "Access-Control-Allow-Origin": "*"
-            }
-        )
-    except Exception as e:
-        logger.error(f"服务播放列表失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/segments/{task_id}/{filename}")
-async def serve_segments(task_id: str, filename: str):
-    try:
-        segment_path = config.PUBLIC_DIR / "segments" / task_id / filename
-        if not segment_path.exists():
-            logger.error(f"片段文件未找到: {segment_path}")
-            raise HTTPException(status_code=404, detail="片段文件未找到")
-        
-        # 使用StreamingResponse而非静态文件
-        return StreamingResponse(
-            open(segment_path, mode="rb"),
-            media_type='video/MP2T',
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-                "Access-Control-Allow-Origin": "*"
-            }
-        )
-    except Exception as e:
-        logger.error(f"服务视频片段失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/download/{task_id}")
-async def download_translated_video(task_id: str):
-    final_video_path = config.TASKS_DIR / task_id / "output" / f"final_{task_id}.mp4"
-    if not final_video_path.exists():
-        raise HTTPException(status_code=404, detail="最终视频文件尚未生成或已被删除")
-    return FileResponse(
-        str(final_video_path),
-        media_type='video/mp4',
-        filename=f"final_{task_id}.mp4",
+# 部署服务
+def setup_server():
+    """初始化Ray Serve服务器，部署必要的服务"""
+    if not ray.is_initialized():
+        ray.init(address="auto")
+    
+    serve.start(detached=False)
+    
+    # 1. 首先部署StateManager
+    state_manager = StateManager.bind(config)
+    serve.run(state_manager, name="StateManager", route_prefix=None)
+    
+    # 等待确保StateManager就绪
+    logger.info("等待确保StateManager就绪...")
+    time.sleep(2)
+    
+    # 2. 部署PipelineEngine
+    from pipeline_scheduler import app as pipeline_app
+    serve.run(pipeline_app, name="PipelineEngine", route_prefix=None)
+    
+    # 等待确保PipelineEngine就绪
+    logger.info("等待确保PipelineEngine就绪...")
+    time.sleep(1)
+    
+    # 3. 部署API服务
+    video_api = VideoTransAPI.bind(
+        state_manager_handle=serve.get_deployment_handle("StateManager", app_name="StateManager"),
+        pipeline_handle=serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
     )
+    serve.run(video_api, name="VideoAPI", route_prefix="/", blocking=True)
+    
+    logger.info("服务部署完成: StateManager, PipelineEngine, VideoAPI")
 
 if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host=config.SERVER_HOST,
-        port=config.SERVER_PORT,
-        log_level="info"
-    )
+    setup_server()

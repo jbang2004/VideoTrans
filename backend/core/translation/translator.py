@@ -3,6 +3,7 @@ import logging
 from typing import Dict, List, AsyncGenerator, Optional, TypeVar, Generic
 from dataclasses import dataclass
 import ray
+from ray import serve
 from .prompt import (
     TRANSLATION_SYSTEM_PROMPT,
     TRANSLATION_USER_PROMPT,
@@ -25,17 +26,29 @@ class BatchConfig:
 
 T = TypeVar('T')
 
-@ray.remote(num_cpus=Config().TRANSLATOR_ACTOR_NUM_CPUS)
-class TranslatorActor:
-    def __init__(self, api_key: str = None, model_type: str = "deepseek"):
+@serve.deployment(
+    name="translator",
+    num_replicas=1,
+    ray_actor_options={"num_cpus": Config().TRANSLATOR_ACTOR_NUM_CPUS},
+    # autoscaling_config={
+    #     "min_replicas": 1,
+    #     "max_replicas": 5,
+    #     "target_num_ongoing_requests_per_replica": 10
+    # }
+)
+class Translator:
+    def __init__(self):
         self.logger = logging.getLogger(__name__)
-        if model_type.lower() == "deepseek":
-            self.client = DeepSeekClient(api_key=api_key)
-        elif model_type.lower() == "gemini":
-            self.client = GeminiClient(api_key=api_key)
+        self.config = Config()
+        translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
+        
+        if translation_model == "deepseek":
+            self.client = DeepSeekClient(api_key=self.config.DEEPSEEK_API_KEY)
+        elif translation_model == "gemini":
+            self.client = GeminiClient(api_key=self.config.GEMINI_API_KEY)
         else:
-            raise ValueError(f"不支持的翻译模型：{model_type}")
-        self.logger.info(f"初始化翻译Actor，使用模型: {model_type}")
+            raise ValueError(f"不支持的翻译模型：{translation_model}")
+        self.logger.info(f"初始化翻译Actor，使用模型: {translation_model}")
 
     async def translate(self, texts: Dict[str, str], target_language: str = "zh") -> Dict[str, str]:
         """翻译文本"""
@@ -222,3 +235,59 @@ class TranslatorActor:
             reduce_batch_on_error=False
         ):
             yield batch_result
+
+    async def translate_sentences_simple(self, sentences, target_language, batch_size=5):
+        """
+        一次性翻译多个句子，返回翻译结果的列表
+        避免使用流式处理导致的内存管理问题
+        
+        Args:
+            sentences: 句子列表
+            target_language: 目标语言代码
+            batch_size: 批处理大小
+            
+        Returns:
+            翻译完成的句子列表
+        """
+        if not sentences:
+            self.logger.warning("收到空的句子列表，跳过翻译")
+            return []
+            
+        self.logger.info(f"一次性翻译 {len(sentences)} 个句子，目标语言: {target_language}")
+        
+        # 处理小批次，避免一次处理太多句子
+        translated_sentences = []
+        batch_count = (len(sentences) + batch_size - 1) // batch_size
+        
+        try:
+            for i in range(batch_count):
+                start_idx = i * batch_size
+                end_idx = min(start_idx + batch_size, len(sentences))
+                batch = sentences[start_idx:end_idx]
+                
+                # 翻译一批句子
+                batch_texts = [s.raw_text for s in batch]
+                
+                # 使用翻译方法翻译
+                translations = await self.translate(batch_texts, target_language)
+                
+                # 更新翻译结果
+                for j, translation in enumerate(translations):
+                    batch[j].trans_text = translation
+                    
+                # 添加到结果
+                translated_sentences.extend(batch)
+                
+                # 清理内存
+                import gc
+                gc.collect()
+                
+                # 输出进度日志
+                self.logger.debug(f"已翻译 {end_idx}/{len(sentences)} 个句子")
+                
+            self.logger.info(f"翻译完成，共 {len(translated_sentences)} 个句子")
+            return translated_sentences
+            
+        except Exception as e:
+            self.logger.error(f"翻译句子失败: {str(e)}", exc_info=True)
+            raise

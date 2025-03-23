@@ -6,8 +6,7 @@ import logging
 import asyncio
 from typing import List, Optional, Tuple
 from pathlib import Path
-import time
-import ray
+from ray import serve
 
 from utils.ffmpeg_utils import FFmpegTool
 from utils.audio_utils import apply_fade_effect, mix_with_background, normalize_audio
@@ -26,18 +25,27 @@ if not logger.handlers:  # 如果没有处理器，添加一个控制台处理�
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-@ray.remote(num_cpus=Config().MEDIA_MIXER_ACTOR_NUM_CPUS)
-class MediaMixerActor:
+@serve.deployment(
+    name="media_mixer",
+    num_replicas=1,
+    ray_actor_options={"num_cpus": Config().MEDIA_MIXER_ACTOR_NUM_CPUS},
+    # autoscaling_config={
+    #     "min_replicas": 1,
+    #     "max_replicas": 5,
+    #     "target_num_ongoing_requests_per_replica": 2
+    # }
+)
+class MediaMixer:
     """
-    媒体混合Actor，负责混合音频和视频
+    媒体混合，负责混合音频和视频
     """
-    def __init__(self, config, sample_rate):
-        self.config = config
-        self.sample_rate = sample_rate
+    def __init__(self):
+        self.config = Config()
+        self.sample_rate = self.config.TARGET_SR
         self.ffmpeg_tool = FFmpegTool()
         self.max_val = 0.8  # 音频最大值
         self.logger = logging.getLogger(__name__)
-        self.logger.info(f"MediaMixerActor初始化完成，采样率={sample_rate}")
+        self.logger.info(f"MediaMixerActor初始化完成，采样率={self.sample_rate}")
         self.full_audio_buffer = np.array([], dtype=np.float32)
     
     def mix_media(

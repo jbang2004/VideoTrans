@@ -7,18 +7,27 @@ import librosa
 from typing import List, Optional, AsyncGenerator
 import asyncio
 import ray
+from ray import serve
 import uuid
 from config import Config
 
-@ray.remote
-class ModelInActor:
+@serve.deployment(
+    name="model_in_maker",
+    num_replicas=1,
+    ray_actor_options={"num_cpus": Config().MODELIN_ACTOR_NUM_CPUS},
+    # autoscaling_config={
+    #     "min_replicas": 1,
+    #     "max_replicas": 3,
+    #     "target_num_ongoing_requests_per_replica": 5
+    # }
+)
+class ModelInMaker:
     def __init__(self):
         """初始化Frontend模块，独立加载CosyVoiceFrontEnd"""
         self.logger = logging.getLogger(__name__)
         
         # 使用配置中的目标采样率和其他配置
         self.config = Config()
-        self.cosy_sample_rate = self.config.TARGET_SR
         self.speaker_cache = {}  # 存储speaker_id到特征文件路径的映射
         self.max_val = 0.8
         self.semaphore = asyncio.Semaphore(4)
@@ -170,12 +179,22 @@ class ModelInActor:
                     # 保存特征路径到本地缓存
                     self.speaker_cache[speaker_id] = speaker_feature_path
                     
+                    # 显式删除大型音频数据，释放内存
+                    del processed_audio
+                    del speech_tensor
+                    
                 except Exception as e:
                     self.logger.error(f"模型输入音频处理失败: {str(e)}")
                     raise
                 
             # 保存speaker_feature_path到sentence
             sentence.model_input['speaker_feature_path'] = self.speaker_cache[speaker_id]
+            
+            # 特征提取完成后删除audio数据，释放内存
+            if hasattr(sentence, 'audio') and sentence.audio is not None:
+                del sentence.audio
+                sentence.audio = None
+                self.logger.debug(f"已删除句子的原始音频数据，释放内存")
 
         # 2) 文本特征更新
         await self._update_text_features_sync(sentence)

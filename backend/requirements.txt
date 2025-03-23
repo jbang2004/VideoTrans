@@ -69,3 +69,4 @@ openai
 json_repair
 m3u8
 funasr
+ray[serve]==2.9.0

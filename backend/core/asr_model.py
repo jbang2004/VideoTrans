@@ -2,14 +2,24 @@ import ray
 import sys
 import logging
 from config import Config
+from ray import serve
 
-@ray.remote(num_gpus=Config().ASR_ACTOR_NUM_GPUS)  # 使用配置中的GPU资源分配
-class SenseAutoModelActor:
+@serve.deployment(
+    name="asr_model",
+    num_replicas=1,
+    ray_actor_options={"num_gpus": Config().ASR_ACTOR_NUM_GPUS},
+    # autoscaling_config={
+    #     "min_replicas": 1,
+    #     "max_replicas": 3,
+    #     "target_num_ongoing_requests_per_replica": 1
+    # }
+)
+class ASRModel:
     """
-    ASR模型Actor，负责语音识别
+    ASR模型，负责语音识别
     """
     def __init__(self):
-        """初始化ASR模型Actor"""
+        """初始化ASR模型"""
         self.logger = logging.getLogger(__name__)
         self.logger.info("初始化ASR模型Actor")
         self.config = Config()

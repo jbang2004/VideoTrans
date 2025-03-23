@@ -1,5 +1,6 @@
 import logging
 import ray
+from ray import serve
 import os
 import sys
 import torch
@@ -8,8 +9,17 @@ import threading
 import numpy as np
 from config import Config
 
-@ray.remote(num_cpus=0.1, num_gpus=0.2)
-class TtsTokenGenActor:
+@serve.deployment(
+    name="tts_token_generator",
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 0.1, "num_gpus": 0.2},
+    # autoscaling_config={
+    #     "min_replicas": 1,
+    #     "max_replicas": 3,
+    #     "target_num_ongoing_requests_per_replica": 1
+    # }
+)
+class TtsTokenGenerator:
     """TTS Token生成Actor，专注于LLM模型"""
     
     def __init__(self):
