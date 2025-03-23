@@ -1,4 +1,4 @@
-# core/hls_manager_actor.py
+# core/hls_manager.py
 import logging
 import m3u8
 import os.path
@@ -9,13 +9,21 @@ from typing import Union, Optional
 import ray
 from ray import serve
 
-from utils.ffmpeg_utils import FFmpegTool
+from utils.ffmpeg_utils import hls_segment
 from utils.task_storage import TaskPaths
 from config import Config
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)  # 确保日志级别设置为INFO
+if not logger.handlers:  # 如果没有处理器，添加一个控制台处理器
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(levelname)s | %(asctime)s | %(name)s | L%(lineno)d | %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
-class HLSManager:
+@ray.remote(num_cpus=0.2)
+class HLSManagerActor:
     """处理 HLS 流媒体相关的功能"""
     def __init__(self, config, task_id: str, task_paths: TaskPaths):
         self.config = config
@@ -32,15 +40,12 @@ class HLSManager:
         self.playlist.version = 3
         self.playlist.target_duration = 20
         self.playlist.media_sequence = 0
-        self.playlist.playlist_type = 'VOD'
+        self.playlist.playlist_type = 'EVENT'
         # 不设置is_endlist，让播放器可以实时加载新分段
         self.playlist.is_endlist = False
 
         # 添加segment_time属性，默认为10秒
         self.segment_time = 10
-
-        # 引入统一 ffmpeg 工具
-        self.ffmpeg_tool = FFmpegTool()
 
         self.has_segments = False
 
@@ -67,18 +72,19 @@ class HLSManager:
             self.logger.error(f"保存播放列表失败: {e}")
             raise
 
-    def add_segment(self, video_path: Union[str, Path], part_index: int) -> bool:
-        """添加新的视频片段到播放列表（同步方法）"""
+    async def add_segment(self, video_path: Union[str, Path], part_index: int) -> bool:
+        """添加新的视频片段到播放列表（异步方法）"""
         start_time = time.time()
         try:
+            self.logger.info(f"开始处理HLS片段 {part_index}, TaskID={self.task_id}")
             self.segments_dir.mkdir(parents=True, exist_ok=True)
 
             segment_filename = f'segment_{self.sequence_number:04d}_%03d.ts'
             segment_pattern = str(self.segments_dir / segment_filename)
             temp_playlist_path = self.task_paths.processing_dir / f'temp_{part_index}.m3u8'
 
-            # 直接使用同步版本的hls_segment方法
-            self.ffmpeg_tool.hls_segment(
+            # 使用异步Ray任务
+            await hls_segment.remote(
                 input_path=str(video_path),
                 segment_pattern=segment_pattern,
                 playlist_path=str(temp_playlist_path),
@@ -114,7 +120,7 @@ class HLSManager:
             self.logger.error(f"添加HLS片段失败: {e}，耗时 {elapsed:.2f}s")
             return False
 
-    def finalize_playlist(self) -> bool:
+    async def finalize_playlist(self) -> bool:
         """标记播放列表为完成状态"""
         try:
             if self.has_segments:
@@ -129,6 +135,6 @@ class HLSManager:
             self.logger.error(f"完成播放列表失败: {e}")
             return False
 
-    def get_has_segments(self):
+    async def get_has_segments(self):
         """获取has_segments属性的值"""
         return self.has_segments 

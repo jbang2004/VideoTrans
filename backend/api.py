@@ -111,21 +111,17 @@ class VideoTransAPI:
                 self.logger.error(f"保存文件失败: {str(e)}")
                 raise HTTPException(status_code=500, detail="文件保存失败")
             
-            self.logger.info(f"正在创建任务状态: {task_id}")
-            # 通过StateManager创建任务状态
-            task_data = await self.state_manager.create_task.remote(
-                task_id=task_id,
-                video_path=str(video_path),
-                target_language=target_language,
-                generate_subtitle=generate_subtitle
-            )
-            
             # 在调用VideoTransPipe之前添加日志
             self.logger.info(f"正在调用VideoTransPipe处理任务: {task_id}")
             try:
-                # 确保正确调用并等待结果
-                result = await self.pipeline.remote(task_id)
-                self.logger.info(f"成功触发VideoTransPipe处理: {task_id}, 结果: {result}")
+                # 直接将任务创建参数传递给pipeline
+                self.pipeline.remote(
+                    task_id=task_id,
+                    video_path=str(video_path),
+                    target_language=target_language,
+                    generate_subtitle=generate_subtitle
+                )
+                self.logger.info(f"成功触发VideoTransPipe处理: {task_id}")
             except Exception as e:
                 self.logger.error(f"调用VideoTransPipe失败: {str(e)}", exc_info=True)
             
@@ -173,9 +169,11 @@ class VideoTransAPI:
                 content=content,
                 media_type='application/vnd.apple.mpegurl',
                 headers={
-                    "Cache-Control": "public, max-age=3600",
-                    "Access-Control-Allow-Origin": "*"
-                }
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+                "Access-Control-Allow-Origin": "*"
+            }
             )
         except Exception as e:
             logger.error(f"服务播放列表失败: {str(e)}")
@@ -234,7 +232,7 @@ app.mount("/segments",
 def setup_server():
     """初始化Ray Serve服务器，部署必要的服务"""
     if not ray.is_initialized():
-        ray.init(address="auto")
+        ray.init(address="auto", log_to_driver=True)
     
     serve.start(detached=False)
     

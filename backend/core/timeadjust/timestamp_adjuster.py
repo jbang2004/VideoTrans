@@ -4,9 +4,11 @@ from typing import List
 
 logger = logging.getLogger("timestamp_adjuster")
 
-@serve.deployment
+@serve.deployment(
+    name="timestamp_adjuster"
+)
 class TimestampAdjuster:
-    def __call__(self, sentences: List, sample_rate: int, start_time: float = None) -> List:
+    async def __call__(self, sentences: List, sample_rate: int, start_time: float = None) -> List:
         if not sentences:
             logger.warning("adjust_timestamps: 收到空的句子列表")
             return sentences

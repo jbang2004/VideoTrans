@@ -3,12 +3,10 @@
 # ---------------------------------------------------
 import numpy as np
 import logging
-import asyncio
 from typing import List, Optional, Tuple
-from pathlib import Path
 from ray import serve
 
-from utils.ffmpeg_utils import FFmpegTool
+# Ray tasks imported directly
 from utils.audio_utils import apply_fade_effect, mix_with_background, normalize_audio
 from utils.video_utils import add_video_segment 
 from config import Config
@@ -26,14 +24,7 @@ if not logger.handlers:  # 如果没有处理器，添加一个控制台处理�
     logger.addHandler(handler)
 
 @serve.deployment(
-    name="media_mixer",
-    num_replicas=1,
-    ray_actor_options={"num_cpus": Config().MEDIA_MIXER_ACTOR_NUM_CPUS},
-    # autoscaling_config={
-    #     "min_replicas": 1,
-    #     "max_replicas": 5,
-    #     "target_num_ongoing_requests_per_replica": 2
-    # }
+    name="media_mixer"
 )
 class MediaMixer:
     """
@@ -42,13 +33,12 @@ class MediaMixer:
     def __init__(self):
         self.config = Config()
         self.sample_rate = self.config.TARGET_SR
-        self.ffmpeg_tool = FFmpegTool()
         self.max_val = 0.8  # 音频最大值
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"MediaMixerActor初始化完成，采样率={self.sample_rate}")
         self.full_audio_buffer = np.array([], dtype=np.float32)
     
-    def mix_media(
+    async def mix_media(
         self,
         sentences_batch: List[Sentence],
         task_state: TaskState,
@@ -72,7 +62,7 @@ class MediaMixer:
             max_val = 1.0
             
             # 处理音视频，使用Actor中保存的full_audio_buffer
-            success, updated_buffer = create_mixed_segment(
+            success, updated_buffer = await create_mixed_segment(
                 sentences=sentences_batch,
                 task_state=task_state,
                 output_path=str(output_path),
@@ -80,8 +70,7 @@ class MediaMixer:
                 config=self.config,
                 sample_rate=self.sample_rate,
                 max_val=max_val,
-                full_audio_buffer=self.full_audio_buffer,
-                ffmpeg_tool=self.ffmpeg_tool
+                full_audio_buffer=self.full_audio_buffer
             )
             
             if not success:
@@ -90,6 +79,7 @@ class MediaMixer:
             
             # 更新Actor中的音频缓冲区
             self.full_audio_buffer = updated_buffer
+            logger.info(f"[MediaMixerActor] 更新音频缓冲区, 分段 {batch_counter}, 句子数 {len(sentences_batch)}")
             
             # 返回处理后的视频片段路径
             return str(output_path)
@@ -98,7 +88,7 @@ class MediaMixer:
             logger.exception(f"[MediaMixerActor] mix_media 执行出错: {str(e)}")
             return None
 
-def create_mixed_segment(
+async def create_mixed_segment(
     sentences: List[Sentence],
     task_state: TaskState,
     output_path: str,
@@ -106,8 +96,7 @@ def create_mixed_segment(
     config: Config,
     sample_rate: int,
     max_val: float,
-    full_audio_buffer: np.ndarray,
-    ffmpeg_tool: FFmpegTool
+    full_audio_buffer: np.ndarray
 ) -> Tuple[bool, np.ndarray]:
     """
     将一批句子的合成音频与原视频片段混合，并可生成带字幕的视频。
@@ -150,7 +139,7 @@ def create_mixed_segment(
             logger.warning("[MediaMixer] create_mixed_segment: 本片段无video_path可用")
             return False, full_audio_buffer
 
-        add_video_segment(
+        await add_video_segment(
             video_path=video_path,
             start_time=start_time_param,
             duration=duration,
@@ -159,8 +148,7 @@ def create_mixed_segment(
             sentences=sentences,
             generate_subtitle=generate_subtitle,
             task_state=task_state,
-            sample_rate=sample_rate,
-            ffmpeg_tool=ffmpeg_tool
+            sample_rate=sample_rate
         )
         return True, updated_audio_buffer
         

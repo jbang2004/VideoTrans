@@ -10,14 +10,7 @@ import threading
 from config import Config
 
 @serve.deployment(
-    name="audio_generator",
-    num_replicas=1,
-    ray_actor_options={"num_cpus": 0.1, "num_gpus": 0.3},
-    # autoscaling_config={
-    #     "min_replicas": 1,
-    #     "max_replicas": 3,
-    #     "target_num_ongoing_requests_per_replica": 1
-    # }
+    name="audio_generator"
 )
 class AudioGenerator:
     """音频生成Actor，专注于Flow和HiFT模型"""
@@ -120,7 +113,7 @@ class AudioGenerator:
             self.logger.error(f"异常堆栈: {traceback.format_exc()}")
             raise
     
-    def generate_audio(self, sentences):
+    async def generate_audio(self, sentences):
         """生成音频"""
         if not sentences:
             self.logger.warning("generate_audio: 收到空的句子列表")

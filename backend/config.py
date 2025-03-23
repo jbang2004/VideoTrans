@@ -90,10 +90,9 @@ class Config:
     # Actor资源配置
     CLEARVOICE_ACTOR_NUM_GPUS = 0.2  # 音频分离器
     ASR_ACTOR_NUM_GPUS = 0.2  # ASR模型
-    COSYVOICE_ACTOR_NUM_GPUS = 0.6  # CosyVoice模型（TTS核心）
-    TRANSLATOR_ACTOR_NUM_CPUS = 1.0  # 翻译Actor（CPU密集）
-    MODELIN_ACTOR_NUM_CPUS = 1.0  # ModelIn处理Actor（CPU密集）
-    MEDIA_MIXER_ACTOR_NUM_CPUS = 1.0  # 媒体混合Actor（CPU密集）
+    TRANSLATOR_ACTOR_NUM_CPUS = 0.5  # 翻译Actor（CPU密集）
+    MODELIN_ACTOR_NUM_CPUS = 0.5  # ModelIn处理Actor（CPU密集）
+    MEDIA_MIXER_ACTOR_NUM_CPUS = 0.5  # 媒体混合Actor（CPU密集）
 
     # ASR流程配置
     ASR_BATCH_SIZE_S = 60  # 音频批处理大小(秒)

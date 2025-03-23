@@ -6,7 +6,7 @@ import time
 import ray
 from ray import serve
 
-from utils.ffmpeg_utils import FFmpegTool
+from utils.ffmpeg_utils import get_duration
 from config import Config
 
 # 配置日志
@@ -23,7 +23,6 @@ class VideoSegmenter:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.config = Config()
-        self.ffmpeg_tool = FFmpegTool()
 
     async def segment_video(self, video_path: str) -> Dict:
         """
@@ -39,7 +38,7 @@ class VideoSegmenter:
             start_time = time.time()
             
             # 1. 获取视频总时长
-            duration = self._get_video_duration(video_path)
+            duration = await self._get_video_duration(video_path)
             
             # 2. 划分分段
             segments = self._get_audio_segments(
@@ -65,7 +64,7 @@ class VideoSegmenter:
             self.logger.exception(f"视频分段失败: {e}")
             return {"status": "error", "message": str(e)}
     
-    def _get_video_duration(self, video_path: str) -> float:
+    async def _get_video_duration(self, video_path: str) -> float:
         """
         获取视频时长
         
@@ -76,8 +75,8 @@ class VideoSegmenter:
             视频时长（秒）
         """
         try:
-            # 使用FFmpegTool获取视频时长
-            duration = self.ffmpeg_tool.get_duration(video_path)
+            # 使用Ray task获取视频时长
+            duration = await get_duration.remote(video_path)
             self.logger.debug(f"获取到视频时长: {duration:.2f}秒")
             return duration
         except Exception as e:

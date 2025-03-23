@@ -6,7 +6,9 @@ from typing import List
 
 logger = logging.getLogger("duration_aligner")
 
-@serve.deployment
+@serve.deployment(
+    name="duration_aligner"
+)
 class DurationAligner:
     def __init__(self, simplifier_handle: DeploymentHandle, model_in_handle: DeploymentHandle, tts_token_gen_handle: DeploymentHandle):
         self.simplifier = simplifier_handle

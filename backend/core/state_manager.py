@@ -7,13 +7,11 @@ from typing import Dict, Any, Optional
 from config import Config
 from utils.task_storage import TaskPaths
 from utils.task_state import TaskState
-from core.hls_manager import HLSManager
 
 logger = logging.getLogger(__name__)
 
 @serve.deployment(
-    num_replicas=1,  # 状态管理通常只需一个实例
-    ray_actor_options={"num_cpus": 0.5}
+    name="StateManager"
 )
 class StateManager:
     """
@@ -33,7 +31,7 @@ class StateManager:
     
     async def create_task(self, task_id, video_path, target_language, generate_subtitle):
         """
-        创建新任务并返回任务状态及HLS管理器
+        创建新任务并返回任务状态
         
         Args:
             task_id: 任务ID
@@ -42,7 +40,7 @@ class StateManager:
             generate_subtitle: 是否生成字幕
             
         Returns:
-            dict: 包含task_state和hls_manager的字典
+            dict: 包含task_state的字典
         """
         self.locks[task_id] = asyncio.Lock()
         
@@ -62,9 +60,6 @@ class StateManager:
                 generate_subtitle=generate_subtitle
             )
             
-            # 创建HLSManager - 直接创建实例而非使用Ray Serve
-            hls_manager = HLSManager(self.config, task_id, task_paths)
-            
             # 存储任务信息
             self.tasks[task_id] = {
                 "status": "processing",
@@ -72,13 +67,11 @@ class StateManager:
                 "progress": 0,
                 "hls_ready": False,
                 "task_state": task_state,
-                "hls_manager": hls_manager,
                 "create_time": asyncio.get_event_loop().time()
             }
             
             return {
-                "task_state": task_state,
-                "hls_manager": hls_manager
+                "task_state": task_state
             }
     
     async def get_task_state(self, task_id):
@@ -88,12 +81,7 @@ class StateManager:
             return None
         return self.tasks[task_id]["task_state"]
     
-    async def get_hls_manager(self, task_id):
-        """获取任务的HLS管理器引用"""
-        if task_id not in self.tasks:
-            logger.warning(f"任务不存在: {task_id}")
-            return None
-        return self.tasks[task_id]["hls_manager"]
+
     
     async def get_task_status(self, task_id):
         """

@@ -10,14 +10,7 @@ import numpy as np
 from config import Config
 
 @serve.deployment(
-    name="tts_token_generator",
-    num_replicas=1,
-    ray_actor_options={"num_cpus": 0.1, "num_gpus": 0.2},
-    # autoscaling_config={
-    #     "min_replicas": 1,
-    #     "max_replicas": 3,
-    #     "target_num_ongoing_requests_per_replica": 1
-    # }
+    name="tts_token_generator"
 )
 class TtsTokenGenerator:
     """TTS Token生成Actor，专注于LLM模型"""

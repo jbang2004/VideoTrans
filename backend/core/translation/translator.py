@@ -27,14 +27,7 @@ class BatchConfig:
 T = TypeVar('T')
 
 @serve.deployment(
-    name="translator",
-    num_replicas=1,
-    ray_actor_options={"num_cpus": Config().TRANSLATOR_ACTOR_NUM_CPUS},
-    # autoscaling_config={
-    #     "min_replicas": 1,
-    #     "max_replicas": 5,
-    #     "target_num_ongoing_requests_per_replica": 10
-    # }
+    name="translator"
 )
 class Translator:
     def __init__(self):
@@ -184,7 +177,7 @@ class Translator:
             self.logger.debug(f"简化批次: {len(texts)}条文本")
             batch_result = await self.simplify(texts)
             
-            if "thinking" not in batch_result or not any(key in batch_result for key in ["slight", "moderate", "extreme"]):
+            if "thinking" not in batch_result or not any(key in batch_result for key in ["minimal", "slight", "moderate", "significant", "extreme"]):
                 self.logger.error("简化结果格式不正确，缺少必要字段")
                 return None
                 
@@ -192,16 +185,19 @@ class Translator:
                 old_text = s.trans_text
                 str_i = str(i)
                 
-                if not any(str_i in batch_result.get(key, {}) for key in ["slight", "moderate", "extreme"]):
+                if not any(str_i in batch_result.get(key, {}) for key in ["minimal", "slight", "moderate", "significant", "extreme"]):
                     self.logger.error(f"句子 {i} 的简化结果不完整")
                     continue
 
                 ideal_length = len(old_text) * (target_speed / s.speed) if s.speed > 0 else len(old_text)
                 
+                # 存储所有可接受和不可接受的候选文本
                 acceptable_candidates = {}
                 non_acceptable_candidates = {}
                 
-                for key in ["slight", "moderate", "extreme"]:
+                # 按精简程度检查候选文本
+                simplification_levels = ["minimal", "slight", "moderate", "significant", "extreme"]
+                for key in simplification_levels:
                     if key in batch_result and str_i in batch_result[key]:
                         candidate_text = batch_result[key][str_i]
                         if candidate_text:
@@ -211,16 +207,40 @@ class Translator:
                             else:
                                 non_acceptable_candidates[key] = candidate_text
                 
+                # 如果有可接受的候选文本（长度小于等于理想长度），选择最接近理想长度的（最长的可接受文本）
                 if acceptable_candidates:
-                    chosen_key, chosen_text = max(acceptable_candidates.items(), key=lambda item: len(item[1]))
+                    best_candidate = None
+                    min_diff = float('inf')
+                    
+                    for key, text in acceptable_candidates.items():
+                        diff = abs(len(text) - ideal_length)
+                        if diff < min_diff:
+                            min_diff = diff
+                            best_candidate = (key, text)
+                    
+                    chosen_key, chosen_text = best_candidate
+                    
+                # 如果没有可接受的候选文本，选择最接近理想长度的不可接受文本
                 elif non_acceptable_candidates:
-                    chosen_key, chosen_text = min(non_acceptable_candidates.items(), key=lambda item: abs(len(item[1]) - ideal_length))
+                    best_candidate = None
+                    min_diff = float('inf')
+                    
+                    for key, text in non_acceptable_candidates.items():
+                        diff = abs(len(text) - ideal_length)
+                        if diff < min_diff:
+                            min_diff = diff
+                            best_candidate = (key, text)
+                    
+                    chosen_key, chosen_text = best_candidate
+                    
+                # 如果没有可用的候选文本，保持原文
                 else:
+                    chosen_key = "原文"
                     chosen_text = old_text
 
                 s.trans_text = chosen_text
                 self.logger.info(
-                    f"精简: {old_text} -> {chosen_text} (理想长度: {ideal_length}, s.speed: {s.speed})"
+                    f"精简[{chosen_key}]: {old_text} -> {chosen_text} (理想长度: {ideal_length}, 实际长度: {len(chosen_text)}, s.speed: {s.speed})"
                 )
             return batch
 

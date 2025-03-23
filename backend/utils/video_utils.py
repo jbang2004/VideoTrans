@@ -8,13 +8,15 @@ from typing import List, Any
 from pathlib import Path
 import time
 import warnings
+import ray
+import asyncio
 
-from utils.ffmpeg_utils import FFmpegTool
+from utils.ffmpeg_utils import cut_video_track, cut_video_with_audio, cut_video_with_subtitles_and_audio
 from utils.subtitle_utils import generate_subtitles_for_segment
 
 logger = logging.getLogger(__name__)
 
-def add_video_segment(
+async def add_video_segment(
     video_path: str,
     start_time: float,
     duration: float,
@@ -23,8 +25,7 @@ def add_video_segment(
     sentences: List[Any],
     generate_subtitle: bool,
     task_state: Any,
-    sample_rate: int,
-    ffmpeg_tool: FFmpegTool
+    sample_rate: int
 ):
     """
     从原视频里截取 [start_time, start_time + duration] 的视频段(无声)，
@@ -57,7 +58,7 @@ def add_video_segment(
         end_time = start_time + duration
 
         # 1) 截取视频 (无音轨)
-        ffmpeg_tool.cut_video_track(
+        await cut_video_track.remote(
             input_path=video_path,
             output_path=temp_video.name,
             start=start_time,
@@ -79,7 +80,7 @@ def add_video_segment(
             )
 
             # 生成带字幕的视频
-            ffmpeg_tool.cut_video_with_subtitles_and_audio(
+            await cut_video_with_subtitles_and_audio.remote(
                 input_video_path=temp_video.name,
                 input_audio_path=temp_audio.name,
                 subtitles_path=temp_ass.name,
@@ -87,7 +88,7 @@ def add_video_segment(
             )
         else:
             # 不加字幕，仅合并音频
-            ffmpeg_tool.cut_video_with_audio(
+            await cut_video_with_audio.remote(
                 input_video_path=temp_video.name,
                 input_audio_path=temp_audio.name,
                 output_path=output_path

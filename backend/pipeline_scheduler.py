@@ -18,29 +18,73 @@ from core.timeadjust.duration_aligner import DurationAligner
 from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.video_segmenter import VideoSegmenter
 from utils.task_state import TaskState
-from utils.ffmpeg_utils import FFmpegTool
+from utils.ffmpeg_utils import concat_videos
 from core.state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 
 # 创建各服务的部署句柄
-translator_handle = Translator.bind()
-model_in_handle = ModelInMaker.bind()
-tts_token_gen_handle = TtsTokenGenerator.bind()
-audio_gen_handle = AudioGenerator.bind()
-simplifier_handle = Translator.bind()
-media_mixer_handle = MediaMixer.bind()
-video_separator_handle = VideoSeparator.bind()
-asr_handle = ASRModel.bind()
-duration_aligner_handle = DurationAligner.bind(simplifier_handle, model_in_handle, tts_token_gen_handle)
-timestamp_adjuster_handle = TimestampAdjuster.bind()
-video_segmenter_handle = VideoSegmenter.bind()
+translator_handle = Translator.options(
+    num_replicas="auto",
+    ray_actor_options={"num_cpus": 0.5}  # 翻译器CPU资源
+).bind()
+
+model_in_handle = ModelInMaker.options(
+    num_replicas="auto",
+    ray_actor_options={"num_gpus": 0.2}  # 模型输入CPU资源
+).bind()
+
+tts_token_gen_handle = TtsTokenGenerator.options(
+    num_replicas="auto",
+    ray_actor_options={"num_cpus": 0.5, "num_gpus": 0.2}  # TTS标记生成器资源
+).bind()
+
+audio_gen_handle = AudioGenerator.options(
+    num_replicas="auto",
+    ray_actor_options={"num_cpus": 0.5, "num_gpus": 0.3}  # 音频生成器资源
+).bind()
+
+simplifier_handle = Translator.options(
+    num_replicas="auto",
+    ray_actor_options={"num_cpus": 0.5}  # 简化器CPU资源
+).bind()
+
+media_mixer_handle = MediaMixer.options(
+    num_replicas="auto",
+    ray_actor_options={"num_cpus": 0.5}  # 媒体混合器CPU资源
+).bind()
+
+video_separator_handle = VideoSeparator.options(
+    num_replicas="auto",
+    ray_actor_options={"num_gpus": 0.2}  # 视频分离器GPU资源
+).bind()
+
+asr_handle = ASRModel.options(
+    num_replicas="auto",
+    ray_actor_options={"num_gpus": 0.1}  # ASR模型GPU资源
+).bind()
+
+duration_aligner_handle = DurationAligner.options(
+    num_replicas="auto",
+    ray_actor_options={"num_cpus": 0.5}  # 时长对齐器GPU资源
+).bind(simplifier_handle, model_in_handle, tts_token_gen_handle)
+
+timestamp_adjuster_handle = TimestampAdjuster.options(
+    num_replicas="auto",
+    ray_actor_options={"num_cpus": 0.5}  # 时间戳调整器GPU资源
+).bind()
+
+video_segmenter_handle = VideoSegmenter.options(
+    num_replicas="auto",
+    ray_actor_options={"num_cpus": 0.5}  # 视频分段器GPU资源
+).bind()
 # 不在模块级别获取StateManager的句柄
 # state_manager_handle = serve.get_deployment_handle("StateManager", app_name="StateManager")
 
 @serve.deployment(
     num_replicas=1,
-    ray_actor_options={"num_cpus": 1.0, "num_gpus": 0.1}  # 降低资源请求以适应当前环境
+    ray_actor_options={"num_cpus": 0.5},  # 降低资源请求以适应当前环境
+    logging_config={"log_level": "INFO"}
 )
 class VideoTransPipe:
     """
@@ -83,51 +127,64 @@ class VideoTransPipe:
         self.config = Config()
         self.sample_rate = self.config.TARGET_SR
         self.logger = logger
-        self.ffmpeg_tool = FFmpegTool()
         
         self.logger.info("VideoTransPipe初始化完成")
 
     async def __call__(
         self, 
-        task_id: str
+        task_id: str,
+        video_path: str = None,
+        target_language: str = None,
+        generate_subtitle: bool = False
     ) -> Dict[str, Any]:
         """
         翻译视频任务：对视频进行分段，翻译处理所有分段，最后合并成完整视频
         
         Args:
             task_id: 任务ID
+            video_path: 视频文件路径（可选，如果提供则创建新任务）
+            target_language: 目标语言（可选）
+            generate_subtitle: 是否生成字幕（可选）
             
         Returns:
             处理结果信息，包含最终视频路径
         """
         try:
-            # 立即设置HLS为就绪状态，让前端显示"正在获取视频流..."
-            await self.state_manager.update_task_progress.remote(
-                task_id, 
-                hls_ready=True
-            )
-            self.logger.info(f"HLS状态已设置为就绪 -> TaskID={task_id}")
+            # 增加更多日志记录点，确保每个关键步骤都有日志
+            self.logger.info(f"====== VideoTransPipe开始处理任务: {task_id} ======")
             
-            # 1. 从StateManager获取任务状态
-            try:
+            # 1. 先创建任务或获取任务状态
+            if video_path:
+                self.logger.info(f"创建新任务: {task_id}, 视频: {video_path}, 语言: {target_language}")
+                try:
+                    task_data = await self.state_manager.create_task.remote(
+                        task_id=task_id,
+                        video_path=video_path,
+                        target_language=target_language,
+                        generate_subtitle=generate_subtitle
+                    )
+                    task_state = task_data["task_state"]
+                    self.logger.info(f"成功创建任务状态: {task_id}")
+                except Exception as e:
+                    self.logger.error(f"创建任务状态失败: {str(e)}", exc_info=True)
+                    raise
+            else:
+                # 从StateManager获取任务状态
                 self.logger.info(f"正在从StateManager获取任务状态: {task_id}")
-                task_state = await self.state_manager.get_task_state.remote(task_id)
-                if not task_state:
-                    self.logger.error(f"任务不存在: {task_id}")
-                    return {"status": "error", "message": "任务不存在"}
-                self.logger.info(f"成功获取任务状态: {task_id}")
-            except Exception as e:
-                self.logger.error(f"获取任务状态失败: {str(e)}")
-                return {"status": "error", "message": f"获取任务状态失败: {str(e)}"}
+                try:
+                    task_state = await self.state_manager.get_task_state.remote(task_id)
+                    if not task_state:
+                        self.logger.error(f"任务不存在: {task_id}")
+                        return {"status": "error", "message": "任务不存在"}
+                    self.logger.info(f"成功获取任务状态: {task_id}")
+                except Exception as e:
+                    self.logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
+                    raise
                 
-            # 2. 从StateManager获取HLS管理器
-            try:
-                self.logger.info(f"正在从StateManager获取HLS管理器: {task_id}")
-                hls_manager = await self.state_manager.get_hls_manager.remote(task_id)
-                self.logger.info(f"成功获取HLS管理器: {task_id}")
-            except Exception as e:
-                self.logger.error(f"获取HLS管理器失败: {str(e)}")
-                return {"status": "error", "message": f"获取HLS管理器失败: {str(e)}"}
+            # 3. 创建HLSManagerActor
+            from core.hls_manager import HLSManagerActor
+            hls_manager_actor = HLSManagerActor.remote(self.config, task_id, task_state.task_paths)
+            self.logger.info(f"成功创建HLS管理器: {task_id}")
             
             # 记录开始时间
             start_time = time.time()
@@ -253,29 +310,28 @@ class VideoTransPipe:
                                 # 记录已处理的片段
                                 task_state.merged_segments.append(output_path)
                                 
-                                # 如果处理成功且有HLS管理器，添加到HLS流
-                                if hls_manager:
-                                    try:
-                                        # 使用常规方法调用而非Ray远程调用
-                                        success = hls_manager.add_segment(
-                                            output_path, 
-                                            task_state.batch_counter
-                                        )
-                                        if success:
-                                            self.logger.info(f"分段 {task_state.batch_counter} 已加入 HLS -> TaskID={task_id}")
-                                            # 成功添加第一个分段后，设置HLS就绪状态
-                                            if not task_state.hls_ready and task_state.batch_counter == 0:
-                                                task_state.hls_ready = True
-                                                # 更新StateManager中的HLS状态
-                                                await self.state_manager.update_task_progress.remote(
-                                                    task_id, 
-                                                    hls_ready=True
-                                                )
-                                                self.logger.info(f"HLS播放列表已就绪 -> TaskID={task_id}")
-                                        else:
-                                            self.logger.error(f"添加HLS片段失败 -> TaskID={task_id}")
-                                    except Exception as e:
-                                        self.logger.error(f"添加HLS片段失败: {e} -> TaskID={task_id}")
+                                # 如果处理成功，添加到HLS流
+                                try:
+                                    # 使用Ray远程调用
+                                    success = await hls_manager_actor.add_segment.remote(
+                                        output_path, 
+                                        task_state.batch_counter
+                                    )
+                                    if success:
+                                        self.logger.info(f"分段 {task_state.batch_counter} 已加入 HLS -> TaskID={task_id}")
+                                        # 成功添加第一个分段后，设置HLS就绪状态
+                                        if not task_state.hls_ready and task_state.batch_counter == 0:
+                                            task_state.hls_ready = True
+                                            # 更新StateManager中的HLS状态
+                                            await self.state_manager.update_task_progress.remote(
+                                                task_id, 
+                                                hls_ready=True
+                                            )
+                                            self.logger.info(f"HLS播放列表已就绪 -> TaskID={task_id}")
+                                    else:
+                                        self.logger.error(f"添加HLS片段失败 -> TaskID={task_id}")
+                                except Exception as e:
+                                    self.logger.error(f"添加HLS片段失败: {e} -> TaskID={task_id}")
                                 
                                 # 更新批次计数器
                                 task_state.batch_counter += 1
@@ -313,7 +369,7 @@ class VideoTransPipe:
                     
                     # 执行合并命令
                     start_time = time.time()
-                    final_video_path = self.ffmpeg_tool.concat_videos(
+                    final_video_path = await concat_videos.remote(
                         input_list=str(list_txt),
                         output_path=str(final_path)
                     )
@@ -325,9 +381,9 @@ class VideoTransPipe:
                         
                     self.logger.info(f"视频合并完成，耗时={duration:.2f}s，TaskID={task_id}")
                     
-                    # 7. 如果有HLS管理器，标记播放列表为完成状态
-                    if hls_manager and final_video_path and final_video_path.exists():
-                        success = hls_manager.finalize_playlist()
+                    # 7. 标记播放列表为完成状态
+                    if final_video_path and final_video_path.exists():
+                        success = await hls_manager_actor.finalize_playlist.remote()
                         if success:
                             self.logger.info(f"HLS播放列表已标记为完成，TaskID={task_id}")
                         else:

@@ -10,17 +10,10 @@ import time
 from config import Config
 
 from models.ClearerVoice.clearvoice import ClearVoice
-from utils.ffmpeg_utils import FFmpegTool
+from utils.ffmpeg_utils import extract_audio, extract_video
 
 @serve.deployment(
-    name="video_separator",
-    num_replicas=1,
-    ray_actor_options={"num_gpus": Config().CLEARVOICE_ACTOR_NUM_GPUS},
-    # autoscaling_config={
-    #     "min_replicas": 1,
-    #     "max_replicas": 2,
-    #     "target_num_ongoing_requests_per_replica": 1
-    # }
+    name="video_separator"
 )
 class VideoSeparator:
     """
@@ -35,7 +28,6 @@ class VideoSeparator:
             task='speech_enhancement',
             model_names=[model_name]
         )
-        self.ffmpeg_tool = FFmpegTool()
         self.config = Config()
     
     def separate_audio(self, input_path: str) -> Tuple[np.ndarray, np.ndarray, int]:
@@ -105,8 +97,8 @@ class VideoSeparator:
             background_audio = str(output_dir_path / f"background_{segment_index}.wav")
 
             # (1) 提取音频 & 视频
-            self.ffmpeg_tool.extract_audio(video_path, full_audio, start, duration)
-            self.ffmpeg_tool.extract_video(video_path, silent_video, start, duration)
+            await extract_audio.remote(video_path, full_audio, start, duration)
+            await extract_video.remote(video_path, silent_video, start, duration)
 
             # (2) 分离人声
             vocals, background, sr = self.separate_audio(full_audio)

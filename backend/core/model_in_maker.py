@@ -12,14 +12,7 @@ import uuid
 from config import Config
 
 @serve.deployment(
-    name="model_in_maker",
-    num_replicas=1,
-    ray_actor_options={"num_cpus": Config().MODELIN_ACTOR_NUM_CPUS},
-    # autoscaling_config={
-    #     "min_replicas": 1,
-    #     "max_replicas": 3,
-    #     "target_num_ongoing_requests_per_replica": 5
-    # }
+    name="model_in_maker"
 )
 class ModelInMaker:
     def __init__(self):

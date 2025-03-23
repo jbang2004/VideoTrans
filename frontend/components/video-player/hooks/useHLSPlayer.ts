@@ -28,7 +28,7 @@ export function useHLSPlayer(
     const video = videoRef.current
     const playlistUrl = `${API_BASE_URL}/playlists/${taskId}/playlist_${taskId}.m3u8`
 
-    // 清理之前的 HLS 实例
+    // 清理之前的 HLS 实例和刷新定时器
     if (hlsRef.current) {
       hlsRef.current.destroy()
     }
@@ -37,7 +37,7 @@ export function useHLSPlayer(
     retryCountRef.current = 0
 
     if (Hls.isSupported()) {
-      // 使用简化的HLS配置，与旧版本保持一致
+      // 使用改进的HLS配置，增加实时流支持
       const hls = new Hls({
         debug: false,
         enableWorker: true,
@@ -46,7 +46,7 @@ export function useHLSPlayer(
         manifestLoadingTimeOut: 20000,
         manifestLoadingMaxRetry: 3,
         levelLoadingTimeOut: 20000,
-        fragLoadingTimeOut: 20000
+        fragLoadingTimeOut: 20000,
       })
 
       hls.loadSource(playlistUrl)
