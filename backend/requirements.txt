@@ -42,3 +42,4 @@ json_repair
 m3u8
 funasr
 ray[serve]
+rotary_embedding_torch
