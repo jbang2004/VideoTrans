@@ -30,10 +30,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 引入StateManager和VideoTransPipe
-from core.state_manager import StateManager
-from pipeline_scheduler import VideoTransPipe
-
 app = FastAPI(debug=True)
 
 app.add_middleware(
@@ -49,18 +45,15 @@ templates = Jinja2Templates(directory=str(current_dir / "templates"))
 
 @serve.deployment(
     num_replicas=1,
-    ray_actor_options={"num_cpus": 0.5}  # 减少CPU需求
+    ray_actor_options={"num_cpus": 0.5}
 )
 @serve.ingress(app)
 class VideoTransAPI:
-    """
-    视频翻译API服务
-    使用StateManager进行任务状态管理，PipelineEngine进行视频翻译
-    """
-    def __init__(self, state_manager_handle=None, pipeline_handle=None):
-        """初始化API服务，接收StateManager和PipelineEngine的handles"""
-        self.state_manager = state_manager_handle or serve.get_deployment_handle("StateManager", app_name="StateManager")
-        self.pipeline = pipeline_handle or serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
+    """视频翻译API服务"""
+    def __init__(self):
+        """初始化API服务，直接通过名称获取StateManager和PipelineEngine的handles"""
+        self.state_manager = serve.get_deployment_handle("StateManager", app_name="StateManager")
+        self.pipeline = serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
         self.logger = logger
         self.logger.info("VideoTransAPI初始化完成")
 
@@ -228,38 +221,27 @@ app.mount("/segments",
     ), 
     name="segments")
 
-# 部署服务
 def setup_server():
-    """初始化Ray Serve服务器，部署必要的服务"""
+    """初始化Ray Serve服务器，部署API服务"""
+    # 直接连接到已有的Ray集群
     if not ray.is_initialized():
-        ray.init(address="auto", log_to_driver=True)
+        ray.init(address="auto", namespace="videotrans", ignore_reinit_error=True)
+        logger.info("已连接到Ray集群")
     
-    serve.start(detached=False)
+    # 检查核心服务是否已部署
+    try:
+        state_manager = serve.get_deployment_handle("StateManager", app_name="StateManager")
+        pipeline = serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
+        logger.info("成功连接到已部署的核心服务")
+    except Exception as e:
+        logger.error(f"连接核心服务失败，请确保pipeline_scheduler已经启动: {e}")
+        raise
     
-    # 1. 首先部署StateManager
-    state_manager = StateManager.bind(config)
-    serve.run(state_manager, name="StateManager", route_prefix=None)
-    
-    # 等待确保StateManager就绪
-    logger.info("等待确保StateManager就绪...")
-    time.sleep(2)
-    
-    # 2. 部署PipelineEngine
-    from pipeline_scheduler import app as pipeline_app
-    serve.run(pipeline_app, name="PipelineEngine", route_prefix=None)
-    
-    # 等待确保PipelineEngine就绪
-    logger.info("等待确保PipelineEngine就绪...")
-    time.sleep(1)
-    
-    # 3. 部署API服务
-    video_api = VideoTransAPI.bind(
-        state_manager_handle=serve.get_deployment_handle("StateManager", app_name="StateManager"),
-        pipeline_handle=serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
-    )
+    # 直接部署API服务，此时Ray和Serve肯定都在运行
+    video_api = VideoTransAPI.bind()
     serve.run(video_api, name="VideoAPI", route_prefix="/", blocking=True)
     
-    logger.info("服务部署完成: StateManager, PipelineEngine, VideoAPI")
+    logger.info("API服务部署完成: VideoAPI")
 
 if __name__ == "__main__":
     setup_server()

@@ -16,7 +16,7 @@ class GeminiClient:
             raise ValueError("Gemini API key must be provided")
         # 配置 Gemini
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash-lite')  # 或 'gemini-2.0-flash-exp'
+        self.model = genai.GenerativeModel('gemini-1.5-flash')  # 或 'gemini-2.0-flash-exp'
         logger.info("Gemini 客户端初始化成功")
     
     async def translate(

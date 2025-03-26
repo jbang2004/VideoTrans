@@ -5,7 +5,10 @@ import asyncio
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 import time
+import sys
+import os
 
+# 然后导入config
 from config import Config
 from core.translation.translator import Translator
 from core.model_in_maker import ModelInMaker
@@ -128,6 +131,9 @@ class VideoTransPipe:
         self.sample_rate = self.config.TARGET_SR
         self.logger = logger
         
+        # 添加性能指标记录
+        self.performance_metrics = {}
+        
         self.logger.info("VideoTransPipe初始化完成")
 
     async def __call__(
@@ -149,6 +155,12 @@ class VideoTransPipe:
         Returns:
             处理结果信息，包含最终视频路径
         """
+        # 初始化该任务的性能指标
+        self.performance_metrics[task_id] = {
+            'total': {'start': time.time(), 'end': None, 'duration': None},
+            'segments_processing': []  # 只记录总时间和每个分段的处理时间
+        }
+        
         try:
             # 增加更多日志记录点，确保每个关键步骤都有日志
             self.logger.info(f"====== VideoTransPipe开始处理任务: {task_id} ======")
@@ -186,11 +198,9 @@ class VideoTransPipe:
             hls_manager_actor = HLSManagerActor.remote(self.config, task_id, task_state.task_paths)
             self.logger.info(f"成功创建HLS管理器: {task_id}")
             
-            # 记录开始时间
-            start_time = time.time()
-            self.logger.info(f"开始翻译视频: {task_state.video_path}, TaskID={task_id}")
-                
             # 3. 调用VideoSegmenter对视频进行分段
+            self.logger.info(f"开始对视频进行分段: {task_state.video_path}, TaskID={task_id}")
+            
             segmenter_result = await self.video_segmenter.segment_video.remote(task_state.video_path)
             
             if segmenter_result["status"] != "success":
@@ -206,7 +216,11 @@ class VideoTransPipe:
             task_state.segments = segments
             
             # 5. 处理所有分段
+            self.logger.info(f"开始处理 {len(segments)} 个视频分段, TaskID={task_id}")
+            
             for seg_idx, (seg_start, seg_duration) in enumerate(segments):
+                # 记录分段处理开始时间
+                segment_start_time = time.time()
                 self.logger.info(f"开始翻译分段 {seg_idx+1}/{len(segments)}: 开始时间={seg_start:.2f}s, 持续时间={seg_duration:.2f}s")
                 
                 try:
@@ -312,7 +326,6 @@ class VideoTransPipe:
                                 
                                 # 如果处理成功，添加到HLS流
                                 try:
-                                    # 使用Ray远程调用
                                     success = await hls_manager_actor.add_segment.remote(
                                         output_path, 
                                         task_state.batch_counter
@@ -328,8 +341,6 @@ class VideoTransPipe:
                                                 hls_ready=True
                                             )
                                             self.logger.info(f"HLS播放列表已就绪 -> TaskID={task_id}")
-                                    else:
-                                        self.logger.error(f"添加HLS片段失败 -> TaskID={task_id}")
                                 except Exception as e:
                                     self.logger.error(f"添加HLS片段失败: {e} -> TaskID={task_id}")
                                 
@@ -347,7 +358,19 @@ class VideoTransPipe:
                     # 继续处理下一个分段
                     continue
                 
-                self.logger.info(f"完成翻译分段 {seg_idx+1}/{len(segments)}")
+                # 记录分段处理结束时间和持续时间
+                segment_end_time = time.time()
+                segment_duration = segment_end_time - segment_start_time
+                
+                # 记录这个分段的处理时间到性能指标中
+                self.performance_metrics[task_id]['segments_processing'].append({
+                    'segment_index': seg_idx,
+                    'start_time': segment_start_time,
+                    'end_time': segment_end_time,
+                    'duration': segment_duration
+                })
+                
+                self.logger.info(f"完成翻译分段 {seg_idx+1}/{len(segments)}, 耗时: {segment_duration:.2f}s")
             
             # 6. 合并所有视频分段，生成最终视频
             final_video_path = None
@@ -357,7 +380,6 @@ class VideoTransPipe:
                     final_path = task_state.task_paths.output_dir / f"final_{task_id}.mp4"
                     final_path.parent.mkdir(parents=True, exist_ok=True)
                     
-                    # 合并所有视频分段
                     self.logger.info(f"开始合并 {len(task_state.merged_segments)} 个视频分段，TaskID={task_id}")
                     
                     # 创建合并列表文件
@@ -368,18 +390,16 @@ class VideoTransPipe:
                             f.write(f"file '{abs_path}'\n")
                     
                     # 执行合并命令
-                    start_time = time.time()
                     final_video_path = await concat_videos.remote(
                         input_list=str(list_txt),
                         output_path=str(final_path)
                     )
-                    duration = time.time() - start_time
                     
                     # 清理合并列表文件
                     if list_txt.exists():
                         list_txt.unlink()
                         
-                    self.logger.info(f"视频合并完成，耗时={duration:.2f}s，TaskID={task_id}")
+                    self.logger.info(f"视频合并完成，TaskID={task_id}")
                     
                     # 7. 标记播放列表为完成状态
                     if final_video_path and final_video_path.exists():
@@ -423,8 +443,13 @@ class VideoTransPipe:
                 self.logger.warning(f"释放GPU显存失败: {e}")
             
             # 9. 标记任务完成
-            total_duration = time.time() - start_time
+            # 记录总执行时间
+            self.performance_metrics[task_id]['total']['end'] = time.time()
+            self.performance_metrics[task_id]['total']['duration'] = self.performance_metrics[task_id]['total']['end'] - self.performance_metrics[task_id]['total']['start']
+            total_duration = self.performance_metrics[task_id]['total']['duration']
+            
             success_message = f"视频翻译完成，共处理 {len(segments)} 个分段，总耗时: {total_duration:.2f}s"
+            self.logger.info(f"任务 {task_id} 总执行完成，总耗时: {total_duration:.2f}s")
             
             await self.state_manager.complete_task.remote(
                 task_id, 
@@ -433,20 +458,29 @@ class VideoTransPipe:
                 final_video_path=final_video_path
             )
             
-            # 返回处理结果
+            # 返回处理结果，包含性能指标
             if final_video_path and final_video_path.exists():
                 return {
                     "status": "success", 
                     "message": success_message,
-                    "final_video_path": str(final_video_path)
+                    "final_video_path": str(final_video_path),
+                    "performance": self.performance_metrics[task_id]
                 }
             else:
                 return {
                     "status": "error", 
-                    "message": "翻译完成，但无法生成最终视频文件"
+                    "message": "翻译完成，但无法生成最终视频文件",
+                    "performance": self.performance_metrics[task_id]
                 }
                 
         except Exception as e:
+            # 记录总执行时间(即使出错)
+            if task_id in self.performance_metrics and 'total' in self.performance_metrics[task_id]:
+                self.performance_metrics[task_id]['total']['end'] = time.time()
+                self.performance_metrics[task_id]['total']['duration'] = self.performance_metrics[task_id]['total']['end'] - self.performance_metrics[task_id]['total']['start']
+                total_duration = self.performance_metrics[task_id]['total']['duration']
+                self.logger.info(f"任务 {task_id} 失败，耗时: {total_duration:.2f}s")
+            
             self.logger.exception(f"视频翻译失败: {e}")
             
             # 标记任务失败
@@ -456,7 +490,11 @@ class VideoTransPipe:
                 message=f"视频翻译失败: {e}"
             )
             
-            return {"status": "error", "message": str(e)}
+            return {
+                "status": "error", 
+                "message": str(e),
+                "performance": self.performance_metrics.get(task_id, {})
+            }
 
 # 创建应用部署
 app = VideoTransPipe.bind(
@@ -472,3 +510,82 @@ app = VideoTransPipe.bind(
     timestamp_adjuster_handle,
     media_mixer_handle
 )
+
+# 添加Ray和Ray Serve的初始化和服务管理函数
+def init_ray(address="auto", namespace="videotrans", log_to_driver=True):
+    """
+    初始化Ray运行时
+    
+    Args:
+        address: Ray集群地址，默认为'auto'自动连接本地Ray实例
+        namespace: Ray命名空间
+        log_to_driver: 是否将日志输出到驱动程序
+    
+    Returns:
+        是否初始化成功
+    """
+    import ray
+    
+    if not ray.is_initialized():
+        ray.init(address=address, namespace=namespace, log_to_driver=log_to_driver)
+        logger.info(f"Ray已初始化，地址: {address}, 命名空间: {namespace}")
+    else:
+        logger.info("Ray已经初始化，跳过初始化步骤")
+    
+    return ray.is_initialized()
+
+def start_serve(detached=False):
+    """
+    启动Ray Serve服务
+    
+    Args:
+        detached: 是否以分离模式运行
+    """
+    serve.start(detached=detached)
+    logger.info(f"Ray Serve已启动，detached模式: {detached}")
+
+def setup_pipeline_services(state_manager_app_name="StateManager", pipeline_app_name="PipelineEngine"):
+    """
+    设置和部署VideoTrans流水线所需的核心服务
+    
+    Args:
+        state_manager_app_name: 状态管理器应用名称
+        pipeline_app_name: 流水线引擎应用名称
+    
+    Returns:
+        部署状态信息
+    """
+    from core.state_manager import StateManager
+    from config import Config
+    
+    # 确保Ray已初始化
+    init_ray()
+    
+    # 启动Ray Serve
+    start_serve()
+    
+    # 1. 首先部署StateManager
+    config_instance = Config()
+    state_manager = StateManager.bind(config_instance)
+    serve.run(state_manager, name=state_manager_app_name, route_prefix=None)
+    logger.info(f"StateManager已部署，应用名: {state_manager_app_name}")
+    
+    # 等待确保StateManager就绪
+    time.sleep(2)
+    
+    # 2. 部署PipelineEngine
+    serve.run(app, name=pipeline_app_name, route_prefix=None)
+    logger.info(f"PipelineEngine已部署，应用名: {pipeline_app_name}")
+    
+    # 等待确保PipelineEngine就绪
+    time.sleep(1)
+    
+    return {
+        "state_manager": state_manager_app_name,
+        "pipeline": pipeline_app_name,
+        "status": "deployed"
+    }
+
+# 用于直接运行pipeline服务的入口点
+if __name__ == "__main__":
+    setup_pipeline_services()
