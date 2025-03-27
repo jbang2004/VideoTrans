@@ -29,37 +29,37 @@ logger = logging.getLogger(__name__)
 # 创建各服务的部署句柄
 translator_handle = Translator.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.5}  # 翻译器CPU资源
+    ray_actor_options={"num_cpus": 0.1}  # 翻译器CPU资源
 ).bind()
 
 model_in_handle = ModelInMaker.options(
     num_replicas="auto",
-    ray_actor_options={"num_gpus": 0.2}  # 模型输入CPU资源
+    ray_actor_options={"num_gpus": 0.1}  # 模型输入CPU资源
 ).bind()
 
 tts_token_gen_handle = TtsTokenGenerator.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.5, "num_gpus": 0.2}  # TTS标记生成器资源
+    ray_actor_options={"num_cpus":0.1, "num_gpus": 0.1}  # TTS标记生成器资源
 ).bind()
 
 audio_gen_handle = AudioGenerator.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.5, "num_gpus": 0.3}  # 音频生成器资源
+    ray_actor_options={"num_cpus": 0.1, "num_gpus": 0.1}  # 音频生成器资源
 ).bind()
 
 simplifier_handle = Translator.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.5}  # 简化器CPU资源
+    ray_actor_options={"num_cpus": 0.1}  # 简化器CPU资源
 ).bind()
 
 media_mixer_handle = MediaMixer.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.5}  # 媒体混合器CPU资源
+    ray_actor_options={"num_cpus": 0.1}  # 媒体混合器CPU资源
 ).bind()
 
 video_separator_handle = VideoSeparator.options(
     num_replicas="auto",
-    ray_actor_options={"num_gpus": 0.2}  # 视频分离器GPU资源
+    ray_actor_options={"num_gpus": 0.1}  # 视频分离器GPU资源
 ).bind()
 
 asr_handle = ASRModel.options(
@@ -69,24 +69,24 @@ asr_handle = ASRModel.options(
 
 duration_aligner_handle = DurationAligner.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.5}  # 时长对齐器GPU资源
+    ray_actor_options={"num_cpus": 0.1}  # 时长对齐器GPU资源
 ).bind(simplifier_handle, model_in_handle, tts_token_gen_handle)
 
 timestamp_adjuster_handle = TimestampAdjuster.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.5}  # 时间戳调整器GPU资源
+    ray_actor_options={"num_cpus": 0.1}  # 时间戳调整器GPU资源
 ).bind()
 
 video_segmenter_handle = VideoSegmenter.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.5}  # 视频分段器GPU资源
+    ray_actor_options={"num_cpus": 0.1}  # 视频分段器GPU资源
 ).bind()
 # 不在模块级别获取StateManager的句柄
 # state_manager_handle = serve.get_deployment_handle("StateManager", app_name="StateManager")
 
 @serve.deployment(
-    num_replicas=1,
-    ray_actor_options={"num_cpus": 0.5},  # 降低资源请求以适应当前环境
+    num_replicas="auto",
+    ray_actor_options={"num_cpus": 0.1},  # 降低资源请求以适应当前环境
     logging_config={"log_level": "INFO"}
 )
 class VideoTransPipe:
@@ -242,7 +242,7 @@ class VideoTransPipe:
                         continue
                     
                     # 5.2 执行ASR识别
-                    sentences = await self.asr.generate_async.remote(
+                    sentences = await self.asr.generate.remote(
                         input=media_files['vocals'],
                         cache={},
                         language="auto",
@@ -566,7 +566,10 @@ def setup_pipeline_services(state_manager_app_name="StateManager", pipeline_app_
     
     # 1. 首先部署StateManager
     config_instance = Config()
-    state_manager = StateManager.bind(config_instance)
+    state_manager = StateManager.options(
+        num_replicas="auto",
+        ray_actor_options={"num_cpus": 0.1}
+    ).bind(config_instance)
     serve.run(state_manager, name=state_manager_app_name, route_prefix=None)
     logger.info(f"StateManager已部署，应用名: {state_manager_app_name}")
     
