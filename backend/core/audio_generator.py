@@ -113,7 +113,7 @@ class AudioGenerator:
             self.logger.error(f"异常堆栈: {traceback.format_exc()}")
             raise
     
-    async def generate_audio(self, sentences):
+    def generate_audio(self, sentences):
         """生成音频"""
         if not sentences:
             self.logger.warning("generate_audio: 收到空的句子列表")

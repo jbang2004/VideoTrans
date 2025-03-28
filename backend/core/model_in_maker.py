@@ -4,8 +4,7 @@ import logging
 import torch
 import numpy as np
 import librosa
-from typing import List, Optional, AsyncGenerator
-import asyncio
+from typing import List, Optional
 import ray
 from ray import serve
 import uuid
@@ -23,7 +22,6 @@ class ModelInMaker:
         self.config = Config()
         self.speaker_cache = {}  # 存储speaker_id到特征文件路径的映射
         self.max_val = 0.8
-        self.semaphore = asyncio.Semaphore(4)
         
         # 添加系统路径
         for path in self.config.SYSTEM_PATHS:
@@ -79,7 +77,7 @@ class ModelInMaker:
             self.logger.error(f"Frontend模块加载失败: {str(e)}")
             raise
 
-    async def _update_text_features_sync(self, sentence):
+    def _update_text_features(self, sentence):
         """
         更新文本特征（保存到本地文件）
         """
@@ -120,7 +118,7 @@ class ModelInMaker:
             self.logger.error(f"更新文本特征失败: {str(e)}")
             raise
 
-    async def _modelin_sentence_sync(self, sentence, reuse_speaker=False):
+    def _modelin_sentence(self, sentence, reuse_speaker=False):
         """
         对单个句子进行模型输入处理（保存到本地文件）
         """
@@ -190,20 +188,11 @@ class ModelInMaker:
                 self.logger.debug(f"已删除句子的原始音频数据，释放内存")
 
         # 2) 文本特征更新
-        await self._update_text_features_sync(sentence)
-        return sentence
+        return self._update_text_features(sentence)
 
-    async def _modelin_sentence_async(self, sentence, reuse_speaker=False):
-        """在异步方法中，对单个 sentence 进行模型输入处理"""
-        async with self.semaphore:
-            if asyncio.iscoroutine(sentence):
-                sentence = await sentence
-            return await self._modelin_sentence_sync(sentence, reuse_speaker)
-
-    async def modelin_maker(self, sentences, reuse_speaker=False, batch_size=3):
+    def modelin_maker(self, sentences, reuse_speaker=False, batch_size=3):
         """
         对一批 sentences 做 model_in 处理，分批 yield
-        类似于 translator_actor.translate_sentences，返回 ObjectRef
         """
         if not sentences:
             self.logger.warning("modelin_maker: 收到空的句子列表")
@@ -211,32 +200,18 @@ class ModelInMaker:
 
         self.logger.debug(f"模型输入处理 {len(sentences)} 个句子")
 
-        tasks = []
-        for s in sentences:
-            tasks.append(
-                asyncio.create_task(
-                    self._modelin_sentence_async(s, reuse_speaker)
-                )
-            )
+        results = []
+        for i, s in enumerate(sentences, start=1):
+            modelin_sentence = self._modelin_sentence(s, reuse_speaker)
+            results.append(modelin_sentence)
 
-        try:
-            results = []
-            for i, task in enumerate(tasks, start=1):
-                modelin_sentence = await task
-                results.append(modelin_sentence)
-
-                if i % batch_size == 0:
-                    yield results
-                    results = []
-
-            if results:
+            if i % batch_size == 0:
                 yield results
+                results = []
 
-        except Exception as e:
-            self.logger.error(f"modelin_maker处理失败: {str(e)}")
-            raise
+        if results:
+            yield results
 
-        finally:
-            if not reuse_speaker:
-                self.speaker_cache.clear()
-                self.logger.debug("modelin_maker: 已清理本地speaker_cache映射")
+        if not reuse_speaker:
+            self.speaker_cache.clear()
+            self.logger.debug("modelin_maker: 已清理本地speaker_cache映射")
