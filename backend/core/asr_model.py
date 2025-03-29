@@ -1,11 +1,14 @@
 import ray
 import sys
 import logging
+import asyncio  # 添加 asyncio 导入
 from config import Config
 from ray import serve
 
 @serve.deployment(
-    name="asr_model"
+    name="asr_model",
+    health_check_timeout_s=120,  # 将健康检查超时时间从默认的30秒增加到120秒
+    health_check_period_s=30     # 将健康检查周期从默认的10秒增加到30秒
 )
 class ASRModel:
     """
@@ -45,15 +48,15 @@ class ASRModel:
             self.logger.error(f"ASR模型加载失败: {str(e)}")
             raise
     
-    def generate(self, input, **kwargs):
+    # 改为异步方法
+    async def generate(self, input, **kwargs):
         """
-        执行模型生成方法
-        这是ASR的主要接口方法，以同步方式实现
+        执行模型生成方法（异步版本）
         """
         try:
             self.logger.info(f"开始ASR识别音频: {input if isinstance(input, str) else '(已加载音频)'}")
-            # 直接调用model的generate方法
-            result = self.model.generate(input, **kwargs)
+            # 使用 asyncio.to_thread 包装同步调用
+            result = await asyncio.to_thread(self.model.generate, input, **kwargs)
             self.logger.info(f"ASR识别完成，获得 {len(result)} 个句子")
             return result
         except Exception as e:

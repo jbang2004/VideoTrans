@@ -6,11 +6,14 @@ import sys
 import torch
 import uuid
 import threading
+import asyncio  # 添加 asyncio 导入
 import numpy as np
 from config import Config
 
 @serve.deployment(
-    name="tts_token_generator"
+    name="tts_token_generator",
+    health_check_timeout_s=120,  # 将健康检查超时时间从默认的30秒增加到120秒
+    health_check_period_s=30     # 将健康检查周期从默认的10秒增加到30秒
 )
 class TtsTokenGenerator:
     """TTS Token生成Actor，专注于LLM模型"""
@@ -29,12 +32,25 @@ class TtsTokenGenerator:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.fp16 = torch.cuda.is_available()
         
-        # 特征存储目录
-        self.feature_dir = os.path.join(self.config.TASKS_DIR, "features")
-        os.makedirs(self.feature_dir, exist_ok=True)
+        # 特征存储目录 - 不再需要
+        # self.feature_dir = os.path.join(self.config.TASKS_DIR, "features")
+        # os.makedirs(self.feature_dir, exist_ok=True)
         
         # 加载LLM模型
         self._load_llm_model()
+        
+    def _to_cpu(self, obj):
+        """递归地将所有PyTorch张量移到CPU"""
+        if isinstance(obj, torch.Tensor):
+            return obj.detach().cpu()
+        elif isinstance(obj, list):
+            return [self._to_cpu(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return tuple(self._to_cpu(item) for item in obj)
+        elif isinstance(obj, dict):
+            return {k: self._to_cpu(v) for k, v in obj.items()}
+        else:
+            return obj
         
     def _load_llm_model(self):
         """只加载LLM模型"""
@@ -91,8 +107,8 @@ class TtsTokenGenerator:
             self.logger.error(f"异常堆栈: {traceback.format_exc()}")
             raise
     
-    def generate_tts_tokens(self, sentences):
-        """生成TTS tokens并保存到文件"""
+    async def generate_tts_tokens(self, sentences):
+        """生成TTS tokens并直接存储到sentence"""
         if not sentences:
             self.logger.warning("generate_tts_tokens: 收到空的句子列表")
             return sentences
@@ -104,21 +120,16 @@ class TtsTokenGenerator:
             processed_sentences = []
             for sentence in sentences:
                 try:
-                    # 获取所需特征路径
+                    # 直接获取特征数据
                     model_input = sentence.model_input
-                    text_feature_path = model_input.get('text_feature_path')
-                    speaker_feature_path = model_input.get('speaker_feature_path')
+                    text_features = model_input.get('text_features')
+                    speaker_features = model_input.get('speaker_features')
                     
-                    if not text_feature_path or not speaker_feature_path:
-                        raise ValueError(f"缺少必要的特征路径: text_feature_path={text_feature_path}, speaker_feature_path={speaker_feature_path}")
+                    if not text_features or not speaker_features:
+                        raise ValueError(f"缺少必要的特征数据: text_features={bool(text_features)}, speaker_features={bool(speaker_features)}")
                     
-                    # 加载特征
-                    text_features = torch.load(text_feature_path)
-                    speaker_features = torch.load(speaker_feature_path)
-                    
-                    # 生成TTS token ID和文件路径
+                    # 生成TTS token ID
                     tts_token_id = str(uuid.uuid4())
-                    tts_token_path = os.path.join(self.feature_dir, f"tts_token_{tts_token_id}.pt")
                     
                     # 处理每个文本段落，生成TTS tokens
                     segment_tokens_list = []
@@ -136,8 +147,9 @@ class TtsTokenGenerator:
                         llm_prompt_speech_token = speaker_features.get('llm_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32))
                         llm_embedding = speaker_features.get('llm_embedding', torch.zeros(0, 192))
                         
-                        # 调用LLM生成tokens
-                        self.model.llm_job(
+                        # 调用LLM生成tokens - 使用 asyncio.to_thread 包装计算密集型操作
+                        await asyncio.to_thread(
+                            self.model.llm_job,
                             text,
                             prompt_text,
                             llm_prompt_speech_token,
@@ -154,16 +166,18 @@ class TtsTokenGenerator:
                     total_token_count = sum(len(tokens) for tokens in segment_tokens_list)
                     total_duration_ms = total_token_count / 25 * 1000  # 25Hz转换为毫秒
                     
-                    # 保存TTS token特征到文件
+                    # 准备TTS token数据
                     tts_tokens = {
                         'segment_speech_tokens': segment_tokens_list,
                         'segment_uuids': segment_uuids,
                         'duration': total_duration_ms
                     }
-                    torch.save(tts_tokens, tts_token_path)
                     
-                    # 更新句子
-                    model_input['tts_token_path'] = tts_token_path
+                    # 确保所有张量都在CPU上
+                    tts_tokens = self._to_cpu(tts_tokens)
+                    
+                    # 直接存储到sentence，不使用ray.put
+                    model_input['tts_tokens'] = tts_tokens
                     sentence.duration = total_duration_ms
                     
                     self.logger.info(f"TTS token 生成完成 (ID={tts_token_id}, 时长={total_duration_ms:.2f}ms)")

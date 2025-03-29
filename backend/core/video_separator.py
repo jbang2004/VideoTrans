@@ -7,13 +7,16 @@ import soundfile as sf
 from typing import Tuple, Dict, Union, Optional
 from pathlib import Path
 import time
+import asyncio
 from config import Config
 
 from models.ClearerVoice.clearvoice import ClearVoice
 from utils.ffmpeg_utils import extract_audio, extract_video
 
 @serve.deployment(
-    name="video_separator"
+    name="video_separator",
+    health_check_timeout_s=120,  # 将健康检查超时时间从默认的30秒增加到120秒
+    health_check_period_s=30     # 将健康检查周期从默认的10秒增加到30秒
 )
 class VideoSeparator:
     """
@@ -100,15 +103,15 @@ class VideoSeparator:
             await extract_audio.remote(video_path, full_audio, start, duration)
             await extract_video.remote(video_path, silent_video, start, duration)
 
-            # (2) 分离人声
-            vocals, background, sr = self.separate_audio(full_audio)
+            # (2) 分离人声 - 使用 asyncio.to_thread 包装同步调用
+            vocals, background, sr = await asyncio.to_thread(self.separate_audio, full_audio)
 
             # (3) 重采样和归一化
-            background = self._normalize_and_resample((sr, background), target_sr)
+            background = await asyncio.to_thread(self._normalize_and_resample, (sr, background), target_sr)
 
             # 写入人声/背景音频
-            sf.write(vocals_audio, vocals, sr, subtype='FLOAT')
-            sf.write(background_audio, background, target_sr, subtype='FLOAT')
+            await asyncio.to_thread(sf.write, vocals_audio, vocals, sr, subtype='FLOAT')
+            await asyncio.to_thread(sf.write, background_audio, background, target_sr, subtype='FLOAT')
 
             segment_duration = len(vocals) / sr
 

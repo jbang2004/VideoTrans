@@ -39,12 +39,12 @@ model_in_handle = ModelInMaker.options(
 
 tts_token_gen_handle = TtsTokenGenerator.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus":0.1, "num_gpus": 0.1}  # TTS标记生成器资源
+    ray_actor_options={"num_cpus":0.5, "num_gpus": 0.2}  # TTS标记生成器资源
 ).bind()
 
 audio_gen_handle = AudioGenerator.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1, "num_gpus": 0.1}  # 音频生成器资源
+    ray_actor_options={"num_cpus": 0.5, "num_gpus": 0.2}  # 音频生成器资源
 ).bind()
 
 simplifier_handle = Translator.options(
@@ -59,34 +59,39 @@ media_mixer_handle = MediaMixer.options(
 
 video_separator_handle = VideoSeparator.options(
     num_replicas="auto",
-    ray_actor_options={"num_gpus": 0.1}  # 视频分离器GPU资源
+    ray_actor_options={"num_gpus": 0.2}  # 视频分离器GPU资源
 ).bind()
 
 asr_handle = ASRModel.options(
     num_replicas="auto",
-    ray_actor_options={"num_gpus": 0.1}  # ASR模型GPU资源
+    ray_actor_options={"num_gpus": 0.2}  # ASR模型GPU资源
 ).bind()
 
 duration_aligner_handle = DurationAligner.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1}  # 时长对齐器GPU资源
+    ray_actor_options={"num_cpus": 0.5}  # 时长对齐器GPU资源
 ).bind(simplifier_handle, model_in_handle, tts_token_gen_handle)
 
 timestamp_adjuster_handle = TimestampAdjuster.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1}  # 时间戳调整器GPU资源
+    ray_actor_options={"num_cpus": 0.2}  # 时间戳调整器GPU资源
 ).bind()
 
 video_segmenter_handle = VideoSegmenter.options(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1}  # 视频分段器GPU资源
+    ray_actor_options={"num_cpus": 0.5}  # 视频分段器GPU资源
 ).bind()
 # 不在模块级别获取StateManager的句柄
 # state_manager_handle = serve.get_deployment_handle("StateManager", app_name="StateManager")
 
 @serve.deployment(
     num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1},  # 降低资源请求以适应当前环境
+    ray_actor_options={
+        "num_cpus": 1,
+        "memory": 8 * 1024 * 1024 * 1024,  # 为Actor分配8GB内存
+    },
+    health_check_timeout_s=120,  # 将健康检查超时时间从默认的30秒增加到120秒
+    health_check_period_s=30,    # 将健康检查周期从默认的10秒增加到30秒
     logging_config={"log_level": "INFO"}
 )
 class VideoTransPipe:

@@ -8,9 +8,12 @@ import sys
 import uuid
 import threading
 from config import Config
+import asyncio
 
 @serve.deployment(
-    name="audio_generator"
+    name="audio_generator",
+    health_check_timeout_s=120,  # 将健康检查超时时间从默认的30秒增加到120秒
+    health_check_period_s=30     # 将健康检查周期从默认的10秒增加到30秒
 )
 class AudioGenerator:
     """音频生成Actor，专注于Flow和HiFT模型"""
@@ -35,6 +38,19 @@ class AudioGenerator:
         
         # 加载Flow和HiFT模型
         self._load_flow_hift_models()
+        
+    def _to_cpu(self, obj):
+        """递归地将所有PyTorch张量移到CPU"""
+        if isinstance(obj, torch.Tensor):
+            return obj.detach().cpu()
+        elif isinstance(obj, list):
+            return [self._to_cpu(item) for item in obj]
+        elif isinstance(obj, tuple):
+            return tuple(self._to_cpu(item) for item in obj)
+        elif isinstance(obj, dict):
+            return {k: self._to_cpu(v) for k, v in obj.items()}
+        else:
+            return obj
         
     def _load_flow_hift_models(self):
         """只加载Flow和HiFT模型"""
@@ -70,7 +86,7 @@ class AudioGenerator:
                 fp16=self.fp16
             )
             
-            # 只加载Flow模型权重
+            # 加载Flow和HiFT模型权重
             self.model.flow.load_state_dict(torch.load(f'{model_dir}/flow.pt', map_location=self.device), strict=True)
             self.model.flow.to(self.device).eval()
             
@@ -79,13 +95,34 @@ class AudioGenerator:
             self.model.hift.load_state_dict(hift_state_dict, strict=True)
             self.model.hift.to(self.device).eval()
             
-            # 可选：加载JIT编译的Flow模型
+            # 添加JIT和TRT加速
             if self.fp16 and torch.cuda.is_available():
                 try:
+                    # 加载JIT编译的Flow编码器
                     flow_encoder = torch.jit.load(f'{model_dir}/flow.encoder.fp16.zip', map_location=self.device)
                     self.model.flow.encoder = flow_encoder
+                    
+                    # 尝试加载TensorRT优化的Flow解码器
+                    trt_model_path = f'{model_dir}/flow.decoder.estimator.fp16.mygpu.plan'
+                    onnx_model_path = f'{model_dir}/flow.decoder.estimator.fp32.onnx'
+                    
+                    if os.path.exists(trt_model_path):
+                        try:
+                            import tensorrt as trt
+                            with open(trt_model_path, 'rb') as f:
+                                self.model.flow.decoder.estimator_engine = trt.Runtime(trt.Logger(trt.Logger.INFO)).deserialize_cuda_engine(f.read())
+                            
+                            if self.model.flow.decoder.estimator_engine:
+                                self.model.flow.decoder.estimator = self.model.flow.decoder.estimator_engine.create_execution_context()
+                                self.logger.info("成功加载TensorRT优化模型")
+                        except ImportError:
+                            self.logger.warning("TensorRT不可用，跳过TRT优化")
+                    elif os.path.exists(onnx_model_path):
+                        self.logger.warning(f"TRT模型不存在但ONNX模型存在，可以尝试转换: {onnx_model_path}")
+                    
+                    self.logger.info("JIT和TRT加速设置完成")
                 except Exception as jit_e:
-                    self.logger.warning(f"JIT模型加载失败: {str(jit_e)}")
+                    self.logger.warning(f"JIT/TRT模型加载失败: {str(jit_e)}")
             
             # 设置FP16
             if self.fp16:
@@ -113,33 +150,28 @@ class AudioGenerator:
             self.logger.error(f"异常堆栈: {traceback.format_exc()}")
             raise
     
-    def generate_audio(self, sentences):
-        """生成音频"""
+    async def generate_audio(self, sentences):
+        """生成音频 (异步版本)"""
         if not sentences:
             self.logger.warning("generate_audio: 收到空的句子列表")
             return sentences
-            
+
         self.logger.info(f"开始处理 {len(sentences)} 个句子的音频生成")
-        
+
         try:
-            # 处理句子列表
             sentences_with_audio = []
             for sentence in sentences:
                 try:
-                    # 获取所需参数
+                    # 直接获取特征数据
                     model_input = sentence.model_input
-                    tts_token_path = model_input.get('tts_token_path')
-                    speaker_feature_path = model_input.get('speaker_feature_path')
+                    tts_tokens = model_input.get('tts_tokens')
+                    speaker_features = model_input.get('speaker_features')
                     
-                    if not tts_token_path or not speaker_feature_path:
-                        self.logger.info(f"缺少必要的参数，仅生成空波形 (TTS Token Path: {tts_token_path})")
+                    if not tts_tokens or not speaker_features:
+                        self.logger.info(f"缺少必要的参数，仅生成空波形 (TTS Tokens: {bool(tts_tokens)})")
                         sentence.generated_audio = np.zeros(0, dtype=np.float32)
                         sentences_with_audio.append(sentence)
                         continue
-                    
-                    # 加载特征
-                    tts_tokens = torch.load(tts_token_path)
-                    speaker_features = torch.load(speaker_feature_path)
                     
                     # 获取语速
                     speed = sentence.speed if hasattr(sentence, 'speed') and sentence.speed else 1.0
@@ -173,8 +205,14 @@ class AudioGenerator:
                                 'speed': speed
                             }
                             
-                            # 直接使用kwargs调用token2wav
-                            segment_output = self.model.token2wav(**kwargs)
+                            # 使用 asyncio.to_thread 运行阻塞的模型调用
+                            segment_output = await asyncio.to_thread(
+                                self.model.token2wav, **kwargs
+                            )
+                            
+                            # 确保输出在CPU上
+                            segment_output = self._to_cpu(segment_output)
+                            
                         except Exception as model_error:
                             self.logger.error(f"音频生成错误: {model_error}")
                             # 生成一个空音频作为回退方案
@@ -209,15 +247,20 @@ class AudioGenerator:
                     self.logger.info(f"音频生成完成 (长度: {len(final_audio)}样本)")
                     sentences_with_audio.append(sentence)
                     
-                except Exception as e:
-                    self.logger.error(f"句子音频生成失败: {e}")
-                    # 设置空音频
-                    sentence.generated_audio = np.zeros(0, dtype=np.float32)
+                except Exception as sent_error:
+                    self.logger.error(f"处理句子 {getattr(sentence, 'sentence_id', 'N/A')} 音频生成失败: {sent_error}", exc_info=True)
+                    # 即使单个句子失败，也继续处理下一个，并可能返回部分结果
+                    sentence.generated_audio = np.zeros(0, dtype=np.float32) # 添加空音频
                     sentences_with_audio.append(sentence)
             
             self.logger.info(f"音频生成完成，处理了 {len(sentences_with_audio)} 个句子")
             return sentences_with_audio
             
         except Exception as e:
-            self.logger.error(f"批量音频生成失败: {e}")
-            raise
+            self.logger.error(f"批量生成音频失败: {e}", exc_info=True)
+            # 可以选择返回空列表或原始列表，取决于错误处理策略
+            # 这里返回原始列表，其中可能包含部分成功或失败的句子
+            for s in sentences: # 确保所有输入句子都有一个（可能是空的）generated_audio
+                if not hasattr(s, 'generated_audio'):
+                    s.generated_audio = np.zeros(0, dtype=np.float32)
+            return sentences

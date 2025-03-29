@@ -22,7 +22,7 @@ if not logger.handlers:  # 如果没有处理器，添加一个控制台处理�
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-@ray.remote(num_cpus=0.2)
+@ray.remote(num_cpus=1)
 class HLSManagerActor:
     """处理 HLS 流媒体相关的功能"""
     def __init__(self, config, task_id: str, task_paths: TaskPaths):

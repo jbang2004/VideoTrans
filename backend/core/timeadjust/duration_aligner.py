@@ -1,6 +1,7 @@
 from ray import serve
 from ray.serve.handle import DeploymentHandle
 import logging
+import asyncio  # 添加 asyncio 导入
 from config import Config
 from typing import List
 
@@ -22,7 +23,8 @@ class DurationAligner:
         
         logger.info(f"开始处理 {len(sentences)} 个句子的时长对齐")
         try:
-            aligned_sentences = _align_batch(sentences)
+            # 使用 asyncio.to_thread 包装同步调用
+            aligned_sentences = await asyncio.to_thread(_align_batch, sentences)
             fast_indices = [i for i, sentence in enumerate(aligned_sentences) if sentence.speed > max_speed]
             if fast_indices:
                 fast_sentences = [aligned_sentences[idx] for idx in fast_indices]
@@ -35,7 +37,8 @@ class DurationAligner:
                         if i < len(refined_sentences):
                             result_sentences[orig_idx] = refined_sentences[i]
                     logger.info("精简完成，进行最终对齐...")
-                    return _align_batch(result_sentences)
+                    # 使用 asyncio.to_thread 包装同步调用
+                    return await asyncio.to_thread(_align_batch, result_sentences)
                 else:
                     logger.warning("精简过程未能生成有效句子，保持原句子")
                     return aligned_sentences

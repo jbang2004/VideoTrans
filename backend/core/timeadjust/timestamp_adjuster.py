@@ -1,5 +1,6 @@
 from ray import serve
 import logging
+import asyncio
 from typing import List
 
 logger = logging.getLogger("timestamp_adjuster")
@@ -14,6 +15,16 @@ class TimestampAdjuster:
             return sentences
         
         logger.info(f"开始处理 {len(sentences)} 个句子的时间戳调整")
+        
+        return await asyncio.to_thread(
+            self._adjust_timestamps,
+            sentences,
+            sample_rate,
+            start_time
+        )
+    
+    def _adjust_timestamps(self, sentences: List, sample_rate: int, start_time: float = None) -> List:
+        """实际的时间戳调整处理逻辑（同步方法）"""
         current_time = start_time if start_time is not None else sentences[0].start
         
         for sentence in sentences:
