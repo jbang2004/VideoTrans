@@ -8,6 +8,7 @@ from typing import List, Optional
 import ray
 from ray import serve
 import uuid
+import asyncio
 from config import Config
 
 @serve.deployment(
@@ -190,7 +191,7 @@ class ModelInMaker:
         # 2) 文本特征更新
         return self._update_text_features(sentence)
 
-    def modelin_maker(self, sentences, reuse_speaker=False, batch_size=3):
+    async def modelin_maker(self, sentences, reuse_speaker=False, batch_size=3):
         """
         对一批 sentences 做 model_in 处理，分批 yield
         """
@@ -202,7 +203,8 @@ class ModelInMaker:
 
         results = []
         for i, s in enumerate(sentences, start=1):
-            modelin_sentence = self._modelin_sentence(s, reuse_speaker)
+            # 使用asyncio.to_thread包装同步函数调用
+            modelin_sentence = await asyncio.to_thread(self._modelin_sentence, s, reuse_speaker)
             results.append(modelin_sentence)
 
             if i % batch_size == 0:

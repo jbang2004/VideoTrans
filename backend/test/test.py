@@ -223,7 +223,7 @@ async def main():
     parser = argparse.ArgumentParser(description="视频翻译负载测试工具")
     parser.add_argument("-n", "--num_tasks", type=int, default=1, help="并行任务数量")
     parser.add_argument("-v", "--video", type=str, required=True, help="视频文件路径")
-    parser.add_argument("-l", "--language", type=str, default="zh", help="目标语言 (zh, en, ja, ko)")
+    parser.add_argument("-l", "--language", type=str, default="en", help="目标语言 (zh, en, ja, ko)")
     parser.add_argument("-o", "--output", type=str, default="负载测试结果.txt", help="输出结果文件")
     
     args = parser.parse_args()

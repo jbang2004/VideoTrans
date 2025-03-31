@@ -20,6 +20,7 @@ from core.asr_model import ASRModel
 from core.timeadjust.duration_aligner import DurationAligner
 from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.video_segmenter import VideoSegmenter
+from core.hls_manager import HLSManager
 from utils.task_state import TaskState
 from utils.ffmpeg_utils import concat_videos
 from core.state_manager import StateManager
@@ -28,65 +29,78 @@ logger = logging.getLogger(__name__)
 
 # 创建各服务的部署句柄
 translator_handle = Translator.options(
-    num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1}  # 翻译器CPU资源
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 1}  # 翻译器CPU资源
 ).bind()
 
 model_in_handle = ModelInMaker.options(
-    num_replicas="auto",
-    ray_actor_options={"num_gpus": 0.1}  # 模型输入CPU资源
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 1}  # 模型输入CPU资源
 ).bind()
 
 tts_token_gen_handle = TtsTokenGenerator.options(
-    num_replicas="auto",
-    ray_actor_options={"num_cpus":0.1, "num_gpus": 0.1}  # TTS标记生成器资源
+    num_replicas=3,
+    max_ongoing_requests=1,
+    ray_actor_options={"num_cpus":1, "num_gpus": 0.15}  # TTS标记生成器资源
 ).bind()
 
 audio_gen_handle = AudioGenerator.options(
-    num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1, "num_gpus": 0.1}  # 音频生成器资源
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.1}  # 音频生成器资源
 ).bind()
 
 simplifier_handle = Translator.options(
-    num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1}  # 简化器CPU资源
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 0.8}  # 简化器CPU资源
 ).bind()
 
 media_mixer_handle = MediaMixer.options(
-    num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1}  # 媒体混合器CPU资源
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 1}  # 媒体混合器CPU资源
 ).bind()
 
 video_separator_handle = VideoSeparator.options(
-    num_replicas="auto",
-    ray_actor_options={"num_gpus": 0.1}  # 视频分离器GPU资源
+    num_replicas=2,
+    max_ongoing_requests=1,
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.1}  # 视频分离器GPU资源
 ).bind()
 
 asr_handle = ASRModel.options(
-    num_replicas="auto",
-    ray_actor_options={"num_gpus": 0.1}  # ASR模型GPU资源
+    num_replicas=2,
+    max_ongoing_requests=1,
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.125}  # ASR模型GPU资源
 ).bind()
 
 duration_aligner_handle = DurationAligner.options(
-    num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1}  # 时长对齐器GPU资源
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 0.7}  # 时长对齐器GPU资源
 ).bind(simplifier_handle, model_in_handle, tts_token_gen_handle)
 
 timestamp_adjuster_handle = TimestampAdjuster.options(
-    num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1}  # 时间戳调整器GPU资源
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 0.5}  # 时间戳调整器GPU资源
 ).bind()
 
 video_segmenter_handle = VideoSegmenter.options(
-    num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1}  # 视频分段器GPU资源
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 0.5}  # 视频分段器GPU资源
 ).bind()
-# 不在模块级别获取StateManager的句柄
-# state_manager_handle = serve.get_deployment_handle("StateManager", app_name="StateManager")
+
+hls_manager_handle = HLSManager.options(
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 0.5}  # HLS管理器资源
+).bind()
+
+# 在模块级别创建StateManager句柄 - 与HLSManager保持一致
+state_manager_handle = StateManager.options(
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 0.5}  # 状态管理器资源
+).bind(Config())
 
 @serve.deployment(
-    num_replicas="auto",
-    ray_actor_options={"num_cpus": 0.1},  # 降低资源请求以适应当前环境
+    num_replicas=1,
+    max_ongoing_requests=3,
+    ray_actor_options={"num_cpus": 0.5},  # 降低资源请求以适应当前环境
     logging_config={"log_level": "INFO"}
 )
 class VideoTransPipe:
@@ -109,10 +123,14 @@ class VideoTransPipe:
                  duration_aligner_handle: DeploymentHandle = None,
                  audio_gen_handle: DeploymentHandle = None,
                  timestamp_adjuster_handle: DeploymentHandle = None,
-                 media_mixer_handle: DeploymentHandle = None):
+                 media_mixer_handle: DeploymentHandle = None,
+                 hls_manager_handle: DeploymentHandle = None):
         """初始化VideoTransPipe，注入所有依赖的服务handles"""
-        # 获取状态管理器 - 在实际初始化时获取
+        # 获取状态管理器 - 如果未提供则通过名称获取
         self.state_manager = state_manager_handle or serve.get_deployment_handle("StateManager", app_name="StateManager")
+        
+        # 获取HLS管理器 - 如果未提供则通过名称获取，需要指定app_name
+        self.hls_manager = hls_manager_handle or serve.get_deployment_handle("hls_manager", app_name="hls_manager")
         
         # 获取各组件handles
         self.video_segmenter = video_segmenter_handle or video_segmenter_handle
@@ -193,10 +211,16 @@ class VideoTransPipe:
                     self.logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
                     raise
                 
-            # 3. 创建HLSManagerActor
-            from core.hls_manager import HLSManagerActor
-            hls_manager_actor = HLSManagerActor.remote(self.config, task_id, task_state.task_paths)
-            self.logger.info(f"成功创建HLS管理器: {task_id}")
+            # 3. 创建HLS管理器
+            try:
+                result = await self.hls_manager.create_manager.remote(task_id, task_state.task_paths)
+                if result.get("status") != "success":
+                    self.logger.warning(f"创建HLS管理器返回非成功状态: {result}, TaskID={task_id}")
+                else:
+                    self.logger.info(f"成功创建HLS管理器: {task_id}")
+            except Exception as e:
+                self.logger.error(f"创建HLS管理器失败: {e}, TaskID={task_id}")
+                # 继续执行，不因HLS管理器创建失败而中断整个流程
             
             # 3. 调用VideoSegmenter对视频进行分段
             self.logger.info(f"开始对视频进行分段: {task_state.video_path}, TaskID={task_id}")
@@ -326,11 +350,12 @@ class VideoTransPipe:
                                 
                                 # 如果处理成功，添加到HLS流
                                 try:
-                                    success = await hls_manager_actor.add_segment.remote(
+                                    result = await self.hls_manager.add_segment.remote(
+                                        task_id,
                                         output_path, 
                                         task_state.batch_counter
                                     )
-                                    if success:
+                                    if result.get("status") == "success":
                                         self.logger.info(f"分段 {task_state.batch_counter} 已加入 HLS -> TaskID={task_id}")
                                         # 成功添加第一个分段后，设置HLS就绪状态
                                         if not task_state.hls_ready and task_state.batch_counter == 0:
@@ -341,6 +366,8 @@ class VideoTransPipe:
                                                 hls_ready=True
                                             )
                                             self.logger.info(f"HLS播放列表已就绪 -> TaskID={task_id}")
+                                    else:
+                                        self.logger.warning(f"添加HLS片段返回非成功状态: {result}, TaskID={task_id}")
                                 except Exception as e:
                                     self.logger.error(f"添加HLS片段失败: {e} -> TaskID={task_id}")
                                 
@@ -403,11 +430,11 @@ class VideoTransPipe:
                     
                     # 7. 标记播放列表为完成状态
                     if final_video_path and final_video_path.exists():
-                        success = await hls_manager_actor.finalize_playlist.remote()
-                        if success:
+                        result = await self.hls_manager.finalize_playlist.remote(task_id)
+                        if result.get("status") == "success":
                             self.logger.info(f"HLS播放列表已标记为完成，TaskID={task_id}")
                         else:
-                            self.logger.warning(f"HLS播放列表标记完成失败，TaskID={task_id}")
+                            self.logger.warning(f"HLS播放列表标记完成失败: {result}，TaskID={task_id}")
                     
                 except Exception as e:
                     self.logger.error(f"视频合并失败: {e}, TaskID={task_id}")
@@ -508,7 +535,8 @@ app = VideoTransPipe.bind(
     duration_aligner_handle,
     audio_gen_handle, 
     timestamp_adjuster_handle,
-    media_mixer_handle
+    media_mixer_handle,
+    None   # hls_manager_handle在VideoTransPipe初始化时会自动获取
 )
 
 # 添加Ray和Ray Serve的初始化和服务管理函数
@@ -544,48 +572,44 @@ def start_serve(detached=False):
     serve.start(detached=detached)
     logger.info(f"Ray Serve已启动，detached模式: {detached}")
 
-def setup_pipeline_services(state_manager_app_name="StateManager", pipeline_app_name="PipelineEngine"):
+def setup_pipeline_services():
     """
     设置和部署VideoTrans流水线所需的核心服务
     
     Args:
-        state_manager_app_name: 状态管理器应用名称
         pipeline_app_name: 流水线引擎应用名称
     
     Returns:
         部署状态信息
     """
-    from core.state_manager import StateManager
-    from config import Config
-    
     # 确保Ray已初始化
     init_ray()
     
     # 启动Ray Serve
     start_serve()
     
-    # 1. 首先部署StateManager
-    config_instance = Config()
-    state_manager = StateManager.options(
-        num_replicas="auto",
-        ray_actor_options={"num_cpus": 0.1}
-    ).bind(config_instance)
-    serve.run(state_manager, name=state_manager_app_name, route_prefix=None)
-    logger.info(f"StateManager已部署，应用名: {state_manager_app_name}")
+    # 1. 首先部署StateManager - 使用全局变量中的句柄
+    serve.run(state_manager_handle, name="StateManager", route_prefix=None)
+    logger.info(f"StateManager已部署，应用名: StateManager")
     
-    # 等待确保StateManager就绪
+    # 2. 部署HLSManager - 使用全局变量中的句柄
+    serve.run(hls_manager_handle, name="hls_manager", route_prefix=None)
+    logger.info("HLSManager已部署，应用名: hls_manager")
+    
+    # 等待确保StateManager和HLSManager就绪
     time.sleep(2)
     
-    # 2. 部署PipelineEngine
-    serve.run(app, name=pipeline_app_name, route_prefix=None)
-    logger.info(f"PipelineEngine已部署，应用名: {pipeline_app_name}")
+    # 3. 部署PipelineEngine
+    serve.run(app, name="PipelineEngine", route_prefix=None)
+    logger.info(f"PipelineEngine已部署，应用名: PipelineEngine")
     
     # 等待确保PipelineEngine就绪
     time.sleep(1)
     
     return {
-        "state_manager": state_manager_app_name,
-        "pipeline": pipeline_app_name,
+        "state_manager": "StateManager",
+        "hls_manager": "hls_manager",
+        "pipeline": "PipelineEngine",
         "status": "deployed"
     }
 

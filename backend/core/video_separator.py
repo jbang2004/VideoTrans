@@ -7,6 +7,7 @@ import soundfile as sf
 from typing import Tuple, Dict, Union, Optional
 from pathlib import Path
 import time
+import asyncio
 from config import Config
 
 from models.ClearerVoice.clearvoice import ClearVoice
@@ -30,7 +31,7 @@ class VideoSeparator:
         )
         self.config = Config()
     
-    def separate_audio(self, input_path: str) -> Tuple[np.ndarray, np.ndarray, int]:
+    async def separate_audio(self, input_path: str) -> Tuple[np.ndarray, np.ndarray, int]:
         """
         分离音频中的人声和背景音
         
@@ -40,7 +41,9 @@ class VideoSeparator:
         Returns:
             Tuple[np.ndarray, np.ndarray, int]: (人声音频, 背景音频, 采样率)
         """
-        enhanced_audio, background_audio = self.clearvoice(
+        # 使用asyncio.to_thread包装同步调用
+        enhanced_audio, background_audio = await asyncio.to_thread(
+            self.clearvoice,
             input_path=input_path,
             online_write=False,
             extract_noise=True
@@ -101,19 +104,19 @@ class VideoSeparator:
             await extract_video.remote(video_path, silent_video, start, duration)
 
             # (2) 分离人声
-            vocals, background, sr = self.separate_audio(full_audio)
+            vocals, background, sr = await self.separate_audio(full_audio)
 
-            # (3) 重采样和归一化
-            background = self._normalize_and_resample((sr, background), target_sr)
+            # (3) 重采样和归一化 - 使用asyncio.to_thread包装同步函数调用
+            background = await asyncio.to_thread(self._normalize_and_resample, (sr, background), target_sr)
 
-            # 写入人声/背景音频
-            sf.write(vocals_audio, vocals, sr, subtype='FLOAT')
-            sf.write(background_audio, background, target_sr, subtype='FLOAT')
+            # 写入人声/背景音频 - 使用asyncio.to_thread避免阻塞
+            await asyncio.to_thread(sf.write, vocals_audio, vocals, sr, subtype='FLOAT')
+            await asyncio.to_thread(sf.write, background_audio, background, target_sr, subtype='FLOAT')
 
             segment_duration = len(vocals) / sr
 
             # 删除原始整段音频
-            Path(full_audio).unlink(missing_ok=True)
+            await asyncio.to_thread(Path(full_audio).unlink, missing_ok=True)
 
             temp_files = {
                 'video': silent_video,
@@ -134,7 +137,7 @@ class VideoSeparator:
             # 清理已生成的临时文件
             for file_path in temp_files.values():
                 if isinstance(file_path, str) and Path(file_path).exists():
-                    Path(file_path).unlink()
+                    await asyncio.to_thread(Path(file_path).unlink)
             
             raise
     
@@ -144,7 +147,7 @@ class VideoSeparator:
         target_sr: int = None
     ) -> np.ndarray:
         """
-        重采样和归一化音频
+        重采样和归一化音频 - 同步方法
         
         Args:
             audio_input: 音频数据，可以是元组(采样率, 音频数据)或者直接是音频数据
@@ -157,28 +160,29 @@ class VideoSeparator:
         import torchaudio
         
         if isinstance(audio_input, tuple):
-            fs, audio_input = audio_input
+            fs, audio_data = audio_input
         else:
             fs = target_sr
+            audio_data = audio_input
 
-        audio_input = audio_input.astype(np.float32)
+        audio_data = audio_data.astype(np.float32)
 
-        max_val = np.abs(audio_input).max()
+        max_val = np.abs(audio_data).max()
         if max_val > 0:
-            audio_input = audio_input / max_val
+            audio_data = audio_data / max_val
 
         # 如果多通道, 转单通道
-        if len(audio_input.shape) > 1:
-            audio_input = audio_input.mean(axis=-1)
+        if len(audio_data.shape) > 1:
+            audio_data = audio_data.mean(axis=-1)
 
         # 如果源采样率与目标采样率不一致, 用 torchaudio 进行重采样
         if fs != target_sr:
-            audio_input = np.ascontiguousarray(audio_input)
+            audio_data = np.ascontiguousarray(audio_data)
             resampler = torchaudio.transforms.Resample(
                 orig_freq=fs,
                 new_freq=target_sr,
                 dtype=torch.float32
             )
-            audio_input = resampler(torch.from_numpy(audio_input)[None, :])[0].numpy()
+            audio_data = resampler(torch.from_numpy(audio_data)[None, :])[0].numpy()
 
-        return audio_input 
+        return audio_data 

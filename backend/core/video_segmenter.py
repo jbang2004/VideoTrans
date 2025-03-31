@@ -40,8 +40,9 @@ class VideoSegmenter:
             # 1. 获取视频总时长
             duration = await self._get_video_duration(video_path)
             
-            # 2. 划分分段
-            segments = self._get_audio_segments(
+            # 2. 划分分段 - 使用asyncio.to_thread包装同步函数调用
+            segments = await asyncio.to_thread(
+                self._get_audio_segments,
                 duration=duration, 
                 segment_minutes=self.config.SEGMENT_MINUTES, 
                 min_segment_minutes=self.config.MIN_SEGMENT_MINUTES
@@ -85,7 +86,7 @@ class VideoSegmenter:
     
     def _get_audio_segments(self, duration: float, segment_minutes: float, min_segment_minutes: float) -> List[Tuple[float, float]]:
         """
-        将视频按照配置的时长分割为多个时间片段
+        将视频按照配置的时长分割为多个时间片段 - 同步方法
         
         Args:
             duration: 视频总时长（秒）

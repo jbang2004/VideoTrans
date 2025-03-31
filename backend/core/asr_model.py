@@ -1,6 +1,7 @@
 import ray
 import sys
 import logging
+import asyncio
 from config import Config
 from ray import serve
 
@@ -45,15 +46,14 @@ class ASRModel:
             self.logger.error(f"ASR模型加载失败: {str(e)}")
             raise
     
-    def generate(self, input, **kwargs):
+    async def generate(self, input, **kwargs):
         """
-        执行模型生成方法
-        这是ASR的主要接口方法，以同步方式实现
+        执行模型生成方法 - 异步版本
         """
         try:
             self.logger.info(f"开始ASR识别音频: {input if isinstance(input, str) else '(已加载音频)'}")
-            # 直接调用model的generate方法
-            result = self.model.generate(input, **kwargs)
+            # 使用asyncio.to_thread包装同步调用
+            result = await asyncio.to_thread(self.model.generate, input, **kwargs)
             self.logger.info(f"ASR识别完成，获得 {len(result)} 个句子")
             return result
         except Exception as e:

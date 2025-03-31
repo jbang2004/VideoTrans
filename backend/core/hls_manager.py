@@ -4,8 +4,9 @@ import m3u8
 import os.path
 import shutil
 import time
+import asyncio
 from pathlib import Path
-from typing import Union, Optional
+from typing import Union, Optional, Dict
 import ray
 from ray import serve
 
@@ -22,119 +23,316 @@ if not logger.handlers:  # 如果没有处理器，添加一个控制台处理�
     handler.setFormatter(formatter)
     logger.addHandler(handler)
 
-@ray.remote(num_cpus=0.2)
-class HLSManagerActor:
-    """处理 HLS 流媒体相关的功能"""
-    def __init__(self, config, task_id: str, task_paths: TaskPaths):
-        self.config = config
-        self.task_id = task_id
-        self.task_paths = task_paths
+@serve.deployment(
+    name="hls_manager"
+)
+class HLSManager:
+    """HLS流媒体管理器 - 支持多任务管理"""
+    def __init__(self):
+        self.config = Config()
         self.logger = logging.getLogger(__name__)
+        
+        # 存储每个任务的HLS管理信息
+        self.task_managers = {}
+        
+        # 并发锁，每个任务一个锁
+        self.locks = {}
+        
+        self.logger.info("HLS管理器已初始化")
 
-        self.playlist_path = Path(task_paths.playlist_path)
-        self.segments_dir = Path(task_paths.segments_dir)
-        self.sequence_number = 0
-        # Ray Actor 已提供并发控制
+    async def create_manager(self, task_id: str, task_paths: TaskPaths) -> Dict:
+        """
+        为特定任务创建HLS管理器
+        
+        Args:
+            task_id: 任务ID
+            task_paths: 任务路径信息
+            
+        Returns:
+            Dict: 包含状态信息的字典
+        """
+        # 如果任务已存在，直接返回
+        if task_id in self.task_managers:
+            self.logger.info(f"任务 {task_id} 的HLS管理器已存在")
+            return {"status": "success", "message": "任务HLS管理器已存在"}
+        
+        # 创建任务锁
+        self.locks[task_id] = asyncio.Lock()
+        
+        async with self.locks[task_id]:
+            try:
+                playlist_path = Path(task_paths.playlist_path)
+                segments_dir = Path(task_paths.segments_dir)
+                
+                # 创建播放列表
+                playlist = m3u8.M3U8()
+                playlist.version = 3
+                playlist.target_duration = 20
+                playlist.media_sequence = 0
+                playlist.playlist_type = 'EVENT'
+                playlist.is_endlist = False
+                
+                # 存储任务管理信息
+                self.task_managers[task_id] = {
+                    "task_paths": task_paths,
+                    "playlist_path": playlist_path,
+                    "segments_dir": segments_dir,
+                    "playlist": playlist,
+                    "sequence_number": 0,
+                    "has_segments": False,
+                    "segment_time": 10,  # 默认分段时间为10秒
+                    "created_at": time.time()
+                }
+                
+                # 保存初始播放列表
+                await self._save_playlist(task_id)
+                
+                self.logger.info(f"已为任务 {task_id} 创建HLS管理器")
+                return {"status": "success", "message": "HLS管理器创建成功"}
+            except Exception as e:
+                self.logger.error(f"为任务 {task_id} 创建HLS管理器失败: {e}")
+                # 清理已创建的部分资源
+                if task_id in self.task_managers:
+                    del self.task_managers[task_id]
+                if task_id in self.locks:
+                    del self.locks[task_id]
+                return {"status": "error", "message": f"创建HLS管理器失败: {str(e)}"}
 
-        self.playlist = m3u8.M3U8()
-        self.playlist.version = 3
-        self.playlist.target_duration = 20
-        self.playlist.media_sequence = 0
-        self.playlist.playlist_type = 'EVENT'
-        # 不设置is_endlist，让播放器可以实时加载新分段
-        self.playlist.is_endlist = False
-
-        # 添加segment_time属性，默认为10秒
-        self.segment_time = 10
-
-        self.has_segments = False
-
-        self._save_playlist()
-
-    def _save_playlist(self) -> None:
-        """保存播放列表到文件"""
+    async def _save_playlist(self, task_id: str) -> None:
+        """
+        保存特定任务的播放列表到文件
+        
+        Args:
+            task_id: 任务ID
+        """
+        if task_id not in self.task_managers:
+            raise ValueError(f"任务 {task_id} 的HLS管理器不存在")
+            
+        manager = self.task_managers[task_id]
+        playlist = manager["playlist"]
+        playlist_path = manager["playlist_path"]
+        
         try:
-            for segment in self.playlist.segments:
+            for segment in playlist.segments:
                 # 确保 URI 带有斜杠
                 if segment.uri is not None and not segment.uri.startswith('/'):
                     segment.uri = '/' + segment.uri
 
-            self.logger.info(f"保存播放列表到: {self.playlist_path}")
+            self.logger.info(f"保存播放列表到: {playlist_path}, 任务ID={task_id}")
             # 确保目录存在
-            self.playlist_path.parent.mkdir(parents=True, exist_ok=True)
+            playlist_path.parent.mkdir(parents=True, exist_ok=True)
             
-            with open(self.playlist_path, 'w', encoding='utf-8') as f:
-                content = self.playlist.dumps()
-                f.write(content)
+            # 使用asyncio.to_thread避免阻塞
+            await asyncio.to_thread(self._write_playlist, playlist, playlist_path)
                 
-            self.logger.info(f"播放列表已更新，总计{len(self.playlist.segments)}个分段")
+            self.logger.info(f"播放列表已更新，总计{len(playlist.segments)}个分段, 任务ID={task_id}")
         except Exception as e:
-            self.logger.error(f"保存播放列表失败: {e}")
+            self.logger.error(f"保存播放列表失败: {e}, 任务ID={task_id}")
             raise
+    
+    def _write_playlist(self, playlist, playlist_path):
+        """同步写入播放列表文件"""
+        with open(playlist_path, 'w', encoding='utf-8') as f:
+            content = playlist.dumps()
+            f.write(content)
 
-    async def add_segment(self, video_path: Union[str, Path], part_index: int) -> bool:
-        """添加新的视频片段到播放列表（异步方法）"""
+    async def add_segment(self, task_id: str, video_path: Union[str, Path], part_index: int) -> Dict:
+        """
+        添加新的视频片段到播放列表
+        
+        Args:
+            task_id: 任务ID
+            video_path: 视频片段路径
+            part_index: 部分索引
+            
+        Returns:
+            Dict: 包含状态信息的字典
+        """
+        if task_id not in self.task_managers:
+            self.logger.error(f"任务 {task_id} 的HLS管理器不存在")
+            return {"status": "error", "message": "任务HLS管理器不存在"}
+            
+        if task_id not in self.locks:
+            self.locks[task_id] = asyncio.Lock()
+            
         start_time = time.time()
-        try:
-            self.logger.info(f"开始处理HLS片段 {part_index}, TaskID={self.task_id}")
-            self.segments_dir.mkdir(parents=True, exist_ok=True)
+        
+        async with self.locks[task_id]:
+            try:
+                manager = self.task_managers[task_id]
+                segments_dir = manager["segments_dir"]
+                playlist = manager["playlist"]
+                sequence_number = manager["sequence_number"]
+                segment_time = manager["segment_time"]
+                task_paths = manager["task_paths"]
+                
+                self.logger.info(f"开始处理HLS片段 {part_index}, 任务ID={task_id}")
+                segments_dir.mkdir(parents=True, exist_ok=True)
 
-            segment_filename = f'segment_{self.sequence_number:04d}_%03d.ts'
-            segment_pattern = str(self.segments_dir / segment_filename)
-            temp_playlist_path = self.task_paths.processing_dir / f'temp_{part_index}.m3u8'
+                segment_filename = f'segment_{sequence_number:04d}_%03d.ts'
+                segment_pattern = str(segments_dir / segment_filename)
+                temp_playlist_path = task_paths.processing_dir / f'temp_{part_index}.m3u8'
 
-            # 使用异步Ray任务
-            await hls_segment.remote(
-                input_path=str(video_path),
-                segment_pattern=segment_pattern,
-                playlist_path=str(temp_playlist_path),
-                hls_time=self.segment_time
-            )
+                # 使用异步Ray任务
+                await hls_segment.remote(
+                    input_path=str(video_path),
+                    segment_pattern=segment_pattern,
+                    playlist_path=str(temp_playlist_path),
+                    hls_time=segment_time
+                )
 
-            # 加入分段
-            temp_m3u8 = m3u8.load(str(temp_playlist_path))
-            discontinuity_segment = m3u8.Segment(discontinuity=True)
-            self.playlist.add_segment(discontinuity_segment)
+                # 加入分段
+                # 使用asyncio.to_thread避免阻塞
+                temp_m3u8 = await asyncio.to_thread(m3u8.load, str(temp_playlist_path))
+                
+                discontinuity_segment = m3u8.Segment(discontinuity=True)
+                playlist.add_segment(discontinuity_segment)
 
-            for segment in temp_m3u8.segments:
-                segment.uri = f"segments/{self.task_id}/{Path(segment.uri).name}"
-                self.playlist.segments.append(segment)
+                for segment in temp_m3u8.segments:
+                    segment.uri = f"segments/{task_id}/{Path(segment.uri).name}"
+                    playlist.segments.append(segment)
 
-            self.sequence_number += len(temp_m3u8.segments)
-            self.has_segments = True
+                # 更新序列号
+                manager["sequence_number"] += len(temp_m3u8.segments)
+                manager["has_segments"] = True
+                
+                # 确保播放列表不标记为结束，以便实时加载
+                playlist.is_endlist = False
+                
+                await self._save_playlist(task_id)
+                
+                # 删除临时播放列表
+                if temp_playlist_path.exists():
+                    await asyncio.to_thread(temp_playlist_path.unlink)
+                
+                elapsed = time.time() - start_time
+                self.logger.info(f"已添加片段 {part_index} 到HLS流，耗时 {elapsed:.2f}s, 任务ID={task_id}")
+                return {"status": "success", "part_index": part_index}
+            except Exception as e:
+                elapsed = time.time() - start_time
+                self.logger.error(f"添加HLS片段失败: {e}，耗时 {elapsed:.2f}s, 任务ID={task_id}")
+                return {"status": "error", "message": f"添加HLS片段失败: {str(e)}"}
+
+    async def finalize_playlist(self, task_id: str) -> Dict:
+        """
+        标记播放列表为完成状态
+        
+        Args:
+            task_id: 任务ID
             
-            # 确保播放列表不标记为结束，以便实时加载
-            self.playlist.is_endlist = False
+        Returns:
+            Dict: 包含状态信息的字典
+        """
+        if task_id not in self.task_managers:
+            self.logger.error(f"任务 {task_id} 的HLS管理器不存在")
+            return {"status": "error", "message": "任务HLS管理器不存在"}
             
-            self._save_playlist()
+        if task_id not in self.locks:
+            self.locks[task_id] = asyncio.Lock()
             
-            # 删除临时播放列表
-            if temp_playlist_path.exists():
-                temp_playlist_path.unlink()
-            
-            elapsed = time.time() - start_time
-            self.logger.info(f"已添加片段 {part_index} 到HLS流，耗时 {elapsed:.2f}s")
-            return True
-        except Exception as e:
-            elapsed = time.time() - start_time
-            self.logger.error(f"添加HLS片段失败: {e}，耗时 {elapsed:.2f}s")
-            return False
+        async with self.locks[task_id]:
+            try:
+                manager = self.task_managers[task_id]
+                playlist = manager["playlist"]
+                has_segments = manager["has_segments"]
+                
+                if has_segments:
+                    playlist.is_endlist = True
+                    await self._save_playlist(task_id)
+                    self.logger.info(f"播放列表已保存，并标记为完成状态, 任务ID={task_id}")
+                    return {"status": "success", "message": "播放列表已标记为完成"}
+                else:
+                    self.logger.warning(f"播放列表为空，不标记为结束状态, 任务ID={task_id}")
+                    return {"status": "warning", "message": "播放列表为空，未标记为完成"}
+            except Exception as e:
+                self.logger.error(f"完成播放列表失败: {e}, 任务ID={task_id}")
+                return {"status": "error", "message": f"完成播放列表失败: {str(e)}"}
 
-    async def finalize_playlist(self) -> bool:
-        """标记播放列表为完成状态"""
-        try:
-            if self.has_segments:
-                self.playlist.is_endlist = True
-                self._save_playlist()
-                self.logger.info("播放列表已保存，并标记为完成状态")
-                return True
-            else:
-                self.logger.warning("播放列表为空，不标记为结束状态")
-                return False
-        except Exception as e:
-            self.logger.error(f"完成播放列表失败: {e}")
-            return False
+    async def get_has_segments(self, task_id: str) -> Dict:
+        """
+        获取任务是否有分段
+        
+        Args:
+            task_id: 任务ID
+            
+        Returns:
+            Dict: 包含状态和has_segments值的字典
+        """
+        if task_id not in self.task_managers:
+            return {"status": "error", "message": "任务HLS管理器不存在", "has_segments": False}
+            
+        manager = self.task_managers[task_id]
+        return {"status": "success", "has_segments": manager["has_segments"]}
+    
+    async def clean_old_tasks(self, max_age_hours: int = 24) -> Dict:
+        """
+        清理旧任务资源
+        
+        Args:
+            max_age_hours: 最大保留小时数，默认24小时
+            
+        Returns:
+            Dict: 包含清理信息的字典
+        """
+        now = time.time()
+        max_age_seconds = max_age_hours * 3600
+        tasks_to_clean = []
+        
+        # 标识需要清理的任务
+        for task_id, manager in self.task_managers.items():
+            if now - manager["created_at"] > max_age_seconds:
+                tasks_to_clean.append(task_id)
+        
+        # 执行清理
+        cleaned_count = 0
+        for task_id in tasks_to_clean:
+            if task_id in self.locks:
+                async with self.locks[task_id]:
+                    if task_id in self.task_managers:
+                        del self.task_managers[task_id]
+                        cleaned_count += 1
+                del self.locks[task_id]
+        
+        self.logger.info(f"已清理 {cleaned_count} 个过期任务的HLS资源")
+        return {"status": "success", "cleaned_count": cleaned_count}
 
+# 为了保持兼容性，保留旧的Actor类的引用
+@ray.remote(num_cpus=0.2)
+class HLSManagerActor:
+    """
+    旧版HLS管理器Actor - 仅用于向后兼容
+    建议使用新的HLSManager Serve部署
+    """
+    def __init__(self, config, task_id: str, task_paths: TaskPaths):
+        self.logger = logging.getLogger(__name__)
+        self.logger.warning("正在使用已弃用的HLSManagerActor，建议更新代码使用新的HLSManager部署")
+        
+        # 获取HLSManager的部署引用
+        self.hls_manager = serve.get_deployment_handle("hls_manager")
+        self.task_id = task_id
+        self.task_paths = task_paths
+        
+        # 异步初始化HLS管理器
+        # 注意这里在__init__中使用异步是不规范的，但为了保持兼容性
+        import asyncio
+        loop = asyncio.get_event_loop()
+        loop.create_task(self._init_manager())
+    
+    async def _init_manager(self):
+        """初始化HLS管理器"""
+        await self.hls_manager.create_manager.remote(self.task_id, self.task_paths)
+    
+    async def add_segment(self, video_path, part_index):
+        """添加分段到HLS流"""
+        result = await self.hls_manager.add_segment.remote(self.task_id, video_path, part_index)
+        return result.get("status") == "success"
+    
+    async def finalize_playlist(self):
+        """完成播放列表"""
+        result = await self.hls_manager.finalize_playlist.remote(self.task_id)
+        return result.get("status") == "success"
+    
     async def get_has_segments(self):
-        """获取has_segments属性的值"""
-        return self.has_segments 
+        """获取has_segments值"""
+        result = await self.hls_manager.get_has_segments.remote(self.task_id)
+        return result.get("has_segments", False) 

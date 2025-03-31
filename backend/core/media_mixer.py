@@ -5,6 +5,7 @@ import numpy as np
 import logging
 from typing import List, Optional, Tuple
 from ray import serve
+import asyncio
 
 # Ray tasks imported directly
 from utils.audio_utils import apply_fade_effect, mix_with_background, normalize_audio
@@ -107,14 +108,14 @@ async def create_mixed_segment(
             logger.warning("[MediaMixer] create_mixed_segment: 收到空的句子列表")
             return False, full_audio_buffer
 
-        # 1. 拼接所有句子的合成音频
-        full_audio = _concat_audio_segments(sentences, full_audio_buffer, config.AUDIO_OVERLAP)
+        # 1. 拼接所有句子的合成音频 - 直接用asyncio.to_thread包装
+        full_audio = await asyncio.to_thread(_concat_audio_segments, sentences, full_audio_buffer, config.AUDIO_OVERLAP)
         if len(full_audio) == 0:
             logger.error("[MediaMixer] create_mixed_segment: 没有有效的合成音频数据")
             return False, full_audio_buffer
 
-        # 2. 计算时间参数
-        start_time_param, duration = _calculate_time_params(sentences)
+        # 2. 计算时间参数 - 直接用asyncio.to_thread包装
+        start_time_param, duration = await asyncio.to_thread(_calculate_time_params, sentences)
 
         # 3. 背景音乐混合
         segment_index = sentences[0].segment_index
@@ -125,9 +126,17 @@ async def create_mixed_segment(
 
         background_audio_path = segment_files.get('background')
         if background_audio_path:
-            full_audio = _process_background_audio(
-                background_audio_path, start_time_param, duration, full_audio,
-                sample_rate, config.VOCALS_VOLUME, config.BACKGROUND_VOLUME, max_val
+            # 直接用asyncio.to_thread包装
+            full_audio = await asyncio.to_thread(
+                _process_background_audio,
+                background_audio_path, 
+                start_time_param, 
+                duration, 
+                full_audio,
+                sample_rate, 
+                config.VOCALS_VOLUME, 
+                config.BACKGROUND_VOLUME, 
+                max_val
             )
 
         # 4. 更新全局音频缓冲区

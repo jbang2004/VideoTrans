@@ -17,7 +17,7 @@ dist/
 build/
 
 # 模型文件
-backend/models/
+# backend/models/
 *.pt
 *.pth
 *.onnx
