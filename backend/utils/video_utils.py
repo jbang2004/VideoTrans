@@ -58,7 +58,7 @@ async def add_video_segment(
         end_time = start_time + duration
 
         # 1) 截取视频 (无音轨)
-        await cut_video_track.remote(
+        await cut_video_track(
             input_path=video_path,
             output_path=temp_video.name,
             start=start_time,
@@ -80,7 +80,7 @@ async def add_video_segment(
             )
 
             # 生成带字幕的视频
-            await cut_video_with_subtitles_and_audio.remote(
+            await cut_video_with_subtitles_and_audio(
                 input_video_path=temp_video.name,
                 input_audio_path=temp_audio.name,
                 subtitles_path=temp_ass.name,
@@ -88,7 +88,7 @@ async def add_video_segment(
             )
         else:
             # 不加字幕，仅合并音频
-            await cut_video_with_audio.remote(
+            await cut_video_with_audio(
                 input_video_path=temp_video.name,
                 input_audio_path=temp_audio.name,
                 output_path=output_path

@@ -6,24 +6,23 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import List, Tuple, Optional, Union
-
-import ray
+import asyncio
 
 logger = logging.getLogger(__name__)
 
 
-def run_command(cmd: List[str]) -> Tuple[bytes, bytes]:
+async def run_command(cmd: List[str]) -> Tuple[bytes, bytes]:
     """
-    运行 ffmpeg 命令，返回 (stdout, stderr)。
+    异步运行 ffmpeg 命令，返回 (stdout, stderr)。
     若命令返回码非 0，则抛出 RuntimeError。
     """
     logger.debug(f"[FFmpegUtils] Running command: {' '.join(cmd)}")
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
     )
-    stdout, stderr = process.communicate()
+    stdout, stderr = await process.communicate()
 
     if process.returncode != 0:
         error_msg = stderr.decode() or "Unknown error"
@@ -32,8 +31,7 @@ def run_command(cmd: List[str]) -> Tuple[bytes, bytes]:
 
     return stdout, stderr
 
-@ray.remote(num_cpus=0.2)
-def extract_audio(
+async def extract_audio(
     input_path: str,
     output_path: str,
     start: float = 0.0,
@@ -55,10 +53,9 @@ def extract_audio(
         "-ac", "1",
         output_path
     ]
-    run_command(cmd)
+    await run_command(cmd)
 
-@ray.remote(num_cpus=0.2)
-def extract_video(
+async def extract_video(
     input_path: str,
     output_path: str,
     start: float = 0.0,
@@ -81,10 +78,9 @@ def extract_video(
         "-tune", "fastdecode",
         output_path
     ]
-    run_command(cmd)
+    await run_command(cmd)
 
-@ray.remote(num_cpus=0.2)
-def hls_segment(
+async def hls_segment(
     input_path: str,
     segment_pattern: str,
     playlist_path: str,
@@ -106,10 +102,9 @@ def hls_segment(
         "-hls_segment_filename", segment_pattern,
         playlist_path
     ]
-    run_command(cmd)
+    await run_command(cmd)
 
-@ray.remote(num_cpus=0.2)
-def cut_video_track(
+async def cut_video_track(
     input_path: str,
     output_path: str,
     start: float,
@@ -133,10 +128,9 @@ def cut_video_track(
         "-vsync", "vfr",
         output_path
     ]
-    run_command(cmd)
+    await run_command(cmd)
 
-@ray.remote(num_cpus=0.2)
-def cut_video_with_audio(
+async def cut_video_with_audio(
     input_video_path: str,
     input_audio_path: str,
     output_path: str
@@ -152,10 +146,9 @@ def cut_video_with_audio(
         "-c:a", "aac",
         output_path
     ]
-    run_command(cmd)
+    await run_command(cmd)
 
-@ray.remote(num_cpus=0.2)
-def cut_video_with_subtitles_and_audio(
+async def cut_video_with_subtitles_and_audio(
     input_video_path: str,
     input_audio_path: str,
     subtitles_path: str,
@@ -195,7 +188,7 @@ def cut_video_with_subtitles_and_audio(
             "-c:a", "aac",
             output_path
         ]
-        run_command(cmd)
+        await run_command(cmd)
 
     except RuntimeError as e:
         logger.warning(f"[FFmpegUtils] subtitles滤镜方案失败: {str(e)}")
@@ -208,11 +201,10 @@ def cut_video_with_subtitles_and_audio(
             "-c:a", "aac",
             output_path
         ]
-        run_command(cmd)
+        await run_command(cmd)
         logger.warning("[FFmpegUtils] 已跳过字幕，仅合并音视频")
 
-@ray.remote(num_cpus=0.2)
-def get_duration(input_path: str) -> float:
+async def get_duration(input_path: str) -> float:
     """
     获取视频/音频文件的持续时长（秒）。
     """
@@ -224,14 +216,13 @@ def get_duration(input_path: str) -> float:
         input_path
     ]
     try:
-        stdout, _ = run_command(cmd)
+        stdout, _ = await run_command(cmd)
         return float(stdout.decode().strip())
     except (ValueError, RuntimeError) as e:
         logger.error(f"[FFmpegUtils] 获取时长失败: {str(e)}, 输入: {input_path}")
         raise
 
-@ray.remote(num_cpus=0.2)
-def concat_videos(input_list: str, output_path: str) -> Union[Path, None]:
+async def concat_videos(input_list: str, output_path: str) -> Union[Path, None]:
     """
     根据合并列表文件合并视频片段。
     
@@ -252,7 +243,7 @@ def concat_videos(input_list: str, output_path: str) -> Union[Path, None]:
     ]
     
     try:
-        run_command(cmd)
+        await run_command(cmd)
         return Path(output_path)
     except Exception as e:
         logger.error(f"[FFmpegUtils] 合并视频失败: {e}")

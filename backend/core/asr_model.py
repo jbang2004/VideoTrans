@@ -4,6 +4,7 @@ import logging
 import asyncio
 from config import Config
 from ray import serve
+import torch
 
 @serve.deployment(
     name="asr_model"
@@ -50,6 +51,7 @@ class ASRModel:
         """
         执行模型生成方法 - 异步版本
         """
+        result = None
         try:
             self.logger.info(f"开始ASR识别音频: {input if isinstance(input, str) else '(已加载音频)'}")
             # 使用asyncio.to_thread包装同步调用
@@ -58,4 +60,13 @@ class ASRModel:
             return result
         except Exception as e:
             self.logger.error(f"ASR识别失败: {str(e)}")
-            raise 
+            # Re-raise the exception after cleanup
+            raise
+        finally:
+            # Ensure GPU cache is cleared regardless of success or failure
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                self.logger.debug("ASRModel: Cleared GPU cache.")
+            # Optional: Explicitly delete large local variables if needed, though result is returned.
+            # del result # Not strictly necessary here as it's returned or was None/exception
+    

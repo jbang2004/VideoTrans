@@ -122,12 +122,20 @@ class AudioGenerator:
             
         self.logger.info(f"开始处理 {len(sentences)} 个句子的音频生成")
         
+        sentences_with_audio = []
         try:
             # 处理句子列表
-            sentences_with_audio = []
             for sentence in sentences:
-                # 初始化 final_audio 为空数组，以防后续步骤失败
+                # Define vars outside inner try/except/finally
                 final_audio = np.zeros(0, dtype=np.float32)
+                tts_tokens = None
+                speaker_features = None
+                token_tensor = None
+                segment_output = None
+                prompt_token = None
+                prompt_feat = None
+                embedding = None
+                
                 try:
                     # 获取所需参数
                     model_input = sentence.model_input
@@ -148,10 +156,10 @@ class AudioGenerator:
                             # 获取语速
                             speed = sentence.speed if hasattr(sentence, 'speed') and sentence.speed > 0 else 1.0 # 确保 speed > 0
                             
-                            # 准备参数
-                            prompt_token = speaker_features.get('flow_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32))
-                            prompt_feat = speaker_features.get('prompt_speech_feat', torch.zeros(1, 0, 80))
-                            embedding = speaker_features.get('flow_embedding', torch.zeros(0))
+                            # 准备参数 (Move to device)
+                            prompt_token = speaker_features.get('flow_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32)).to(self.device)
+                            prompt_feat = speaker_features.get('prompt_speech_feat', torch.zeros(1, 0, 80)).to(self.device)
+                            embedding = speaker_features.get('flow_embedding', torch.zeros(0)).to(self.device)
                             
                             for i, tokens in enumerate(tts_tokens['segment_speech_tokens']):
                                 if not tokens:
@@ -168,9 +176,9 @@ class AudioGenerator:
                                     kwargs = {
                                         'token': token_tensor,
                                         'token_offset': 0,  # 总是包含token_offset参数
-                                        'prompt_token': prompt_token.to(self.device),
-                                        'prompt_feat': prompt_feat.to(self.device),
-                                        'embedding': embedding.to(self.device),
+                                        'prompt_token': prompt_token, # Already on device
+                                        'prompt_feat': prompt_feat,   # Already on device
+                                        'embedding': embedding,       # Already on device
                                         'uuid': self.this_uuid,
                                         'finalize': True,
                                         'speed': speed
@@ -193,48 +201,52 @@ class AudioGenerator:
                                     segment_audio = segment_audio.mean(axis=0)
                                 
                                 segment_audio_list.append(segment_audio)
+
+                                # Clean up tensors for this segment
+                                del token_tensor
+                                del segment_output
+                                del segment_audio # Intermediate numpy array
                             
                         except FileNotFoundError:
                             self.logger.error(f"句子 {sentence.sentence_id}: 加载特征文件失败 (TTS: {tts_token_path}, Speaker: {speaker_feature_path})。将仅生成静音。")
-                            # 清空可能存在的 segment_audio_list，确保后续只添加静音
                             segment_audio_list = []
                         except Exception as load_error:
                             self.logger.error(f"句子 {sentence.sentence_id}: 处理 TTS tokens 或特征时出错: {load_error}")
-                            segment_audio_list = [] # 清空，仅生成静音
+                            segment_audio_list = [] 
+                        finally:
+                            # Clean up features loaded for this sentence
+                            if 'tts_tokens' in locals() and tts_tokens is not None: del tts_tokens
+                            if 'speaker_features' in locals() and speaker_features is not None: del speaker_features
+                            if 'prompt_token' in locals() and prompt_token is not None: del prompt_token
+                            if 'prompt_feat' in locals() and prompt_feat is not None: del prompt_feat
+                            if 'embedding' in locals() and embedding is not None: del embedding
                         
                     # ---- 静音添加逻辑 ----
-                    # （现在无论 tts_token_path 是否有效都会执行到这里）
-                    
-                    # 拼接所有（可能为空的）段落的音频
                     if segment_audio_list:
                         final_audio = np.concatenate(segment_audio_list)
-                    # else: final_audio 保持为 np.zeros(0)
                     
-                    # 添加首句静音
+                    del segment_audio_list # Delete list reference
+                    
                     if hasattr(sentence, 'is_first') and sentence.is_first and hasattr(sentence, 'start') and sentence.start > 0:
-                        # 假设 sentence.start 是毫秒
                         silence_samples = int(sentence.start * self.sample_rate / 1000)
                         if silence_samples > 0:
                             final_audio = np.concatenate([np.zeros(silence_samples, dtype=np.float32), final_audio])
                     
-                    # 添加尾部静音
                     if hasattr(sentence, 'silence_duration') and sentence.silence_duration > 0:
                         silence_samples = int(sentence.silence_duration * self.sample_rate / 1000)
                         if silence_samples > 0:
-                            # 无论 final_audio 是否为空，都附加静音
                             final_audio = np.concatenate([final_audio, np.zeros(silence_samples, dtype=np.float32)])
                     
-                    # 更新句子
                     sentence.generated_audio = final_audio
                     self.logger.info(f"句子 {sentence.sentence_id}: 音频处理完成 (最终长度: {len(final_audio)}样本)")
                     
                 except Exception as e:
-                    # 捕获处理单个句子的任何未预料错误
                     self.logger.error(f"处理句子 {sentence.sentence_id} 音频时发生意外错误: {e}", exc_info=True)
-                    # 确保即使发生错误，也设置一个空的音频数组
                     sentence.generated_audio = np.zeros(0, dtype=np.float32)
+                finally:
+                    # Clean up final_audio numpy array reference for this sentence
+                    if 'final_audio' in locals(): del final_audio 
                 
-                # 将处理过（可能失败）的句子添加到结果列表
                 sentences_with_audio.append(sentence)
             
             self.logger.info(f"音频生成批处理完成，共处理 {len(sentences_with_audio)} 个句子")
@@ -242,10 +254,12 @@ class AudioGenerator:
             
         except Exception as e:
             self.logger.error(f"批量音频生成过程中发生严重错误: {e}", exc_info=True)
-            # 如果批量处理失败，尝试为所有句子设置空音频并返回
             for s in sentences:
-                if not hasattr(s, 'generated_audio'): # 避免覆盖已有的（可能是空）
+                if not hasattr(s, 'generated_audio'):
                     s.generated_audio = np.zeros(0, dtype=np.float32)
             return sentences
-            # 或者直接 re-raise
-            # raise
+        finally:
+            # Final GPU cache clear after the whole batch generation
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                self.logger.debug("AudioGenerator: Cleared GPU cache.")

@@ -53,20 +53,31 @@ class Translator:
                 target_language=LANGUAGE_MAP.get(target_language, target_language),
                 json_content=texts
             )
-            return await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
+            result = await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
+            # 确保模型返回的是字典
+            return result if result else {"output": {}}
         except Exception as e:
             self.logger.error(f"翻译失败: {str(e)}")
             raise
+        finally:
+            # 显式删除大型提示文本，帮助内存回收
+            if 'system_prompt' in locals(): del system_prompt
+            if 'user_prompt' in locals(): del user_prompt
 
     async def simplify(self, texts: Dict[str, str]) -> Dict[str, str]:
         """简化文本"""
         try:
             system_prompt = SIMPLIFICATION_SYSTEM_PROMPT
             user_prompt = SIMPLIFICATION_USER_PROMPT.format(json_content=texts)
-            return await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
+            result = await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
+            return result if result else {}
         except Exception as e:
             self.logger.error(f"简化失败: {str(e)}")
             raise
+        finally:
+            # 显式删除大型提示文本，帮助内存回收
+            if 'system_prompt' in locals(): del system_prompt
+            if 'user_prompt' in locals(): del user_prompt
 
     async def _process_batch(
         self,
@@ -85,6 +96,9 @@ class Translator:
         success_count = 0
 
         while i < len(items):
+            batch = None
+            results = None
+            
             try:
                 batch = items[i:i + batch_size]
                 if not batch:
@@ -112,9 +126,14 @@ class Translator:
                     self.logger.debug(f"出错后减小批次大小到: {batch_size}")
                     continue
                 else:
-                    if error_handler:
+                    if error_handler and batch:
                         yield error_handler(batch)
-                    i += len(batch)
+                    if batch:
+                        i += len(batch)
+            finally:
+                # 显式删除批处理结果以帮助内存回收
+                if batch is not None: del batch
+                if results is not None: del results
 
     async def translate_sentences(
         self,
@@ -130,32 +149,50 @@ class Translator:
         config = BatchConfig(initial_size=batch_size)
 
         async def process_batch(batch: List) -> Optional[List]:
-            texts = {str(j): s.raw_text for j, s in enumerate(batch)}
-            self.logger.debug(f"翻译批次: {len(texts)}条文本")
-            translated = await self.translate(texts, target_language)
-            if "output" not in translated:
-                self.logger.error("翻译结果中缺少 output 字段")
+            texts = None
+            translated_texts = None
+            
+            try:
+                texts = {str(j): s.raw_text for j, s in enumerate(batch)}
+                self.logger.debug(f"翻译批次: {len(texts)}条文本")
+                translated = await self.translate(texts, target_language)
+                
+                if "output" not in translated:
+                    self.logger.error("翻译结果中缺少 output 字段")
+                    return None
+                    
+                translated_texts = translated["output"]
+                if len(translated_texts) == len(texts):
+                    for j, sentence in enumerate(batch):
+                        sentence.trans_text = translated_texts[str(j)]
+                    return batch
                 return None
-            translated_texts = translated["output"]
-            if len(translated_texts) == len(texts):
-                for j, sentence in enumerate(batch):
-                    sentence.trans_text = translated_texts[str(j)]
-                return batch
-            return None
+            except Exception as e:
+                self.logger.error(f"处理翻译批次失败: {e}")
+                raise
+            finally:
+                # 显式删除临时变量以帮助内存回收
+                if texts is not None: del texts
+                if translated_texts is not None: del translated_texts
 
         def handle_error(batch: List) -> List:
+            # 错误处理：使用原始文本作为翻译
             for sentence in batch:
                 sentence.trans_text = sentence.raw_text
             return batch
 
-        async for batch_result in self._process_batch(
-            sentences,
-            process_batch,
-            config,
-            error_handler=handle_error,
-            reduce_batch_on_error=True
-        ):
-            yield batch_result
+        try:
+            async for batch_result in self._process_batch(
+                sentences,
+                process_batch,
+                config,
+                error_handler=handle_error,
+                reduce_batch_on_error=True
+            ):
+                yield batch_result
+        except Exception as e:
+            self.logger.error(f"翻译句子生成器发生错误: {e}")
+            raise
 
     async def simplify_sentences(
         self,
@@ -173,88 +210,108 @@ class Translator:
         config = BatchConfig(initial_size=batch_size, min_size=1, required_successes=2)
 
         async def process_batch(batch: List) -> Optional[List]:
-            texts = {str(i): s.trans_text for i, s in enumerate(batch)}
-            self.logger.debug(f"简化批次: {len(texts)}条文本")
-            batch_result = await self.simplify(texts)
+            texts = None
+            batch_result = None
             
-            if "thinking" not in batch_result or not any(key in batch_result for key in ["minimal", "slight", "moderate", "significant", "extreme"]):
-                self.logger.error("简化结果格式不正确，缺少必要字段")
-                return None
+            try:
+                texts = {str(i): s.trans_text for i, s in enumerate(batch)}
+                self.logger.debug(f"简化批次: {len(texts)}条文本")
+                batch_result = await self.simplify(texts)
                 
-            for i, s in enumerate(batch):
-                old_text = s.trans_text
-                str_i = str(i)
-                
-                if not any(str_i in batch_result.get(key, {}) for key in ["minimal", "slight", "moderate", "significant", "extreme"]):
-                    self.logger.error(f"句子 {i} 的简化结果不完整")
-                    continue
+                if "thinking" not in batch_result or not any(key in batch_result for key in ["minimal", "slight", "moderate", "significant", "extreme"]):
+                    self.logger.error("简化结果格式不正确，缺少必要字段")
+                    return None
+                    
+                for i, s in enumerate(batch):
+                    old_text = s.trans_text
+                    str_i = str(i)
+                    
+                    if not any(str_i in batch_result.get(key, {}) for key in ["minimal", "slight", "moderate", "significant", "extreme"]):
+                        self.logger.error(f"句子 {i} 的简化结果不完整")
+                        continue
 
-                ideal_length = len(old_text) * (target_speed / s.speed) if s.speed > 0 else len(old_text)
-                
-                # 存储所有可接受和不可接受的候选文本
-                acceptable_candidates = {}
-                non_acceptable_candidates = {}
-                
-                # 按精简程度检查候选文本
-                simplification_levels = ["minimal", "slight", "moderate", "significant", "extreme"]
-                for key in simplification_levels:
-                    if key in batch_result and str_i in batch_result[key]:
-                        candidate_text = batch_result[key][str_i]
-                        if candidate_text:
-                            candidate_length = len(candidate_text)
-                            if candidate_length <= ideal_length:
-                                acceptable_candidates[key] = candidate_text
-                            else:
-                                non_acceptable_candidates[key] = candidate_text
-                
-                # 如果有可接受的候选文本（长度小于等于理想长度），选择最接近理想长度的（最长的可接受文本）
-                if acceptable_candidates:
-                    best_candidate = None
-                    min_diff = float('inf')
+                    ideal_length = len(old_text) * (target_speed / s.speed) if s.speed > 0 else len(old_text)
                     
-                    for key, text in acceptable_candidates.items():
-                        diff = abs(len(text) - ideal_length)
-                        if diff < min_diff:
-                            min_diff = diff
-                            best_candidate = (key, text)
+                    # 存储所有可接受和不可接受的候选文本
+                    acceptable_candidates = {}
+                    non_acceptable_candidates = {}
                     
-                    chosen_key, chosen_text = best_candidate
+                    # 按精简程度检查候选文本
+                    simplification_levels = ["minimal", "slight", "moderate", "significant", "extreme"]
+                    for key in simplification_levels:
+                        if key in batch_result and str_i in batch_result[key]:
+                            candidate_text = batch_result[key][str_i]
+                            if candidate_text:
+                                candidate_length = len(candidate_text)
+                                if candidate_length <= ideal_length:
+                                    acceptable_candidates[key] = candidate_text
+                                else:
+                                    non_acceptable_candidates[key] = candidate_text
                     
-                # 如果没有可接受的候选文本，选择最接近理想长度的不可接受文本
-                elif non_acceptable_candidates:
-                    best_candidate = None
-                    min_diff = float('inf')
-                    
-                    for key, text in non_acceptable_candidates.items():
-                        diff = abs(len(text) - ideal_length)
-                        if diff < min_diff:
-                            min_diff = diff
-                            best_candidate = (key, text)
-                    
-                    chosen_key, chosen_text = best_candidate
-                    
-                # 如果没有可用的候选文本，保持原文
-                else:
-                    chosen_key = "原文"
-                    chosen_text = old_text
+                    # 如果有可接受的候选文本（长度小于等于理想长度），选择最接近理想长度的（最长的可接受文本）
+                    if acceptable_candidates:
+                        best_candidate = None
+                        min_diff = float('inf')
+                        
+                        for key, text in acceptable_candidates.items():
+                            diff = abs(len(text) - ideal_length)
+                            if diff < min_diff:
+                                min_diff = diff
+                                best_candidate = (key, text)
+                        
+                        chosen_key, chosen_text = best_candidate
+                        
+                    # 如果没有可接受的候选文本，选择最接近理想长度的不可接受文本
+                    elif non_acceptable_candidates:
+                        best_candidate = None
+                        min_diff = float('inf')
+                        
+                        for key, text in non_acceptable_candidates.items():
+                            diff = abs(len(text) - ideal_length)
+                            if diff < min_diff:
+                                min_diff = diff
+                                best_candidate = (key, text)
+                        
+                        chosen_key, chosen_text = best_candidate
+                        
+                    # 如果没有可用的候选文本，保持原文
+                    else:
+                        chosen_key = "原文"
+                        chosen_text = old_text
 
-                s.trans_text = chosen_text
-                self.logger.info(
-                    f"精简[{chosen_key}]: {old_text} -> {chosen_text} (理想长度: {ideal_length}, 实际长度: {len(chosen_text)}, s.speed: {s.speed})"
-                )
-            return batch
+                    s.trans_text = chosen_text
+                    self.logger.info(
+                        f"精简[{chosen_key}]: {old_text} -> {chosen_text} (理想长度: {ideal_length}, 实际长度: {len(chosen_text)}, s.speed: {s.speed})"
+                    )
+                    
+                    # 释放不再需要的候选文本字典
+                    del acceptable_candidates
+                    del non_acceptable_candidates
+                        
+                return batch
+            except Exception as e:
+                self.logger.error(f"处理简化批次失败: {e}")
+                raise
+            finally:
+                # 显式删除临时变量以帮助内存回收
+                if texts is not None: del texts
+                if batch_result is not None: del batch_result
 
         def handle_error(batch: List) -> List:
             return batch
 
-        async for batch_result in self._process_batch(
-            sentences,
-            process_batch,
-            config,
-            error_handler=handle_error,
-            reduce_batch_on_error=False
-        ):
-            yield batch_result
+        try:
+            async for batch_result in self._process_batch(
+                sentences,
+                process_batch,
+                config,
+                error_handler=handle_error,
+                reduce_batch_on_error=False
+            ):
+                yield batch_result
+        except Exception as e:
+            self.logger.error(f"简化句子生成器发生错误: {e}")
+            raise
 
     async def translate_sentences_simple(self, sentences, target_language, batch_size=5):
         """
@@ -285,29 +342,56 @@ class Translator:
                 end_idx = min(start_idx + batch_size, len(sentences))
                 batch = sentences[start_idx:end_idx]
                 
-                # 翻译一批句子
-                batch_texts = [s.raw_text for s in batch]
+                texts = None
+                translations = None
                 
-                # 使用翻译方法翻译
-                translations = await self.translate(batch_texts, target_language)
-                
-                # 更新翻译结果
-                for j, translation in enumerate(translations):
-                    batch[j].trans_text = translation
+                try:
+                    # 翻译一批句子
+                    texts = {str(j): s.raw_text for j, s in enumerate(batch)}
                     
-                # 添加到结果
-                translated_sentences.extend(batch)
-                
-                # 清理内存
-                import gc
-                gc.collect()
-                
-                # 输出进度日志
-                self.logger.debug(f"已翻译 {end_idx}/{len(sentences)} 个句子")
-                
+                    # 使用翻译方法翻译
+                    translated = await self.translate(texts, target_language)
+                    
+                    # 提取翻译结果
+                    if "output" in translated:
+                        translations = translated["output"]
+                        
+                        # 更新翻译结果
+                        for j, s in enumerate(batch):
+                            s.trans_text = translations.get(str(j), s.raw_text)
+                    else:
+                        self.logger.error(f"翻译结果缺少输出字段，批次 {i+1}/{batch_count}")
+                        # 回退使用原始文本
+                        for s in batch:
+                            s.trans_text = s.raw_text
+                        
+                    # 添加到结果
+                    translated_sentences.extend(batch)
+                    
+                    # 输出进度日志
+                    self.logger.debug(f"已翻译 {end_idx}/{len(sentences)} 个句子")
+                    
+                except Exception as e:
+                    self.logger.error(f"批次翻译失败: {str(e)}, 批次 {i+1}/{batch_count}")
+                    # 对于失败的批次，使用原始文本作为翻译
+                    for s in batch:
+                        s.trans_text = s.raw_text
+                    translated_sentences.extend(batch)
+                finally:
+                    # 释放大型临时变量
+                    if texts is not None: del texts
+                    if translations is not None: del translations
+                    # 让Python有更多机会进行垃圾回收
+                    if i % 5 == 0:  # 每5个批次
+                        await asyncio.sleep(0.1)  # 允许事件循环运行并有机会进行垃圾回收
+            
             self.logger.info(f"翻译完成，共 {len(translated_sentences)} 个句子")
             return translated_sentences
             
         except Exception as e:
             self.logger.error(f"翻译句子失败: {str(e)}", exc_info=True)
-            raise
+            # 确保即使出错也返回原始句子（使用原文作为翻译）
+            for s in sentences:
+                if not hasattr(s, 'trans_text') or s.trans_text is None:
+                    s.trans_text = s.raw_text
+            return sentences

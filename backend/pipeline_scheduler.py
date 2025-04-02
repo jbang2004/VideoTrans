@@ -30,18 +30,20 @@ logger = logging.getLogger(__name__)
 # 创建各服务的部署句柄
 translator_handle = Translator.options(
     num_replicas=1,
+    max_ongoing_requests=1,
     ray_actor_options={"num_cpus": 1}  # 翻译器CPU资源
 ).bind()
 
 model_in_handle = ModelInMaker.options(
     num_replicas=1,
-    ray_actor_options={"num_cpus": 1}  # 模型输入CPU资源
+    max_ongoing_requests=1,
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.3}  # 模型输入CPU资源
 ).bind()
 
 tts_token_gen_handle = TtsTokenGenerator.options(
-    num_replicas=3,
+    num_replicas=1,
     max_ongoing_requests=1,
-    ray_actor_options={"num_cpus":1, "num_gpus": 0.15}  # TTS标记生成器资源
+    ray_actor_options={"num_cpus":1, "num_gpus": 0.3}  # TTS标记生成器资源
 ).bind()
 
 audio_gen_handle = AudioGenerator.options(
@@ -51,7 +53,7 @@ audio_gen_handle = AudioGenerator.options(
 
 simplifier_handle = Translator.options(
     num_replicas=1,
-    ray_actor_options={"num_cpus": 0.8}  # 简化器CPU资源
+    ray_actor_options={"num_cpus": 0.5}  # 简化器CPU资源
 ).bind()
 
 media_mixer_handle = MediaMixer.options(
@@ -60,20 +62,20 @@ media_mixer_handle = MediaMixer.options(
 ).bind()
 
 video_separator_handle = VideoSeparator.options(
-    num_replicas=2,
+    num_replicas=1,
     max_ongoing_requests=1,
-    ray_actor_options={"num_cpus": 1, "num_gpus": 0.1}  # 视频分离器GPU资源
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.15}  # 视频分离器GPU资源
 ).bind()
 
 asr_handle = ASRModel.options(
-    num_replicas=2,
+    num_replicas=1,
     max_ongoing_requests=1,
-    ray_actor_options={"num_cpus": 1, "num_gpus": 0.125}  # ASR模型GPU资源
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.15}  # ASR模型GPU资源
 ).bind()
 
 duration_aligner_handle = DurationAligner.options(
     num_replicas=1,
-    ray_actor_options={"num_cpus": 0.7}  # 时长对齐器GPU资源
+    ray_actor_options={"num_cpus": 0.5}  # 时长对齐器GPU资源
 ).bind(simplifier_handle, model_in_handle, tts_token_gen_handle)
 
 timestamp_adjuster_handle = TimestampAdjuster.options(
@@ -98,8 +100,8 @@ state_manager_handle = StateManager.options(
 ).bind(Config())
 
 @serve.deployment(
-    num_replicas=1,
-    max_ongoing_requests=3,
+    num_replicas=3,
+    max_ongoing_requests=1,
     ray_actor_options={"num_cpus": 0.5},  # 降低资源请求以适应当前环境
     logging_config={"log_level": "INFO"}
 )
@@ -417,7 +419,7 @@ class VideoTransPipe:
                             f.write(f"file '{abs_path}'\n")
                     
                     # 执行合并命令
-                    final_video_path = await concat_videos.remote(
+                    final_video_path = await concat_videos(
                         input_list=str(list_txt),
                         output_path=str(final_path)
                     )

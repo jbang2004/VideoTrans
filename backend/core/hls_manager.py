@@ -173,8 +173,8 @@ class HLSManager:
                 segment_pattern = str(segments_dir / segment_filename)
                 temp_playlist_path = task_paths.processing_dir / f'temp_{part_index}.m3u8'
 
-                # 使用异步Ray任务
-                await hls_segment.remote(
+                # 使用异步函数
+                await hls_segment(
                     input_path=str(video_path),
                     segment_pattern=segment_pattern,
                     playlist_path=str(temp_playlist_path),

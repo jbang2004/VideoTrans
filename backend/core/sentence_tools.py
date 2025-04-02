@@ -190,6 +190,10 @@ def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, conf
             output_path = output_dir / f'speaker_{speaker_id}.wav'
             torchaudio.save(str(output_path), audio, sr)
 
+    # Explicitly delete potentially large cache and intermediate variable
+    del speaker_audio_cache
+    if 'speaker_audio' in locals(): del speaker_audio
+            
     return sentences
 
 def get_sentences(tokens: List[Token],

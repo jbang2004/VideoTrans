@@ -175,6 +175,12 @@ class TtsTokenGenerator:
                             self.model.tts_speech_token_dict.pop(seg_uuid, None)
                             self.model.llm_end_dict.pop(seg_uuid, None)
                     
+                    # --- Memory cleanup for loop iteration ---
+                    del text_features
+                    del speaker_features
+                    del tts_tokens
+                    # --- End Memory cleanup ---
+                    
                 except Exception as e:
                     self.logger.error(f"句子处理失败: {e}")
                     # 仍然添加到结果列表，保持原始顺序
@@ -186,3 +192,8 @@ class TtsTokenGenerator:
         except Exception as e:
             self.logger.error(f"批量生成TTS token失败: {e}")
             raise
+        finally:
+            # Ensure GPU cache is cleared after the batch processing
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                self.logger.debug("TtsTokenGenerator: Cleared GPU cache.")

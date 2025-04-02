@@ -76,8 +76,8 @@ class VideoSegmenter:
             视频时长（秒）
         """
         try:
-            # 使用Ray task获取视频时长
-            duration = await get_duration.remote(video_path)
+            # 使用异步函数获取视频时长
+            duration = await get_duration(video_path)
             self.logger.debug(f"获取到视频时长: {duration:.2f}秒")
             return duration
         except Exception as e:

@@ -42,21 +42,29 @@ class VideoSeparator:
             Tuple[np.ndarray, np.ndarray, int]: (人声音频, 背景音频, 采样率)
         """
         # 使用asyncio.to_thread包装同步调用
-        enhanced_audio, background_audio = await asyncio.to_thread(
-            self.clearvoice,
-            input_path=input_path,
-            online_write=False,
-            extract_noise=True
-        )
-        
-        if self.model_name.endswith('16K'):
-            sr = 16000
-        elif self.model_name.endswith('48K'):
-            sr = 48000
-        else:
-            sr = 48000
-        
-        return enhanced_audio, background_audio, sr
+        try:
+            enhanced_audio, background_audio = await asyncio.to_thread(
+                self.clearvoice,
+                input_path=input_path,
+                online_write=False,
+                extract_noise=True
+            )
+            
+            if self.model_name.endswith('16K'):
+                sr = 16000
+            elif self.model_name.endswith('48K'):
+                sr = 48000
+            else:
+                sr = 48000
+            
+            return enhanced_audio, background_audio, sr
+        except Exception as e:
+            self.logger.error(f"音频分离失败: {e}, 输入路径: {input_path}")
+            raise
+        finally:
+            # 主动清理GPU缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     
     async def separate_video(
         self,
@@ -89,6 +97,9 @@ class VideoSeparator:
         """
         start_time = time.time()
         temp_files = {}
+        vocals = None
+        background = None
+        
         try:
             # 创建临时目录
             output_dir_path = Path(output_dir)
@@ -100,23 +111,38 @@ class VideoSeparator:
             background_audio = str(output_dir_path / f"background_{segment_index}.wav")
 
             # (1) 提取音频 & 视频
-            await extract_audio.remote(video_path, full_audio, start, duration)
-            await extract_video.remote(video_path, silent_video, start, duration)
+            await extract_audio(video_path, full_audio, start, duration)
+            await extract_video(video_path, silent_video, start, duration)
 
             # (2) 分离人声
             vocals, background, sr = await self.separate_audio(full_audio)
 
-            # (3) 重采样和归一化 - 使用asyncio.to_thread包装同步函数调用
-            background = await asyncio.to_thread(self._normalize_and_resample, (sr, background), target_sr)
+            # 检查是否成功分离
+            if vocals is None or background is None:
+                self.logger.error(f"音频分离失败，未能产生有效的vocals或background，segment_index={segment_index}")
+                return {}
 
+            # (3) 重采样和归一化 - 使用asyncio.to_thread包装同步函数调用
+            background_resampled = await asyncio.to_thread(self._normalize_and_resample, (sr, background), target_sr)
+            
+            # 显式删除原始background以节省内存
+            if background is not vocals:  # 确保它们不是同一个对象
+                del background
+                background = None
+                
             # 写入人声/背景音频 - 使用asyncio.to_thread避免阻塞
             await asyncio.to_thread(sf.write, vocals_audio, vocals, sr, subtype='FLOAT')
-            await asyncio.to_thread(sf.write, background_audio, background, target_sr, subtype='FLOAT')
+            await asyncio.to_thread(sf.write, background_audio, background_resampled, target_sr, subtype='FLOAT')
+            
+            # 删除重采样后的背景音频（因为已写入文件）
+            del background_resampled
 
             segment_duration = len(vocals) / sr
 
             # 删除原始整段音频
-            await asyncio.to_thread(Path(full_audio).unlink, missing_ok=True)
+            full_audio_path = Path(full_audio)
+            if full_audio_path.exists():
+                await asyncio.to_thread(full_audio_path.unlink, missing_ok=True)
 
             temp_files = {
                 'video': silent_video,
@@ -137,9 +163,29 @@ class VideoSeparator:
             # 清理已生成的临时文件
             for file_path in temp_files.values():
                 if isinstance(file_path, str) and Path(file_path).exists():
-                    await asyncio.to_thread(Path(file_path).unlink)
+                    try:
+                        await asyncio.to_thread(Path(file_path).unlink)
+                    except Exception as clean_error:
+                        self.logger.error(f"清理临时文件失败: {clean_error}, 文件: {file_path}")
             
             raise
+        finally:
+            # 显式删除大型numpy数组
+            for arr_name, arr in [('vocals', vocals), ('background', background)]:
+                if arr is not None:
+                    try:
+                        del arr
+                        self.logger.debug(f"已释放{arr_name}内存")
+                    except Exception as e:
+                        self.logger.debug(f"释放{arr_name}内存失败: {e}")
+            
+            # 确保无论成功还是失败都清理GPU缓存
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.empty_cache()
+                    self.logger.debug("VideoSeparator: Cleared GPU cache.")
+                except Exception as e:
+                    self.logger.error(f"清理GPU缓存失败: {e}")
     
     def _normalize_and_resample(
         self,
@@ -159,30 +205,55 @@ class VideoSeparator:
         import torch
         import torchaudio
         
-        if isinstance(audio_input, tuple):
-            fs, audio_data = audio_input
-        else:
-            fs = target_sr
-            audio_data = audio_input
+        resampled_audio = None
+        
+        try:
+            if isinstance(audio_input, tuple):
+                fs, audio_data = audio_input
+            else:
+                fs = target_sr
+                audio_data = audio_input
 
-        audio_data = audio_data.astype(np.float32)
+            audio_data = audio_data.astype(np.float32)
 
-        max_val = np.abs(audio_data).max()
-        if max_val > 0:
-            audio_data = audio_data / max_val
+            max_val = np.abs(audio_data).max()
+            if max_val > 0:
+                audio_data = audio_data / max_val
 
-        # 如果多通道, 转单通道
-        if len(audio_data.shape) > 1:
-            audio_data = audio_data.mean(axis=-1)
+            # 如果多通道, 转单通道
+            if len(audio_data.shape) > 1:
+                audio_data = audio_data.mean(axis=-1)
 
-        # 如果源采样率与目标采样率不一致, 用 torchaudio 进行重采样
-        if fs != target_sr:
-            audio_data = np.ascontiguousarray(audio_data)
-            resampler = torchaudio.transforms.Resample(
-                orig_freq=fs,
-                new_freq=target_sr,
-                dtype=torch.float32
-            )
-            audio_data = resampler(torch.from_numpy(audio_data)[None, :])[0].numpy()
-
-        return audio_data 
+            # 如果源采样率与目标采样率不一致, 用 torchaudio 进行重采样
+            if fs != target_sr:
+                audio_data = np.ascontiguousarray(audio_data)
+                resampler = torchaudio.transforms.Resample(
+                    orig_freq=fs,
+                    new_freq=target_sr,
+                    dtype=torch.float32
+                )
+                audio_tensor = torch.from_numpy(audio_data)[None, :]
+                resampled_audio = resampler(audio_tensor)[0].numpy()
+                
+                # 删除临时张量
+                del audio_tensor
+                del resampler
+                
+                return resampled_audio
+            
+            return audio_data
+            
+        except Exception as e:
+            self.logger.error(f"音频重采样和归一化失败: {e}")
+            raise
+        finally:
+            # 清理临时变量
+            if resampled_audio is not None and resampled_audio is not audio_data:
+                try:
+                    del resampled_audio
+                except:
+                    pass
+                
+            # 确保GPU缓存被清理
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache() 

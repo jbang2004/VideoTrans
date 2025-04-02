@@ -82,6 +82,10 @@ class ModelInMaker:
         """
         更新文本特征（保存到本地文件）
         """
+        text_features = None
+        segment_tokens = None
+        segment_token_lens = None
+        
         try:
             tts_text = sentence.trans_text
             
@@ -118,78 +122,116 @@ class ModelInMaker:
         except Exception as e:
             self.logger.error(f"更新文本特征失败: {str(e)}")
             raise
-
+        finally:
+            # Clean up potentially large feature dict
+            if text_features is not None: del text_features
+            if segment_tokens is not None: del segment_tokens
+            if segment_token_lens is not None: del segment_token_lens
+            
     def _modelin_sentence(self, sentence, reuse_speaker=False):
         """
         对单个句子进行模型输入处理（保存到本地文件）
         """
         speaker_id = sentence.speaker_id
+        processed_audio = None  # 初始化可能的大变量
+        speech_tensor = None
+        speaker_features = None
+        trimmed_audio_np = None  # 添加初始化
+        audio_data = None  # 添加初始化
 
-        # 1) Speaker处理
-        if not reuse_speaker:
-            if speaker_id not in self.speaker_cache:
-                try:
-                    # 准备音频
-                    audio = sentence.audio
-                    
-                    # 创建处理后的音频文件
-                    audio_id = str(uuid.uuid4())
-                    processed_audio_path = os.path.join(self.feature_dir, f"audio_{audio_id}.pt")
-                    
-                    # 处理音频
-                    speech_tensor = audio
-                    processed_audio, _ = librosa.effects.trim(
-                        speech_tensor.numpy().flatten(), 
-                        top_db=60,
-                        frame_length=440,
-                        hop_length=220
-                    )
-                    processed_audio = torch.tensor(processed_audio).unsqueeze(0)
-                    
-                    if processed_audio.abs().max() > self.max_val:
-                        processed_audio = processed_audio / processed_audio.abs().max() * self.max_val
-                    
-                    processed_audio = torch.concat([processed_audio, torch.zeros(1, int(self.sample_rate * 0.2))], dim=1)
-                    
-                    # 保存处理后的音频
-                    torch.save(processed_audio, processed_audio_path)
-                    
-                    # 提取说话人特征
-                    speaker_feature_id = str(uuid.uuid4())
-                    speaker_feature_path = os.path.join(self.feature_dir, f"speaker_{speaker_feature_id}.pt")
-                    
-                    # 使用空文本进行跨语言特征提取
-                    speaker_features = self.frontend.frontend_cross_lingual(
-                        "",
-                        processed_audio,
-                        self.sample_rate
-                    )
-                    
-                    # 保存说话人特征
-                    torch.save(speaker_features, speaker_feature_path)
-                    
-                    # 保存特征路径到本地缓存
-                    self.speaker_cache[speaker_id] = speaker_feature_path
-                    
-                    # 显式删除大型音频数据，释放内存
-                    del processed_audio
-                    del speech_tensor
-                    
-                except Exception as e:
-                    self.logger.error(f"模型输入音频处理失败: {str(e)}")
-                    raise
+        try:
+            # 1) Speaker处理
+            if not reuse_speaker:
+                if speaker_id not in self.speaker_cache:
+                    try:
+                        # 准备音频
+                        if hasattr(sentence, 'audio') and sentence.audio is not None:
+                            audio_data = sentence.audio  # 保留原始引用
+                        else:
+                            raise ValueError(f"句子 {sentence.sentence_id} 缺少原始音频数据 (sentence.audio is None)")
+                        
+                        # 创建处理后的音频文件
+                        audio_id = str(uuid.uuid4())
+                        processed_audio_path = os.path.join(self.feature_dir, f"audio_{audio_id}.pt")
+                        
+                        # 处理音频
+                        # 确保audio_data是张量再调用numpy()
+                        if isinstance(audio_data, torch.Tensor):
+                            speech_tensor = audio_data
+                        else:
+                            # 如果是numpy或其他格式，安全转换
+                            speech_tensor = torch.tensor(np.asarray(audio_data), dtype=torch.float32)
+                            
+                        # 确保speech_tensor在CPU上再转换为numpy
+                        trimmed_audio_np, _ = librosa.effects.trim(
+                            speech_tensor.cpu().numpy().flatten(), 
+                            top_db=60,
+                            frame_length=440,
+                            hop_length=220
+                        )
+                        processed_audio = torch.tensor(trimmed_audio_np).unsqueeze(0)
+                        
+                        if processed_audio.abs().max() > self.max_val:
+                            processed_audio = processed_audio / processed_audio.abs().max() * self.max_val
+                        
+                        processed_audio = torch.concat([processed_audio, torch.zeros(1, int(self.sample_rate * 0.2))], dim=1)
+                        
+                        # 保存处理后的音频
+                        torch.save(processed_audio, processed_audio_path)
+                        
+                        # 提取说话人特征
+                        speaker_feature_id = str(uuid.uuid4())
+                        speaker_feature_path = os.path.join(self.feature_dir, f"speaker_{speaker_feature_id}.pt")
+                        
+                        # 使用空文本进行跨语言特征提取
+                        speaker_features = self.frontend.frontend_cross_lingual(
+                            "",
+                            processed_audio,  # 使用处理后的张量
+                            self.sample_rate
+                        )
+                        
+                        # 保存说话人特征
+                        torch.save(speaker_features, speaker_feature_path)
+                        
+                        # 保存特征路径到本地缓存
+                        self.speaker_cache[speaker_id] = speaker_feature_path
+                        
+                    except Exception as e:
+                        self.logger.error(f"模型输入音频处理失败: {str(e)}")
+                        raise
+                    finally:
+                        # 确保即使特征提取失败也删除变量
+                        if processed_audio is not None: del processed_audio
+                        if trimmed_audio_np is not None: del trimmed_audio_np
+                        if speaker_features is not None: del speaker_features  # 也删除特征字典
+
+                # 保存speaker_feature_path到sentence
+                if speaker_id in self.speaker_cache:
+                    sentence.model_input['speaker_feature_path'] = self.speaker_cache[speaker_id]
                 
-            # 保存speaker_feature_path到sentence
-            sentence.model_input['speaker_feature_path'] = self.speaker_cache[speaker_id]
-            
-            # 特征提取完成后删除audio数据，释放内存
-            if hasattr(sentence, 'audio') and sentence.audio is not None:
-                del sentence.audio
-                sentence.audio = None
-                self.logger.debug(f"已删除句子的原始音频数据，释放内存")
+                # 特征提取完成后删除原始audio数据，释放内存
+                if hasattr(sentence, 'audio') and sentence.audio is not None:
+                    audio_tmp = sentence.audio
+                    sentence.audio = None
+                    del audio_tmp
+                    self.logger.debug(f"已删除句子的原始音频数据，释放内存")
 
-        # 2) 文本特征更新
-        return self._update_text_features(sentence)
+            # 2) 文本特征更新
+            updated_sentence = self._update_text_features(sentence)
+            return updated_sentence  # 返回修改后的句子
+
+        except Exception as e:
+            self.logger.error(f"模型输入处理失败: {str(e)}")
+            raise
+        finally:
+            # 清理原始语音张量引用（如果存在）
+            if speech_tensor is not None: del speech_tensor
+            if audio_data is not None: del audio_data  # 添加audio_data的清理
+            
+            # 确保GPU缓存被清理
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                self.logger.debug("ModelInMaker: Cleared GPU cache.")
 
     async def modelin_maker(self, sentences, reuse_speaker=False, batch_size=3):
         """
@@ -197,23 +239,51 @@ class ModelInMaker:
         """
         if not sentences:
             self.logger.warning("modelin_maker: 收到空的句子列表")
+            # 对于空输入使用return而非yield
             return
-
+            
         self.logger.debug(f"模型输入处理 {len(sentences)} 个句子")
 
-        results = []
-        for i, s in enumerate(sentences, start=1):
-            # 使用asyncio.to_thread包装同步函数调用
-            modelin_sentence = await asyncio.to_thread(self._modelin_sentence, s, reuse_speaker)
-            results.append(modelin_sentence)
+        results_batch = []  # 修改名称以避免冲突
+        try:
+            for i, s in enumerate(sentences, start=1):
+                try:
+                    # 使用asyncio.to_thread包装同步函数调用
+                    modelin_sentence = await asyncio.to_thread(self._modelin_sentence, s, reuse_speaker)
+                    results_batch.append(modelin_sentence)
 
-            if i % batch_size == 0:
-                yield results
-                results = []
+                    if i % batch_size == 0:
+                        yield results_batch
+                        # yield后清空批次列表
+                        results_batch = []
+                except Exception as e:
+                    self.logger.error(f"处理句子 {s.sentence_id if hasattr(s, 'sentence_id') else i} 失败: {e}")
+                    # 仍然添加原始句子以维持顺序
+                    results_batch.append(s)
+                    
+                    if i % batch_size == 0:
+                        yield results_batch
+                        results_batch = []
 
-        if results:
-            yield results
+            # 循环后生成剩余结果
+            if results_batch:
+                yield results_batch
+                results_batch = []
 
-        if not reuse_speaker:
-            self.speaker_cache.clear()
-            self.logger.debug("modelin_maker: 已清理本地speaker_cache映射")
+        except Exception as e:
+            self.logger.error(f"modelin_maker批处理失败: {e}")
+            # 如果有未yielded的句子，仍然yield它们
+            if results_batch:
+                yield results_batch
+                results_batch = []
+                
+        finally:
+            # 清理speaker缓存（如果不重用）
+            if not reuse_speaker:
+                self.speaker_cache.clear()
+                self.logger.debug("modelin_maker: 已清理本地speaker_cache映射")
+                
+            # 批处理完成后的最终GPU缓存清理
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                self.logger.debug("ModelInMaker: Cleared GPU cache after batch.")

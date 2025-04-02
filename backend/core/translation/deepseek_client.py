@@ -2,6 +2,7 @@
 import json
 import logging
 import asyncio
+import httpx
 from openai import OpenAI
 from typing import Dict
 from json_repair import loads
@@ -16,7 +17,7 @@ class DeepSeekClient:
             
         self.client = OpenAI(
             api_key=api_key,
-            base_url="https://api.deepseek.com"
+            base_url="https://api.deepseek.com",
         )
         logger.info("DeepSeek 客户端初始化成功")
 

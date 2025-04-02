@@ -37,7 +37,7 @@ class MediaMixer:
         self.max_val = 0.8  # 音频最大值
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"MediaMixerActor初始化完成，采样率={self.sample_rate}")
-        self.full_audio_buffer = np.array([], dtype=np.float32)
+        self.full_audio_buffer = np.array([], dtype=np.float32)  # 保留音频缓冲区，用于平滑过渡
     
     async def mix_media(
         self,
@@ -88,6 +88,11 @@ class MediaMixer:
         except Exception as e:
             logger.exception(f"[MediaMixerActor] mix_media 执行出错: {str(e)}")
             return None
+        finally:
+            # 不在这里清除full_audio_buffer，因为它需要在不同调用之间保持
+            # 仅清理不再需要的其他大型临时变量
+            if 'updated_buffer' in locals() and 'success' in locals() and success and updated_buffer is not self.full_audio_buffer:
+                del updated_buffer  # 如果我们已经更新了缓冲区，可以删除临时变量
 
 async def create_mixed_segment(
     sentences: List[Sentence],
@@ -103,6 +108,10 @@ async def create_mixed_segment(
     将一批句子的合成音频与原视频片段混合，并可生成带字幕的视频。
     返回(成功标志, 更新后的音频缓冲区)
     """
+    full_audio = None
+    updated_audio_buffer = None
+    audio_data = None
+    
     try:
         if not sentences:
             logger.warning("[MediaMixer] create_mixed_segment: 收到空的句子列表")
@@ -127,7 +136,7 @@ async def create_mixed_segment(
         background_audio_path = segment_files.get('background')
         if background_audio_path:
             # 直接用asyncio.to_thread包装
-            full_audio = await asyncio.to_thread(
+            audio_data = await asyncio.to_thread(
                 _process_background_audio,
                 background_audio_path, 
                 start_time_param, 
@@ -138,8 +147,14 @@ async def create_mixed_segment(
                 config.BACKGROUND_VOLUME, 
                 max_val
             )
+            # 更新音频数据
+            if audio_data is not None:
+                full_audio = audio_data
+                # 显式删除不再需要的引用
+                del audio_data
+                audio_data = None
 
-        # 4. 更新全局音频缓冲区
+        # 4. 更新全局音频缓冲区 - 保留用于音频平滑过渡
         updated_audio_buffer = np.concatenate((full_audio_buffer, full_audio))
 
         # 5. 处理视频
@@ -159,24 +174,38 @@ async def create_mixed_segment(
             task_state=task_state,
             sample_rate=sample_rate
         )
+        
+        # 优化：仅保留最后N秒的音频用于下一批次的过渡，而不是整个缓冲区
+        # 这里可以根据config.AUDIO_OVERLAP的值来调整保留多少
+        if len(updated_audio_buffer) > sample_rate * 5:  # 例如仅保留最后5秒
+            preserve_samples = min(len(updated_audio_buffer), int(sample_rate * 5))
+            updated_audio_buffer = updated_audio_buffer[-preserve_samples:]
+        
         return True, updated_audio_buffer
         
     except Exception as e:
         logger.exception(f"[MediaMixer] create_mixed_segment 执行出错，错误: {e}")
         return False, full_audio_buffer
+    finally:
+        # 显式删除大型临时变量以释放内存
+        if full_audio is not None and full_audio is not updated_audio_buffer: 
+            del full_audio
+        if audio_data is not None:
+            del audio_data
 
 def _concat_audio_segments(sentences: List[Sentence], full_audio_buffer: np.ndarray, overlap: float) -> np.ndarray:
     """拼接所有句子的合成音频"""
     full_audio = np.array([], dtype=np.float32)
     for sentence in sentences:
-        if sentence.generated_audio is not None:
+        if sentence.generated_audio is not None and len(sentence.generated_audio) > 0:
             audio_data = np.asarray(sentence.generated_audio, dtype=np.float32)
+            # 关键部分: 应用音频淡入淡出效果以实现平滑过渡
             if len(full_audio) > 0:
                 audio_data = apply_fade_effect(audio_data, full_audio_buffer, overlap)
             full_audio = np.concatenate((full_audio, audio_data))
         else:
             logger.warning(
-                "句子音频生成失败: text=%r, UUID=%s",
+                "句子音频生成失败或为空: text=%r, UUID=%s",
                 sentence.raw_text,
                 sentence.model_input.get("uuid", "unknown")
             )
@@ -196,13 +225,18 @@ def _process_background_audio(
     sample_rate: int, vocals_volume: float, background_volume: float, max_val: float
 ) -> np.ndarray:
     """处理背景音频"""
-    audio_data = mix_with_background(
-        bg_path=bg_path,
-        start_time=start_time,
-        duration=duration,
-        audio_data=audio_data,
-        sample_rate=sample_rate,
-        vocals_volume=vocals_volume,
-        background_volume=background_volume
-    )
-    return normalize_audio(audio_data, max_val)
+    try:
+        mixed_audio = mix_with_background(
+            bg_path=bg_path,
+            start_time=start_time,
+            duration=duration,
+            audio_data=audio_data,
+            sample_rate=sample_rate,
+            vocals_volume=vocals_volume,
+            background_volume=background_volume
+        )
+        return normalize_audio(mixed_audio, max_val)
+    finally:
+        # 显式释放大型中间变量
+        if 'mixed_audio' in locals():
+            del mixed_audio
