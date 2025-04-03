@@ -42,7 +42,6 @@ async def add_video_segment(
         generate_subtitle: 是否生成字幕
         task_state: 任务状态对象
         sample_rate: 采样率
-        ffmpeg_tool: FFmpeg工具实例
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"add_video_segment: 视频文件不存在: {video_path}")
@@ -65,14 +64,15 @@ async def add_video_segment(
             end=end_time
         )
 
-        # 2) 写合成音频到临时文件
-        sf.write(temp_audio.name, audio_data, sample_rate)
+        # 2) 写合成音频到临时文件 - 异步写入
+        await asyncio.to_thread(sf.write, temp_audio.name, audio_data, sample_rate)
 
         # 3) 如果需要字幕，则构建 .ass 并用 ffmpeg "烧"进去
         if generate_subtitle:
             temp_ass = stack.enter_context(NamedTemporaryFile(suffix='.ass'))
-            # 调用生成字幕的函数
-            generate_subtitles_for_segment(
+            # 调用生成字幕的函数 - 异步生成
+            await asyncio.to_thread(
+                generate_subtitles_for_segment,
                 sentences,
                 start_time * 1000,   # segment_start_ms
                 temp_ass.name,

@@ -12,7 +12,8 @@ import asyncio
 from config import Config
 
 @serve.deployment(
-    name="model_in_maker"
+    name="model_in_maker",
+    ray_actor_options={"num_cpus": 0.5}
 )
 class ModelInMaker:
     def __init__(self):

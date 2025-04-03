@@ -7,6 +7,7 @@ from pathlib import Path
 import time
 import sys
 import os
+import aiofiles
 
 # 然后导入config
 from config import Config
@@ -100,7 +101,7 @@ state_manager_handle = StateManager.options(
 ).bind(Config())
 
 @serve.deployment(
-    num_replicas=3,
+    num_replicas=1,
     max_ongoing_requests=1,
     ray_actor_options={"num_cpus": 0.5},  # 降低资源请求以适应当前环境
     logging_config={"log_level": "INFO"}
@@ -163,32 +164,15 @@ class VideoTransPipe:
         target_language: str = None,
         generate_subtitle: bool = False
     ) -> Dict[str, Any]:
-        """
-        翻译视频任务：对视频进行分段，翻译处理所有分段，最后合并成完整视频
-        
-        Args:
-            task_id: 任务ID
-            video_path: 视频文件路径（可选，如果提供则创建新任务）
-            target_language: 目标语言（可选）
-            generate_subtitle: 是否生成字幕（可选）
-            
-        Returns:
-            处理结果信息，包含最终视频路径
-        """
-        # 初始化该任务的性能指标
-        self.performance_metrics[task_id] = {
-            'total': {'start': time.time(), 'end': None, 'duration': None},
-            'segments_processing': []  # 只记录总时间和每个分段的处理时间
-        }
-        
+        """接收视频，开始翻译处理"""
         try:
-            # 增加更多日志记录点，确保每个关键步骤都有日志
-            self.logger.info(f"====== VideoTransPipe开始处理任务: {task_id} ======")
+            self.logger.info(f"===== 开始处理任务: {task_id} =====")
             
-            # 1. 先创建任务或获取任务状态
-            if video_path:
-                self.logger.info(f"创建新任务: {task_id}, 视频: {video_path}, 语言: {target_language}")
-                try:
+            # 1. 获取/创建任务状态 - 添加详细日志和错误处理
+            task_state = None
+            try:
+                if video_path:
+                    self.logger.info(f"[{task_id}] 创建新任务 (video_path={video_path})")
                     task_data = await self.state_manager.create_task.remote(
                         task_id=task_id,
                         video_path=video_path,
@@ -196,334 +180,287 @@ class VideoTransPipe:
                         generate_subtitle=generate_subtitle
                     )
                     task_state = task_data["task_state"]
-                    self.logger.info(f"成功创建任务状态: {task_id}")
-                except Exception as e:
-                    self.logger.error(f"创建任务状态失败: {str(e)}", exc_info=True)
-                    raise
-            else:
-                # 从StateManager获取任务状态
-                self.logger.info(f"正在从StateManager获取任务状态: {task_id}")
-                try:
-                    task_state = await self.state_manager.get_task_state.remote(task_id)
-                    if not task_state:
-                        self.logger.error(f"任务不存在: {task_id}")
-                        return {"status": "error", "message": "任务不存在"}
-                    self.logger.info(f"成功获取任务状态: {task_id}")
-                except Exception as e:
-                    self.logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
-                    raise
-                
-            # 3. 创建HLS管理器
-            try:
-                result = await self.hls_manager.create_manager.remote(task_id, task_state.task_paths)
-                if result.get("status") != "success":
-                    self.logger.warning(f"创建HLS管理器返回非成功状态: {result}, TaskID={task_id}")
                 else:
-                    self.logger.info(f"成功创建HLS管理器: {task_id}")
+                    self.logger.info(f"[{task_id}] 查询现有任务状态")
+                    task_state = await self.state_manager.get_task_state.remote(task_id)
             except Exception as e:
-                self.logger.error(f"创建HLS管理器失败: {e}, TaskID={task_id}")
-                # 继续执行，不因HLS管理器创建失败而中断整个流程
+                self.logger.exception(f"[{task_id}] 任务状态初始化失败: {str(e)}")
+                return {"status": "error", "message": f"任务初始化失败: {str(e)}"}
             
-            # 3. 调用VideoSegmenter对视频进行分段
-            self.logger.info(f"开始对视频进行分段: {task_state.video_path}, TaskID={task_id}")
-            
-            segmenter_result = await self.video_segmenter.segment_video.remote(task_state.video_path)
-            
-            if segmenter_result["status"] != "success":
-                self.logger.error(f"视频分段失败: {segmenter_result['message']}")
-                await self.state_manager.complete_task.remote(task_id, success=False, message=segmenter_result["message"])
-                return {"status": "error", "message": segmenter_result["message"]}
-            
-            # 4. 获取分段信息
-            segments = segmenter_result["segments"]
-            self.logger.info(f"视频分段完成，共 {len(segments)} 个分段")
-            
-            # 保存分段信息到task_state
-            task_state.segments = segments
-            
-            # 5. 处理所有分段
-            self.logger.info(f"开始处理 {len(segments)} 个视频分段, TaskID={task_id}")
-            
-            for seg_idx, (seg_start, seg_duration) in enumerate(segments):
-                # 记录分段处理开始时间
-                segment_start_time = time.time()
-                self.logger.info(f"开始翻译分段 {seg_idx+1}/{len(segments)}: 开始时间={seg_start:.2f}s, 持续时间={seg_duration:.2f}s")
-                
-                try:
-                    # 5.1 提取并分离人声/背景
-                    media_files = await self.video_separator.separate_video.remote(
-                        video_path=task_state.video_path,
-                        start=seg_start,
-                        output_dir=str(task_state.task_paths.processing_dir),
-                        segment_index=seg_idx,
-                        target_sr=self.sample_rate,
-                        duration=seg_duration
-                    )
-                    task_state.segment_media_files[seg_idx] = media_files
-                    
-                    # 获取该分段的媒体文件信息
-                    media_files = task_state.segment_media_files.get(seg_idx)
-                    if not media_files or 'vocals' not in media_files:
-                        self.logger.error(f"找不到分段 {seg_idx} 的vocals文件, TaskID={task_id}")
-                        continue
-                    
-                    # 5.2 执行ASR识别
-                    sentences = await self.asr.generate.remote(
-                        input=media_files['vocals'],
-                        cache={},
-                        language="auto",
-                        use_itn=True,
-                        batch_size_s=60,
-                        merge_vad=False
-                    )
-                    
-                    self.logger.info(f"ASR识别完成: {len(sentences)} 条句子, seg={seg_idx}, TaskID={task_id}")
-                    
-                    if not sentences:
-                        self.logger.warning(f"ASR结果为空, seg={seg_idx}, TaskID={task_id}")
-                        continue
-                    
-                    # 5.3 为句子添加元数据
-                    for s in sentences:
-                        s.segment_index = seg_idx
-                        s.segment_start = seg_start
-                        s.task_id = task_id
-                        s.sentence_id = task_state.sentence_counter
-                        task_state.sentence_counter += 1
-                        
-                    self.logger.debug(f"处理 {len(sentences)} 个句子, TaskID={task_id}")
-                    
-                    # 5.4 翻译处理流程
-                    async for translated_sentences in self.translator.translate_sentences.remote(
-                        sentences,
-                        target_language=task_state.target_language,
-                        batch_size=self.config.TRANSLATION_BATCH_SIZE
-                    ):
-                        # 5.5 模型输入处理
-                        async for modelin_sentences in self.model_in.modelin_maker.remote(
-                            translated_sentences,
-                            reuse_speaker=False,
-                            batch_size=self.config.MODELIN_BATCH_SIZE
-                        ):
-                            # 5.6 TTS标记生成
-                            self.logger.info(f"TTS token生成开始")
-                            tts_token_sentences = await self.tts_token_gen.generate_tts_tokens.remote(
-                                modelin_sentences
-                            )
-                            
-                            # 5.7 时长对齐
-                            self.logger.info(f"创建时长对齐任务")
-                            aligned_sentences = await self.duration_aligner.remote(
-                                tts_token_sentences,
-                                1.1  # 使用默认值1.1，而不是self.config.MAX_SPEED
-                            )
-                            
-                            # 5.8 音频生成
-                            self.logger.info(f"创建音频生成任务")
-                            audio_gen_sentences = await self.audio_gen.generate_audio.remote(
-                                aligned_sentences
-                            )
-                            
-                            # 5.9 时间戳调整
-                            self.logger.info(f"创建时间戳调整任务")
-                            sentences_with_timestamps = await self.timestamp_adjuster.remote(
-                                audio_gen_sentences,
-                                self.sample_rate,
-                                task_state.current_time
-                            )
-                            
-                            # 更新当前时间（使用最后一个句子的结束时间）
-                            if sentences_with_timestamps:
-                                last_sentence = sentences_with_timestamps[-1]
-                                task_state.current_time = last_sentence.adjusted_start + last_sentence.adjusted_duration
-                            
-                            self.logger.info(f"时间戳调整任务完成: {len(sentences_with_timestamps) if sentences_with_timestamps else 0}个句子")
-                            
-                            # 5.10 媒体混合
-                            self.logger.info(f"调用MediaMixer进行媒体混合")
-                            output_path = await self.media_mixer.mix_media.remote(
-                                sentences_with_timestamps,
-                                task_state
-                            )
-                            
-                            if output_path:
-                                # 记录已处理的片段
-                                task_state.merged_segments.append(output_path)
-                                
-                                # 如果处理成功，添加到HLS流
-                                try:
-                                    result = await self.hls_manager.add_segment.remote(
-                                        task_id,
-                                        output_path, 
-                                        task_state.batch_counter
-                                    )
-                                    if result.get("status") == "success":
-                                        self.logger.info(f"分段 {task_state.batch_counter} 已加入 HLS -> TaskID={task_id}")
-                                        # 成功添加第一个分段后，设置HLS就绪状态
-                                        if not task_state.hls_ready and task_state.batch_counter == 0:
-                                            task_state.hls_ready = True
-                                            # 更新StateManager中的HLS状态
-                                            await self.state_manager.update_task_progress.remote(
-                                                task_id, 
-                                                hls_ready=True
-                                            )
-                                            self.logger.info(f"HLS播放列表已就绪 -> TaskID={task_id}")
-                                    else:
-                                        self.logger.warning(f"添加HLS片段返回非成功状态: {result}, TaskID={task_id}")
-                                except Exception as e:
-                                    self.logger.error(f"添加HLS片段失败: {e} -> TaskID={task_id}")
-                                
-                                # 更新批次计数器
-                                task_state.batch_counter += 1
-                                
-                                # 更新StateManager中的进度
-                                await self.state_manager.update_task_progress.remote(
-                                    task_id, 
-                                    batch_counter=task_state.batch_counter
-                                )
-                
-                except Exception as e:
-                    self.logger.error(f"翻译分段 {seg_idx} 失败: {e}, TaskID={task_id}")
-                    # 继续处理下一个分段
-                    continue
-                
-                # 记录分段处理结束时间和持续时间
-                segment_end_time = time.time()
-                segment_duration = segment_end_time - segment_start_time
-                
-                # 记录这个分段的处理时间到性能指标中
-                self.performance_metrics[task_id]['segments_processing'].append({
-                    'segment_index': seg_idx,
-                    'start_time': segment_start_time,
-                    'end_time': segment_end_time,
-                    'duration': segment_duration
-                })
-                
-                self.logger.info(f"完成翻译分段 {seg_idx+1}/{len(segments)}, 耗时: {segment_duration:.2f}s")
-            
-            # 6. 合并所有视频分段，生成最终视频
-            final_video_path = None
-            if task_state.merged_segments:
-                try:
-                    # 创建最终输出路径
-                    final_path = task_state.task_paths.output_dir / f"final_{task_id}.mp4"
-                    final_path.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    self.logger.info(f"开始合并 {len(task_state.merged_segments)} 个视频分段，TaskID={task_id}")
-                    
-                    # 创建合并列表文件
-                    list_txt = final_path.parent / f"concat_{task_id}.txt"
-                    with open(list_txt, 'w', encoding='utf-8') as f:
-                        for seg_mp4 in task_state.merged_segments:
-                            abs_path = Path(seg_mp4).resolve()
-                            f.write(f"file '{abs_path}'\n")
-                    
-                    # 执行合并命令
-                    final_video_path = await concat_videos(
-                        input_list=str(list_txt),
-                        output_path=str(final_path)
-                    )
-                    
-                    # 清理合并列表文件
-                    if list_txt.exists():
-                        list_txt.unlink()
-                        
-                    self.logger.info(f"视频合并完成，TaskID={task_id}")
-                    
-                    # 7. 标记播放列表为完成状态
-                    if final_video_path and final_video_path.exists():
-                        result = await self.hls_manager.finalize_playlist.remote(task_id)
-                        if result.get("status") == "success":
-                            self.logger.info(f"HLS播放列表已标记为完成，TaskID={task_id}")
-                        else:
-                            self.logger.warning(f"HLS播放列表标记完成失败: {result}，TaskID={task_id}")
-                    
-                except Exception as e:
-                    self.logger.error(f"视频合并失败: {e}, TaskID={task_id}")
-                    if final_path.exists():
-                        final_path.unlink()
-                    
-                    # 标记任务失败
-                    await self.state_manager.complete_task.remote(
-                        task_id, 
-                        success=False, 
-                        message=f"视频合并失败: {e}"
-                    )
-                    
-                    return {"status": "error", "message": f"视频合并失败: {e}"}
-            else:
-                self.logger.warning(f"没有可合并的视频分段，TaskID={task_id}")
-                
-                # 标记任务失败
-                await self.state_manager.complete_task.remote(
-                    task_id, 
-                    success=False, 
-                    message="没有可合并的视频分段"
-                )
-                
-                return {"status": "error", "message": "没有可合并的视频分段"}
-            
-            # 8. 清理GPU显存
+            if not task_state:
+                self.logger.error(f"[{task_id}] 未找到任务状态")
+                return {"status": "error", "message": "任务不存在"}
+
+            # 2. 初始化HLS管理器 - 添加错误处理和ID跟踪
             try:
-                import torch
-                torch.cuda.empty_cache()
-                self.logger.info(f"已释放未使用的GPU显存, TaskID={task_id}")
+                self.logger.info(f"[{task_id}] 创建HLS管理器")
+                await self.hls_manager.create_manager.remote(task_id, task_state.task_paths)
             except Exception as e:
-                self.logger.warning(f"释放GPU显存失败: {e}")
-            
-            # 9. 标记任务完成
-            # 记录总执行时间
-            self.performance_metrics[task_id]['total']['end'] = time.time()
-            self.performance_metrics[task_id]['total']['duration'] = self.performance_metrics[task_id]['total']['end'] - self.performance_metrics[task_id]['total']['start']
-            total_duration = self.performance_metrics[task_id]['total']['duration']
-            
-            success_message = f"视频翻译完成，共处理 {len(segments)} 个分段，总耗时: {total_duration:.2f}s"
-            self.logger.info(f"任务 {task_id} 总执行完成，总耗时: {total_duration:.2f}s")
-            
-            await self.state_manager.complete_task.remote(
-                task_id, 
-                success=True, 
-                message=success_message,
-                final_video_path=final_video_path
-            )
-            
-            # 返回处理结果，包含性能指标
-            if final_video_path and final_video_path.exists():
-                return {
-                    "status": "success", 
-                    "message": success_message,
-                    "final_video_path": str(final_video_path),
-                    "performance": self.performance_metrics[task_id]
-                }
-            else:
-                return {
-                    "status": "error", 
-                    "message": "翻译完成，但无法生成最终视频文件",
-                    "performance": self.performance_metrics[task_id]
-                }
+                self.logger.exception(f"[{task_id}] HLS管理器创建失败: {str(e)}")
+                await self.state_manager.complete_task.remote(task_id, False, f"HLS管理器创建失败: {str(e)}")
+                return {"status": "error", "message": f"HLS管理器创建失败: {str(e)}"}
+
+            # 3. 视频分段 - 添加错误处理和详细日志
+            segments = None
+            try:
+                self.logger.info(f"[{task_id}] 开始视频分段分析")
+                video_segmenter_result = await self.video_segmenter.segment_video.remote(task_state.video_path)
+                
+                if video_segmenter_result["status"] != "success":
+                    error_msg = video_segmenter_result.get("message", "未知错误")
+                    self.logger.error(f"[{task_id}] 视频分段失败: {error_msg}")
+                    await self.state_manager.complete_task.remote(task_id, False, f"视频分段失败: {error_msg}")
+                    return {"status": "error", "message": f"视频分段失败: {error_msg}"}
+                    
+                segments = video_segmenter_result["segments"]
+                self.logger.info(f"[{task_id}] 视频分段完成，共 {len(segments)} 个分段")
+                
+                # 更新任务状态中的分段信息
+                task_state.segments = segments
+            except Exception as e:
+                self.logger.exception(f"[{task_id}] 视频分段过程异常: {str(e)}")
+                await self.state_manager.complete_task.remote(task_id, False, f"视频分段失败: {str(e)}")
+                return {"status": "error", "message": f"视频分段失败: {str(e)}"}
+
+            # 4. 循环处理每个分段 - 这里是关键部分，添加详细的try-except和日志
+            for seg_idx, (seg_start, seg_duration) in enumerate(segments):
+                try:
+                    self.logger.info(f"[{task_id}] ==== 开始处理分段 {seg_idx+1}/{len(segments)}, 开始时间: {seg_start:.2f}s, 时长: {seg_duration:.2f}s ====")
+                    
+                    # 4.1 视频/音频分离
+                    try:
+                        self.logger.info(f"[{task_id}][分段{seg_idx}] 开始视频/音频分离")
+                        media_files = await self.video_separator.separate_video.remote(
+                            video_path=task_state.video_path,
+                            start=seg_start,
+                            output_dir=str(task_state.task_paths.processing_dir),
+                            segment_index=seg_idx,
+                            target_sr=self.config.TARGET_SR,
+                            duration=seg_duration
+                        )
+                        if not media_files or "vocals" not in media_files:
+                            raise ValueError("视频分离失败，或未返回vocals路径")
+                        
+                        task_state.segment_media_files[seg_idx] = media_files
+                        self.logger.info(f"[{task_id}][分段{seg_idx}] 视频/音频分离完成")
+                    except Exception as e:
+                        self.logger.exception(f"[{task_id}][分段{seg_idx}] 视频/音频分离失败: {str(e)}")
+                        raise
+
+                    # 4.2 ASR处理
+                    try:
+                        self.logger.info(f"[{task_id}][分段{seg_idx}] 开始语音识别(ASR)")
+                        sentences = await self.asr.generate.remote(
+                            input=media_files["vocals"],
+                            cache={},
+                            language="auto",
+                            use_itn=True,
+                            batch_size_s=60,
+                            merge_vad=False
+                        )
+                        if not sentences:
+                            self.logger.warning(f"[{task_id}][分段{seg_idx}] ASR没有返回句子，可能是静音片段")
+                            continue  # 跳过这个分段
+                        
+                        # 初始化句子元数据
+                        for i, s in enumerate(sentences):
+                            s.segment_index = seg_idx
+                            s.segment_start = seg_start
+                            s.sentence_id = task_state.sentence_counter + i
+                            s.task_id = task_id
+                        
+                        task_state.sentence_counter += len(sentences)
+                        self.logger.info(f"[{task_id}][分段{seg_idx}] ASR识别完成，获得 {len(sentences)} 个句子")
+                    except Exception as e:
+                        self.logger.exception(f"[{task_id}][分段{seg_idx}] ASR处理失败: {str(e)}")
+                        raise
+
+                    # 4.3 翻译处理 - 修复结构
+                    try:
+                        self.logger.info(f"[{task_id}][分段{seg_idx}] 开始翻译处理")
+                        translated_batch_count = 0
+                        
+                        # 使用异步生成器处理翻译
+                        async for translated_sentences in self.translator.translate_sentences.remote(
+                            sentences, 
+                            target_language=task_state.target_language,
+                            batch_size=self.config.TRANSLATION_BATCH_SIZE
+                        ):
+                            try:
+                                translated_batch_count += 1
+                                self.logger.info(f"[{task_id}][分段{seg_idx}] 翻译批次 {translated_batch_count} 完成，开始生成模型输入")
+                            
+                                # 4.4 生成模型输入
+                                modelin_batch_count = 0
+                                async for modelin_sentences in self.model_in.modelin_maker.remote(
+                                    translated_sentences, 
+                                    reuse_speaker=False, 
+                                    batch_size=self.config.MODELIN_BATCH_SIZE
+                                ):
+                                    try:
+                                        modelin_batch_count += 1
+                                        self.logger.info(f"[{task_id}][分段{seg_idx}] 模型输入批次 {modelin_batch_count} 完成，开始生成TTS标记")
+                                    
+                                        # 4.5 生成TTS Token
+                                        try:
+                                            self.logger.info(f"[{task_id}][分段{seg_idx}] 开始生成TTS标记")
+                                            tts_token_sentences = await self.tts_token_gen.generate_tts_tokens.remote(modelin_sentences)
+                                            self.logger.info(f"[{task_id}][分段{seg_idx}] TTS标记生成完成，即将进行时长对齐")
+                                        except Exception as e:
+                                            self.logger.exception(f"[{task_id}][分段{seg_idx}] TTS标记生成失败: {str(e)}")
+                                            raise
+                                        
+                                        # 4.6 时长对齐
+                                        try:
+                                            self.logger.info(f"[{task_id}][分段{seg_idx}] 开始时长对齐")
+                                            aligned_sentences = await self.duration_aligner.remote(tts_token_sentences, 1.1)
+                                            self.logger.info(f"[{task_id}][分段{seg_idx}] 时长对齐完成，即将生成音频")
+                                        except Exception as e:
+                                            self.logger.exception(f"[{task_id}][分段{seg_idx}] 时长对齐失败: {str(e)}")
+                                            raise
+                                        
+                                        # 4.7 音频生成
+                                        try:
+                                            self.logger.info(f"[{task_id}][分段{seg_idx}] 开始生成音频")
+                                            audio_gen_sentences = await self.audio_gen.generate_audio.remote(aligned_sentences)
+                                            self.logger.info(f"[{task_id}][分段{seg_idx}] 音频生成完成，即将调整时间戳")
+                                        except Exception as e:
+                                            self.logger.exception(f"[{task_id}][分段{seg_idx}] 音频生成失败: {str(e)}")
+                                            raise
+                                        
+                                        # 4.8 时间戳调整
+                                        try:
+                                            self.logger.info(f"[{task_id}][分段{seg_idx}] 开始调整时间戳")
+                                            sentences_with_timestamps = await self.timestamp_adjuster.remote(
+                                                audio_gen_sentences, 
+                                                self.config.TARGET_SR,
+                                                task_state.current_time
+                                            )
+                                            if sentences_with_timestamps:
+                                                last_sentence = sentences_with_timestamps[-1]
+                                                task_state.current_time = last_sentence.adjusted_start + last_sentence.adjusted_duration
+                                                self.logger.info(f"[{task_id}][分段{seg_idx}] 时间戳调整完成，当前时间更新为 {task_state.current_time:.2f}ms")
+                                            else:
+                                                self.logger.warning(f"[{task_id}][分段{seg_idx}] 时间戳调整返回空结果")
+                                        except Exception as e:
+                                            self.logger.exception(f"[{task_id}][分段{seg_idx}] 时间戳调整失败: {str(e)}")
+                                            raise
+                                        
+                                        # 4.9 媒体混合
+                                        try:
+                                            self.logger.info(f"[{task_id}][分段{seg_idx}] 开始媒体混合")
+                                            output_path = await self.media_mixer.mix_media.remote(
+                                                sentences_with_timestamps,
+                                                task_state
+                                            )
+                                            if not output_path:
+                                                self.logger.warning(f"[{task_id}][分段{seg_idx}] 媒体混合未返回有效路径")
+                                                continue
+                                            
+                                            task_state.merged_segments.append(output_path)
+                                            task_state.batch_counter += 1
+                                            self.logger.info(f"[{task_id}][分段{seg_idx}] 媒体混合完成，批次计数: {task_state.batch_counter}")
+                                            
+                                            # 4.10 HLS处理
+                                            try:
+                                                self.logger.info(f"[{task_id}][分段{seg_idx}] 开始添加HLS片段")
+                                                hls_add_result = await self.hls_manager.add_segment.remote(
+                                                    task_id, 
+                                                    output_path, 
+                                                    task_state.batch_counter
+                                                )
+                                                
+                                                if hls_add_result["status"] == "success":
+                                                    is_first_hls = not task_state.hls_ready
+                                                    task_state.hls_ready = True
+                                                    await self.state_manager.update_task_progress.remote(
+                                                        task_id, 
+                                                        batch_counter=task_state.batch_counter,
+                                                        hls_ready=task_state.hls_ready
+                                                    )
+                                                    if is_first_hls:
+                                                        self.logger.info(f"[{task_id}] HLS播放就绪")
+                                                else:
+                                                    self.logger.warning(f"[{task_id}][分段{seg_idx}] 添加HLS片段失败: {hls_add_result}")
+                                            except Exception as e:
+                                                self.logger.exception(f"[{task_id}][分段{seg_idx}] HLS处理失败: {str(e)}")
+                                                # 继续尝试其他处理，不中断流程
+                                        except Exception as e:
+                                            self.logger.exception(f"[{task_id}][分段{seg_idx}] 媒体混合失败: {str(e)}")
+                                            raise
+                                            
+                                    except Exception as e:
+                                        self.logger.error(f"[{task_id}][分段{seg_idx}] 处理模型输入批次 {modelin_batch_count} 时发生错误: {str(e)}")
+                                        # 继续尝试下一批
+                            except Exception as e:
+                                self.logger.error(f"[{task_id}][分段{seg_idx}] 处理翻译批次 {translated_batch_count} 时发生错误: {str(e)}")
+                                # 继续尝试下一批
+                        
+                        self.logger.info(f"[{task_id}][分段{seg_idx}] 翻译流水线处理完成，共 {translated_batch_count} 个翻译批次")
+                    except Exception as e:
+                        self.logger.exception(f"[{task_id}][分段{seg_idx}] 翻译处理失败: {str(e)}")
+                        raise
+                    
+                except Exception as e:
+                    self.logger.exception(f"[{task_id}] 处理分段 {seg_idx} 失败: {str(e)}")
+                    # 继续尝试处理下一个分段
+                    
+                self.logger.info(f"[{task_id}] 完成分段 {seg_idx+1}/{len(segments)} 处理")
+
+            # 5. 合并所有分段视频 - 添加错误处理
+            try:
+                self.logger.info(f"[{task_id}] 开始合并 {len(task_state.merged_segments)} 个视频片段")
+                
+                if not task_state.merged_segments:
+                    self.logger.error(f"[{task_id}] 没有已处理的视频片段可以合并")
+                    await self.state_manager.complete_task.remote(task_id, False, "没有处理成功的视频片段可以合并")
+                    return {"status": "error", "message": "没有处理成功的视频片段"}
+                    
+                # 创建合并列表
+                list_txt_path = str(task_state.task_paths.processing_dir / "concat_list.txt")
+                with open(list_txt_path, "w") as f:
+                    for seg_mp4 in task_state.merged_segments:
+                        f.write(f"file '{Path(seg_mp4).resolve()}'\n")
+                
+                # 最终输出路径
+                final_output_path = str(task_state.task_paths.output_dir / f"{task_id}.mp4")
+                
+                # 执行合并
+                final_video_path = await concat_videos(list_txt_path, final_output_path)
+                
+                if final_video_path and final_video_path.exists():
+                    self.logger.info(f"[{task_id}] 视频合并成功: {final_output_path}")
+                    
+                    # 标记 HLS 播放列表完成
+                    await self.hls_manager.finalize_playlist.remote(task_id)
+                    
+                    # 标记任务完成
+                    await self.state_manager.complete_task.remote(task_id, True, "视频处理成功", final_video_path)
+                    
+                    self.logger.info(f"[{task_id}] 处理完成，清理资源")
+                    
+                    # 清理临时文件 (可选)
+                    # await task_state.task_paths.cleanup(keep_output=True)
+                    
+                    return {
+                        "status": "success", 
+                        "message": "视频处理成功", 
+                        "output_path": str(final_video_path)
+                    }
+                else:
+                    self.logger.error(f"[{task_id}] 视频合并失败")
+                    await self.state_manager.complete_task.remote(task_id, False, "视频合并失败")
+                    return {"status": "error", "message": "视频合并失败"}
+                    
+            except Exception as e:
+                self.logger.exception(f"[{task_id}] 合并视频失败: {str(e)}")
+                await self.state_manager.complete_task.remote(task_id, False, f"合并视频失败: {str(e)}")
+                return {"status": "error", "message": f"合并视频失败: {str(e)}"}
                 
         except Exception as e:
-            # 记录总执行时间(即使出错)
-            if task_id in self.performance_metrics and 'total' in self.performance_metrics[task_id]:
-                self.performance_metrics[task_id]['total']['end'] = time.time()
-                self.performance_metrics[task_id]['total']['duration'] = self.performance_metrics[task_id]['total']['end'] - self.performance_metrics[task_id]['total']['start']
-                total_duration = self.performance_metrics[task_id]['total']['duration']
-                self.logger.info(f"任务 {task_id} 失败，耗时: {total_duration:.2f}s")
-            
-            self.logger.exception(f"视频翻译失败: {e}")
-            
-            # 标记任务失败
-            await self.state_manager.complete_task.remote(
-                task_id, 
-                success=False, 
-                message=f"视频翻译失败: {e}"
-            )
-            
-            return {
-                "status": "error", 
-                "message": str(e),
-                "performance": self.performance_metrics.get(task_id, {})
-            }
+            self.logger.exception(f"[{task_id}] 处理过程中发生未捕获的异常: {str(e)}")
+            await self.state_manager.complete_task.remote(task_id, False, f"处理失败: {str(e)}")
+            return {"status": "error", "message": f"处理失败: {str(e)}"}
 
 # 创建应用部署
 app = VideoTransPipe.bind(

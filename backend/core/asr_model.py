@@ -7,7 +7,8 @@ from ray import serve
 import torch
 
 @serve.deployment(
-    name="asr_model"
+    name="asr_model",
+    ray_actor_options={"num_gpus": 0.7, "num_cpus": 1}
 )
 class ASRModel:
     """
@@ -48,9 +49,7 @@ class ASRModel:
             raise
     
     async def generate(self, input, **kwargs):
-        """
-        执行模型生成方法 - 异步版本
-        """
+        """执行模型生成方法 - 已有良好的内存管理"""
         result = None
         try:
             self.logger.info(f"开始ASR识别音频: {input if isinstance(input, str) else '(已加载音频)'}")
@@ -60,10 +59,9 @@ class ASRModel:
             return result
         except Exception as e:
             self.logger.error(f"ASR识别失败: {str(e)}")
-            # Re-raise the exception after cleanup
             raise
         finally:
-            # Ensure GPU cache is cleared regardless of success or failure
+            # 已有的GPU清理 - 保持不变
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 self.logger.debug("ASRModel: Cleared GPU cache.")

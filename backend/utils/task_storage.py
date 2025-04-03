@@ -1,6 +1,7 @@
 import shutil
 import logging
 import os
+import asyncio
 from pathlib import Path
 from config import Config
 
@@ -25,6 +26,7 @@ class TaskPaths:
         self.processing_segments_dir = self.processing_dir / "segments"
 
     def create_directories(self):
+        """同步创建目录，可以被asyncio.to_thread包装成异步调用"""
         dirs = [
             self.task_dir,
             self.input_dir,
@@ -39,22 +41,23 @@ class TaskPaths:
             logger.debug(f"[TaskPaths] 创建目录: {d}")
 
     async def cleanup(self, keep_output: bool = False):
+        """异步清理任务目录"""
         try:
             if keep_output:
                 logger.info(f"[TaskPaths] 保留输出目录, 即将清理输入/processing/segments")
                 dirs_to_clean = [self.input_dir, self.processing_dir, self.segments_dir]
                 for d in dirs_to_clean:
                     if d.exists():
-                        shutil.rmtree(d)
+                        await asyncio.to_thread(shutil.rmtree, str(d))
                         logger.debug(f"[TaskPaths] 已清理: {d}")
             else:
                 logger.info(f"[TaskPaths] 全量清理任务目录: {self.task_dir}")
                 if self.task_dir.exists():
-                    shutil.rmtree(str(self.task_dir))
+                    await asyncio.to_thread(shutil.rmtree, str(self.task_dir))
                     logger.debug(f"[TaskPaths] 已删除: {self.task_dir}")
 
                 if self.segments_dir.exists():
-                    shutil.rmtree(str(self.segments_dir))
+                    await asyncio.to_thread(shutil.rmtree, str(self.segments_dir))
                     logger.debug(f"[TaskPaths] 已删除: {self.segments_dir}")
         except Exception as e:
             logger.error(f"[TaskPaths] 清理任务目录失败: {e}", exc_info=True)

@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 
 @serve.deployment(
     name="video_segmenter",
-    num_replicas=1
+    num_replicas=1,
+    ray_actor_options={"num_cpus": 0.5}
 )
 class VideoSegmenter:
     """

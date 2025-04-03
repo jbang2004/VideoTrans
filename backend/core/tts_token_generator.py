@@ -8,9 +8,12 @@ import uuid
 import threading
 import numpy as np
 from config import Config
+import asyncio
 
 @serve.deployment(
-    name="tts_token_generator"
+    name="tts_token_generator",
+    ray_actor_options={"num_gpus": 0.3, "num_cpus": 1},
+    num_replicas=2  # 增加实例数以提高吞吐量
 )
 class TtsTokenGenerator:
     """TTS Token生成Actor，专注于LLM模型"""
@@ -79,8 +82,8 @@ class TtsTokenGenerator:
                 self.model.llm.fp16 = True
                 self.model.llm.half()
             
-            # 添加必要的属性
-            self.model.lock = threading.Lock()
+            # 添加必要的属性 - 使用asyncio.Lock替代threading.Lock
+            self.model.lock = asyncio.Lock()
             self.model.tts_speech_token_dict = {}
             self.model.llm_end_dict = {}
             
@@ -91,7 +94,7 @@ class TtsTokenGenerator:
             self.logger.error(f"异常堆栈: {traceback.format_exc()}")
             raise
     
-    def generate_tts_tokens(self, sentences):
+    async def generate_tts_tokens(self, sentences):
         """生成TTS tokens并保存到文件"""
         if not sentences:
             self.logger.warning("generate_tts_tokens: 收到空的句子列表")
@@ -112,9 +115,9 @@ class TtsTokenGenerator:
                     if not text_feature_path or not speaker_feature_path:
                         raise ValueError(f"缺少必要的特征路径: text_feature_path={text_feature_path}, speaker_feature_path={speaker_feature_path}")
                     
-                    # 加载特征
-                    text_features = torch.load(text_feature_path)
-                    speaker_features = torch.load(speaker_feature_path)
+                    # 异步加载特征
+                    text_features = await asyncio.to_thread(torch.load, text_feature_path)
+                    speaker_features = await asyncio.to_thread(torch.load, speaker_feature_path)
                     
                     # 生成TTS token ID和文件路径
                     tts_token_id = str(uuid.uuid4())
@@ -127,7 +130,7 @@ class TtsTokenGenerator:
                     for i, (text, text_len) in enumerate(zip(text_features['text'], text_features['text_len'])):
                         current_seg_uuid = f"{tts_token_id}_seg_{i}"
                         
-                        with self.model.lock:
+                        async with self.model.lock:
                             self.model.tts_speech_token_dict[current_seg_uuid] = []
                             self.model.llm_end_dict[current_seg_uuid] = False
                         
@@ -136,8 +139,9 @@ class TtsTokenGenerator:
                         llm_prompt_speech_token = speaker_features.get('llm_prompt_speech_token', torch.zeros(1, 0, dtype=torch.int32))
                         llm_embedding = speaker_features.get('llm_embedding', torch.zeros(0, 192))
                         
-                        # 调用LLM生成tokens
-                        self.model.llm_job(
+                        # 异步调用LLM生成tokens
+                        await asyncio.to_thread(
+                            self.model.llm_job,
                             text,
                             prompt_text,
                             llm_prompt_speech_token,
@@ -146,7 +150,8 @@ class TtsTokenGenerator:
                         )
                         
                         # 获取生成的tokens
-                        tokens = self.model.tts_speech_token_dict[current_seg_uuid]
+                        async with self.model.lock:
+                            tokens = self.model.tts_speech_token_dict[current_seg_uuid]
                         segment_tokens_list.append(tokens)
                         segment_uuids.append(current_seg_uuid)
                     
@@ -160,7 +165,7 @@ class TtsTokenGenerator:
                         'segment_uuids': segment_uuids,
                         'duration': total_duration_ms
                     }
-                    torch.save(tts_tokens, tts_token_path)
+                    await asyncio.to_thread(torch.save, tts_tokens, tts_token_path)
                     
                     # 更新句子
                     model_input['tts_token_path'] = tts_token_path
@@ -170,7 +175,7 @@ class TtsTokenGenerator:
                     processed_sentences.append(sentence)
                     
                     # 清理模型中的临时缓存
-                    with self.model.lock:
+                    async with self.model.lock:
                         for seg_uuid in segment_uuids:
                             self.model.tts_speech_token_dict.pop(seg_uuid, None)
                             self.model.llm_end_dict.pop(seg_uuid, None)

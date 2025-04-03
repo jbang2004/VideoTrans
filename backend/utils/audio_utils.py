@@ -2,6 +2,7 @@ import numpy as np
 import soundfile as sf
 import logging
 from typing import Optional
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def apply_fade_effect(audio_data: np.ndarray, full_audio_buffer: np.ndarray, ove
     audio_data[:cross_len] = overlap_region * fade_out + audio_data[:cross_len] * fade_in
     return audio_data
 
-def mix_with_background(
+async def mix_with_background(
     bg_path: str,
     start_time: float,
     duration: float,
@@ -58,7 +59,8 @@ def mix_with_background(
     Returns:
         混合后的音频数据
     """
-    background_audio, sr = sf.read(bg_path)
+    # 异步读取背景音乐
+    background_audio, sr = await asyncio.to_thread(sf.read, bg_path)
     background_audio = np.asarray(background_audio, dtype=np.float32)
     if sr != sample_rate:
         logger.warning(

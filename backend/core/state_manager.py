@@ -11,7 +11,8 @@ from utils.task_state import TaskState
 logger = logging.getLogger(__name__)
 
 @serve.deployment(
-    name="StateManager"
+    name="StateManager",
+    ray_actor_options={"num_cpus": 0.25}
 )
 class StateManager:
     """
@@ -49,7 +50,7 @@ class StateManager:
             
             # 创建任务路径
             task_paths = TaskPaths(self.config, task_id)
-            task_paths.create_directories()
+            await asyncio.to_thread(task_paths.create_directories)  # 异步创建目录
             
             # 创建任务状态
             task_state = TaskState(

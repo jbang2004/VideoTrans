@@ -11,7 +11,9 @@ import asyncio
 from config import Config
 
 @serve.deployment(
-    name="audio_generator"
+    name="audio_generator",
+    ray_actor_options={"num_gpus": 0.5, "num_cpus": 1},
+    num_replicas=1  # 由于GPU需求较高，单实例避免竞争
 )
 class AudioGenerator:
     """音频生成Actor，专注于Flow和HiFT模型"""
@@ -150,8 +152,9 @@ class AudioGenerator:
                     else:
                         # 只有在路径有效时才加载特征和处理 tokens
                         try:
-                            tts_tokens = torch.load(tts_token_path)
-                            speaker_features = torch.load(speaker_feature_path)
+                            # 异步加载特征文件
+                            tts_tokens = await asyncio.to_thread(torch.load, tts_token_path)
+                            speaker_features = await asyncio.to_thread(torch.load, speaker_feature_path)
                             
                             # 获取语速
                             speed = sentence.speed if hasattr(sentence, 'speed') and sentence.speed > 0 else 1.0 # 确保 speed > 0

@@ -8,7 +8,8 @@ from typing import List
 logger = logging.getLogger("duration_aligner")
 
 @serve.deployment(
-    name="duration_aligner"
+    name="duration_aligner",
+    ray_actor_options={"num_cpus": 0.25}
 )
 class DurationAligner:
     def __init__(self, simplifier_handle: DeploymentHandle, model_in_handle: DeploymentHandle, tts_token_gen_handle: DeploymentHandle):

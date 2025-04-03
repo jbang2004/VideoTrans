@@ -27,7 +27,9 @@ class BatchConfig:
 T = TypeVar('T')
 
 @serve.deployment(
-    name="translator"
+    name="translator",
+    ray_actor_options={"num_cpus": 1},
+    num_replicas=2  # 增加副本以提高并发处理能力
 )
 class Translator:
     def __init__(self):

@@ -5,7 +5,8 @@ from typing import List
 logger = logging.getLogger("timestamp_adjuster")
 
 @serve.deployment(
-    name="timestamp_adjuster"
+    name="timestamp_adjuster",
+    ray_actor_options={"num_cpus": 0.25}
 )
 class TimestampAdjuster:
     async def __call__(self, sentences: List, sample_rate: int, start_time: float = None) -> List:

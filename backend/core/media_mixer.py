@@ -25,7 +25,9 @@ if not logger.handlers:  # 如果没有处理器，添加一个控制台处理�
     logger.addHandler(handler)
 
 @serve.deployment(
-    name="media_mixer"
+    name="media_mixer",
+    ray_actor_options={"num_cpus": 1},
+    num_replicas=2  # 添加多个实例以提高吞吐量
 )
 class MediaMixer:
     """
@@ -78,8 +80,14 @@ class MediaMixer:
                 logger.error(f"[MediaMixerActor] 分段 {batch_counter} 处理失败, TaskID={task_state.task_id}")
                 return None
             
-            # 更新Actor中的音频缓冲区
-            self.full_audio_buffer = updated_buffer
+            # 更新Actor中的音频缓冲区，但限制大小以节省内存
+            # 只保留最后5秒的音频用于下一批次的平滑过渡
+            if len(updated_buffer) > self.sample_rate * 5:
+                preserve_samples = min(len(updated_buffer), int(self.sample_rate * 5))
+                self.full_audio_buffer = updated_buffer[-preserve_samples:]
+            else:
+                self.full_audio_buffer = updated_buffer
+                
             logger.info(f"[MediaMixerActor] 更新音频缓冲区, 分段 {batch_counter}, 句子数 {len(sentences_batch)}")
             
             # 返回处理后的视频片段路径
@@ -89,10 +97,9 @@ class MediaMixer:
             logger.exception(f"[MediaMixerActor] mix_media 执行出错: {str(e)}")
             return None
         finally:
-            # 不在这里清除full_audio_buffer，因为它需要在不同调用之间保持
-            # 仅清理不再需要的其他大型临时变量
+            # 清理不再需要的变量
             if 'updated_buffer' in locals() and 'success' in locals() and success and updated_buffer is not self.full_audio_buffer:
-                del updated_buffer  # 如果我们已经更新了缓冲区，可以删除临时变量
+                del updated_buffer
 
 async def create_mixed_segment(
     sentences: List[Sentence],
@@ -135,9 +142,8 @@ async def create_mixed_segment(
 
         background_audio_path = segment_files.get('background')
         if background_audio_path:
-            # 直接用asyncio.to_thread包装
-            audio_data = await asyncio.to_thread(
-                _process_background_audio,
+            # 调用异步函数 _process_background_audio
+            audio_data = await _process_background_audio(
                 background_audio_path, 
                 start_time_param, 
                 duration, 
@@ -176,7 +182,6 @@ async def create_mixed_segment(
         )
         
         # 优化：仅保留最后N秒的音频用于下一批次的过渡，而不是整个缓冲区
-        # 这里可以根据config.AUDIO_OVERLAP的值来调整保留多少
         if len(updated_audio_buffer) > sample_rate * 5:  # 例如仅保留最后5秒
             preserve_samples = min(len(updated_audio_buffer), int(sample_rate * 5))
             updated_audio_buffer = updated_audio_buffer[-preserve_samples:]
@@ -187,10 +192,10 @@ async def create_mixed_segment(
         logger.exception(f"[MediaMixer] create_mixed_segment 执行出错，错误: {e}")
         return False, full_audio_buffer
     finally:
-        # 显式删除大型临时变量以释放内存
-        if full_audio is not None and full_audio is not updated_audio_buffer: 
+        # 现有的清理逻辑很好
+        if 'full_audio' in locals() and full_audio is not None and full_audio is not updated_audio_buffer: 
             del full_audio
-        if audio_data is not None:
+        if 'audio_data' in locals() and audio_data is not None:
             del audio_data
 
 def _concat_audio_segments(sentences: List[Sentence], full_audio_buffer: np.ndarray, overlap: float) -> np.ndarray:
@@ -220,13 +225,14 @@ def _calculate_time_params(sentences: List[Sentence]) -> tuple:
     duration = sum(s.adjusted_duration for s in sentences) / 1000.0
     return start_time, duration
 
-def _process_background_audio(
+async def _process_background_audio(
     bg_path: str, start_time: float, duration: float, audio_data: np.ndarray,
     sample_rate: int, vocals_volume: float, background_volume: float, max_val: float
 ) -> np.ndarray:
-    """处理背景音频"""
+    """处理背景音频 - 异步版本"""
     try:
-        mixed_audio = mix_with_background(
+        # 调用异步函数 mix_with_background
+        mixed_audio = await mix_with_background(
             bg_path=bg_path,
             start_time=start_time,
             duration=duration,

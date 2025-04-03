@@ -14,7 +14,8 @@ from models.ClearerVoice.clearvoice import ClearVoice
 from utils.ffmpeg_utils import extract_audio, extract_video
 
 @serve.deployment(
-    name="video_separator"
+    name="video_separator",
+    ray_actor_options={"num_gpus": 0.3, "num_cpus": 0.5}
 )
 class VideoSeparator:
     """
@@ -170,22 +171,15 @@ class VideoSeparator:
             
             raise
         finally:
-            # 显式删除大型numpy数组
-            for arr_name, arr in [('vocals', vocals), ('background', background)]:
-                if arr is not None:
-                    try:
-                        del arr
-                        self.logger.debug(f"已释放{arr_name}内存")
-                    except Exception as e:
-                        self.logger.debug(f"释放{arr_name}内存失败: {e}")
-            
-            # 确保无论成功还是失败都清理GPU缓存
+            # 确保大型音频数据被清理
+            large_variables = ['vocals', 'background']
+            for var_name in large_variables:
+                if var_name in locals() and locals()[var_name] is not None:
+                    del locals()[var_name]
+                
+            # 添加GPU缓存清理
             if torch.cuda.is_available():
-                try:
-                    torch.cuda.empty_cache()
-                    self.logger.debug("VideoSeparator: Cleared GPU cache.")
-                except Exception as e:
-                    self.logger.error(f"清理GPU缓存失败: {e}")
+                torch.cuda.empty_cache()
     
     def _normalize_and_resample(
         self,
