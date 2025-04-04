@@ -1,25 +1,22 @@
-负载测试结果 - 2025-04-03 12:02:03
+负载测试结果 - 2025-04-04 09:19:32
 视频: /home/jbang/codebase/VideoTrans/backend/test/test.mp4
-任务数量: 2
+任务数量: 3
 目标语言: en
 
 摘要:
-成功任务: 1/2
-失败任务: 1/2
+成功任务: 3/3
+失败任务: 0/3
 
 各任务详细信息:
-任务ID: 6738d0d1-65b5-4d05-b6b1-834c9a7e6bdc
+任务ID: a5956d15-7636-4d26-a1e8-c44971a31af0
 状态: 成功
 消息: 视频处理成功
 
-任务ID: 5687f7ba-9370-4464-ba39-54264983159d
-状态: 失败
-错误信息: The actor died unexpectedly before finishing this task.
-	class_name: ServeReplica:PipelineEngine:VideoTransPipe
-	actor_id: 4af12943396c4c625f371bc101000000
-	pid: 378323
-	name: SERVE_REPLICA::PipelineEngine#VideoTransPipe#hpn43e5w
-	namespace: serve
-	ip: 192.168.3.134
-The actor is dead because its worker process has died. Worker exit type: SYSTEM_ERROR Worker exit detail: Worker unexpectedly exits with a connection error code 2. End of file. There are some potential root causes. (1) The process is killed by SIGKILL by OOM killer due to high memory usage. (2) ray stop --force is called. (3) The worker is crashed unexpectedly due to SIGSEGV or other unexpected errors.
+任务ID: 37e7589f-4948-4e0c-b532-47a47b772a97
+状态: 成功
+消息: 视频处理成功
+
+任务ID: bd8cbc0a-0965-4d96-8644-ffc7c32705b8
+状态: 成功
+消息: 视频处理成功
 
