@@ -33,25 +33,25 @@ logger = logging.getLogger(__name__)
 # 创建各服务的部署句柄
 translator_handle = Translator.options(
     num_replicas=1,
-    max_ongoing_requests=1,
-    ray_actor_options={"num_cpus": 1}  # 翻译器CPU资源
+    max_ongoing_requests=3,
+    ray_actor_options={"num_cpus": 0.5}  # 翻译器CPU资源
 ).bind()
 
 model_in_handle = ModelInMaker.options(
     num_replicas=1,
-    max_ongoing_requests=1,
-    ray_actor_options={"num_cpus": 1, "num_gpus": 0.3}  # 模型输入CPU资源
+    max_ongoing_requests=3,
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.1}  # 模型输入CPU资源
 ).bind()
 
 tts_token_gen_handle = TtsTokenGenerator.options(
-    num_replicas=1,
+    num_replicas=3,
     max_ongoing_requests=1,
-    ray_actor_options={"num_cpus":1, "num_gpus": 0.3}  # TTS标记生成器资源
+    ray_actor_options={"num_cpus":0.9, "num_gpus": 0.2}  # TTS标记生成器资源
 ).bind()
 
 audio_gen_handle = AudioGenerator.options(
     num_replicas=1,
-    ray_actor_options={"num_cpus": 1, "num_gpus": 0.1}  # 音频生成器资源
+    ray_actor_options={"num_cpus": 0.5, "num_gpus": 0.1}  # 音频生成器资源
 ).bind()
 
 simplifier_handle = Translator.options(
@@ -61,19 +61,19 @@ simplifier_handle = Translator.options(
 
 media_mixer_handle = MediaMixer.options(
     num_replicas=1,
-    ray_actor_options={"num_cpus": 1}  # 媒体混合器CPU资源
+    ray_actor_options={"num_cpus": 0.5}  # 媒体混合器CPU资源
 ).bind()
 
 video_separator_handle = VideoSeparator.options(
     num_replicas=1,
     max_ongoing_requests=1,
-    ray_actor_options={"num_cpus": 1, "num_gpus": 0.15}  # 视频分离器GPU资源
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.1}  # 视频分离器GPU资源
 ).bind()
 
 asr_handle = ASRModel.options(
     num_replicas=1,
     max_ongoing_requests=1,
-    ray_actor_options={"num_cpus": 1, "num_gpus": 0.15}  # ASR模型GPU资源
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.1}  # ASR模型GPU资源
 ).bind()
 
 duration_aligner_handle = DurationAligner.options(
