@@ -4,7 +4,7 @@
 import React from "react"
 import { Button } from "../../ui/button"
 import { Popover, PopoverTrigger, PopoverContent } from "../../ui/popover"
-import { ChevronUp } from "lucide-react"
+import { ChevronUp, Languages, Subtitles, ArrowRight } from "lucide-react"
 import { cn } from "../../../lib/utils"
 import { LANGUAGES, API_BASE_URL } from "../utils/format"
 import type { TranslationState, TranslationControls } from "../types"
@@ -40,11 +40,13 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
   }
 
   // 主按钮
-  let buttonText = "开始翻译"
+  let buttonText = "翻译"
+  let buttonIcon = <ArrowRight className="h-3 w-3" />
+  
   if (isCompleted) {
     buttonText = "下载"
   } else if (isTranslating) {
-    buttonText = "翻译中"
+    buttonText = "处理中"
   }
 
   const handleMainButtonClick = async () => {
@@ -60,25 +62,27 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
   }
 
   return (
-    <div className="flex items-center gap-4">
+    <div className="flex items-center gap-2">
       {/* 语言选择下拉 */}
       <Popover>
         <PopoverTrigger asChild>
           <Button
+            size="sm"
             variant="ghost"
-            className="text-sm hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white"
+            className="h-7 px-2.5 rounded-full hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white text-xs"
           >
+            <Languages className="h-3 w-3 mr-1 opacity-70" />
             {selectedLanguage}
-            <ChevronUp className="h-4 w-4 ml-1" />
           </Button>
         </PopoverTrigger>
-        <PopoverContent className="w-32 bg-black/60 backdrop-blur-xl border-white/20 rounded-xl shadow-2xl">
-          <div className="space-y-1">
+        <PopoverContent className="w-28 bg-neutral-800/90 backdrop-blur-lg border-white/10 rounded-xl shadow-2xl p-1.5">
+          <div className="space-y-0.5">
             {LANGUAGES.map((language) => (
               <Button
                 key={language.value}
+                size="sm"
                 variant="ghost"
-                className="w-full justify-start text-white/80 hover:text-white hover:bg-white/10"
+                className="w-full justify-start text-xs px-2 py-1 h-7 text-white/80 hover:text-white hover:bg-white/10 rounded-lg"
                 onClick={() => handleLanguageSelect(language.label)}
               >
                 {language.label}
@@ -90,26 +94,32 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
 
       {/* ============== (新增) 字幕开关按钮 ============== */}
       <Button
+        size="sm"
         variant="ghost"
-        className="text-sm hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white"
+        className="h-7 px-2.5 rounded-full hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white text-xs"
         // 一旦开始翻译 or 已完成，就不可再改
         disabled={isTranslating || isCompleted || isProcessing}
         onClick={() => toggleSubtitleWanted()}
       >
-        {`字幕：${subtitleWanted ? '开' : '关'}`}
+        <Subtitles className="h-3 w-3 mr-1 opacity-70" />
+        {subtitleWanted ? '开' : '关'}
       </Button>
 
       {/* 单个主按钮 => 开始翻译 / 翻译中 / 下载 */}
       <Button
+        size="sm"
         variant="ghost"
         className={cn(
-          "text-sm hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white",
+          "h-7 px-2.5 rounded-full hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white text-xs",
           (selectedFile || isTranslating || isCompleted) && "bg-white/10"
         )}
         // 若正在处理且没到完成, 也可禁用
         disabled={isProcessing && !isCompleted}
         onClick={handleMainButtonClick}
       >
+        {isTranslating && (
+          <span className="mr-1 h-3 w-3 inline-block animate-pulse rounded-full bg-emerald-400"></span>
+        )}
         {buttonText}
       </Button>
     </div>

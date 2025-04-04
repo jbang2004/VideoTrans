@@ -40,7 +40,7 @@ translator_handle = Translator.options(
 model_in_handle = ModelInMaker.options(
     num_replicas=1,
     max_ongoing_requests=3,
-    ray_actor_options={"num_cpus": 1, "num_gpus": 0.1}  # 模型输入CPU资源
+    ray_actor_options={"num_cpus": 0.5, "num_gpus": 0.1}  # 模型输入CPU资源
 ).bind()
 
 tts_token_gen_handle = TtsTokenGenerator.options(
