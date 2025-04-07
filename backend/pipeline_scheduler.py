@@ -44,9 +44,9 @@ model_in_handle = ModelInMaker.options(
 ).bind()
 
 tts_token_gen_handle = TtsTokenGenerator.options(
-    num_replicas=3,
+    num_replicas=1,
     max_ongoing_requests=1,
-    ray_actor_options={"num_cpus":0.9, "num_gpus": 0.2}  # TTS标记生成器资源
+    ray_actor_options={"num_cpus":1, "num_gpus": 0.5}  # TTS标记生成器资源
 ).bind()
 
 audio_gen_handle = AudioGenerator.options(
