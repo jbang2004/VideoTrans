@@ -39,6 +39,7 @@ export default function HomePage() {
   // App-specific state
   const [showPlayer, setShowPlayer] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [ignoreBackgroundReset, setIgnoreBackgroundReset] = useState<boolean>(false)
 
   // Refs
   const particleRef = useRef<ParticleBackgroundRef>(null) // Ref for direct interaction
@@ -71,10 +72,16 @@ export default function HomePage() {
     setIsStateTransitioning(true);
     // 开始隐藏登录页内容
     setShowLandingContent(false);
-    // 延迟一帧后开始粒子动画，确保UI更新顺序正确
-    requestAnimationFrame(() => {
+    
+    // 重置所有与应用相关的状态
+    setShowUploadButton(false);
+    setShowPlayer(false);
+    setSelectedFile(null);
+    
+    // 延迟设置粒子状态，确保UI更新顺序正确
+    setTimeout(() => {
       setParticleState('transitioningForward');
-    });
+    }, 50);
   }
 
   /**
@@ -102,21 +109,43 @@ export default function HomePage() {
       console.log('重置动画完成，切换回登录页');
       // 重置动画完成，设置回登录页状态
       setPageMode('landing');
-      setShowLandingContent(true);
-      setShowPlayer(false);
-      setSelectedFile(null);
-      setShowUploadButton(false);
-      setIsStateTransitioning(false); // 释放状态锁
+      
+      // 延迟显示登录页内容，确保状态正确
+      setTimeout(() => {
+        setShowLandingContent(true);
+        setShowPlayer(false);
+        setSelectedFile(null);
+        setShowUploadButton(false);
+        setIsStateTransitioning(false); // 释放状态锁
+      }, 200);
     }
   }
 
   // --- App Interaction Handlers ---
 
-  const handleUploadClick = () => {
-    fileInputRef.current?.click()
+  const handleUploadClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    // 确保阻止事件冒泡
+    e.stopPropagation();
+    
+    // 短暂设置忽略背景点击标志，防止文件选择器打开时触发背景点击
+    setIgnoreBackgroundReset(true);
+    
+    // 打开文件选择器
+    fileInputRef.current?.click();
+    
+    // 短暂延迟后重置忽略标志
+    setTimeout(() => {
+      setIgnoreBackgroundReset(false);
+    }, 100);
   }
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    // 阻止事件冒泡
+    e.stopPropagation();
+    
+    // 标记忽略背景点击一小段时间，以防文件选择后立即触发背景点击
+    setIgnoreBackgroundReset(true);
+    
     if (e.target.files && e.target.files.length > 0) {
       const file = e.target.files[0]
 
@@ -131,6 +160,11 @@ export default function HomePage() {
       // Clear input value to allow re-selecting the same file
       e.target.value = ''
     }
+    
+    // 确保短暂延迟后重置忽略标志
+    setTimeout(() => {
+      setIgnoreBackgroundReset(false);
+    }, 300);
   }
 
   /**
@@ -138,24 +172,38 @@ export default function HomePage() {
    * In 'app' mode, triggers the reset transition back to the landing page.
    */
   const handleBackgroundClick = (e: React.MouseEvent) => {
+    // 如果设置了忽略背景重置标志，重置它并立即返回
+    if (ignoreBackgroundReset) {
+      console.log('忽略背景点击，由上传按钮触发');
+      setIgnoreBackgroundReset(false);
+      return;
+    }
+
+    // 仅检查事件目标是否是上传按钮
+    const target = e.target as HTMLElement;
+    
     // Only trigger reset if in 'app' mode and click is not on interactive elements
     if (pageMode === 'app' && !isStateTransitioning) {
-      const target = e.target as HTMLElement
-      // Check if the click target is the upload button or the video player container
-      if (
-        target.closest('#upload-button') ||
-        target.closest('.video-player-container') || // Use a class specific to the player wrapper
-        target.closest('canvas#particle-canvas') !== e.currentTarget // Ensure click is not on canvas itself if desired
-      ) {
-         // Click was on the button or player, do nothing for reset
-         return;
+      // 简化检查，只查找上传按钮和视频播放器
+      const isOnInteractiveElement = 
+        target.closest('#upload-button') !== null ||
+        target.closest('.video-player-container') !== null;
+      
+      // 如果点击不是在交互元素上，则触发重置
+      if (!isOnInteractiveElement) {
+        console.log('点击空白区域，开始逆向转场');
+        setIsStateTransitioning(true); // 设置状态锁，防止重复触发
+        
+        // 立即隐藏上传按钮和视频播放器
+        setShowUploadButton(false);
+        setShowPlayer(false);
+        
+        // 确保UI更新后再设置粒子状态
+        setTimeout(() => {
+          // 触发粒子重置动画
+          setParticleState('transitioningReset');
+        }, 50);
       }
-
-      // Clicked on the background area in app mode, initiate reset
-      setIsStateTransitioning(true); // 设置状态锁，防止重复触发
-      setShowUploadButton(false); // Immediately hide app elements or start their fade-out
-      setShowPlayer(false);
-      setParticleState('transitioningReset'); // Trigger the particle reset animation state
     }
   }
 
@@ -203,11 +251,23 @@ export default function HomePage() {
           accept="video/*"
           className="hidden"
           onChange={handleFileChange}
+          onClick={(e) => {
+            // 阻止文件输入点击事件冒泡
+            e.stopPropagation();
+          }}
         />
 
         {/* Upload Button - Animated */}
         {showUploadButton && (
-          <div className="fixed inset-0 flex justify-center items-center z-10 animate-fade-in">
+          <div 
+            className="fixed inset-0 flex justify-center items-center z-10 animate-fade-in"
+            onClick={(e) => {
+              // 只阻止事件冒泡，当点击发生在按钮上时
+              if (e.target !== e.currentTarget) {
+                e.stopPropagation();
+              }
+            }}
+          >
             <button
               id="upload-button"
               className="bg-white text-black font-semibold px-6 py-3 rounded-md flex items-center space-x-1.5 hover:bg-gray-200 transition-all duration-300 ease-in animate-pulse"

@@ -71,13 +71,20 @@ const ParticleBackgroundComponent = React.forwardRef<ParticleBackgroundRef, Part
     if (externalAnimationState && externalAnimationState !== animationState) {
       console.log('外部状态变化:', externalAnimationState, '内部状态:', animationState);
       
-      // 避免循环状态变化
-      if ((externalAnimationState === 'transitioningForward' && animationState === 'targetReached') ||
-          (externalAnimationState === 'transitioningReset' && animationState === 'initial')) {
-        console.log('避免状态循环，跳过状态设置');
+      // 优化状态锁定逻辑，防止重复状态变更
+      if (externalAnimationState === 'transitioningForward' && 
+          (animationState === 'targetReached' || animationState === 'transitioningReset')) {
+        console.log('忽略前向转场请求，当前正在其他状态中');
         return;
       }
       
+      if (externalAnimationState === 'transitioningReset' && 
+          (animationState === 'initial' || animationState === 'transitioningForward')) {
+        console.log('忽略重置转场请求，当前正在其他状态中');
+        return;
+      }
+      
+      // 允许从任何状态转换到确定的目标状态
       console.log('设置新状态:', externalAnimationState);
       setAnimationState(externalAnimationState);
       lastReportedStateRef.current = externalAnimationState;

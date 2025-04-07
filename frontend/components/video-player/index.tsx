@@ -16,7 +16,11 @@ import { useTranslation } from './hooks/useTranslation'
 import { Slider } from '../ui/slider'
 import { formatTime } from './utils/format'
 
-export default function VideoPlayer() {
+interface VideoPlayerProps {
+  initialFile?: File
+}
+
+export default function VideoPlayer({ initialFile }: VideoPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const { videoRef, state: playerState, controls: playerControls } = useVideoPlayer()
   const [showControls, setShowControls] = useState(true)
@@ -138,6 +142,13 @@ export default function VideoPlayer() {
       document.removeEventListener('click', handleClickOutside)
     }
   }, [showVolumeSlider])
+
+  // 处理初始文件
+  useEffect(() => {
+    if (initialFile) {
+      handleFileSelect(initialFile)
+    }
+  }, [initialFile])
 
   return (
     <div className="flex flex-col h-screen bg-gradient-to-br from-neutral-950 to-black text-white overflow-hidden">

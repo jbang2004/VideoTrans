@@ -198,8 +198,13 @@ export function useParticleAnimation({
     if (prevAnimationStateRef.current !== animationState) {
       console.log(`动画状态变化: ${prevAnimationStateRef.current} -> ${animationState}`);
       
-      // 避免在过渡中再次触发状态变化
-      if (stateChangeLockedRef.current) {
+      // 避免在过渡中再次触发状态变化，但允许从中间状态到目标状态的转换
+      const allowStateChange = 
+        !stateChangeLockedRef.current || 
+        animationState === 'targetReached' || 
+        animationState === 'initial';
+        
+      if (!allowStateChange) {
         console.log('状态锁定中，跳过处理');
         return;
       }
@@ -208,6 +213,7 @@ export function useParticleAnimation({
       stateChangeTimeRef.current = Date.now();
       
       // 重置该状态的完成标志
+      animationCompletedRef.current = {}; // 重置所有完成标志
       animationCompletedRef.current[animationState] = false;
       
       // 处理前向转场
@@ -281,6 +287,8 @@ export function useParticleAnimation({
         // 其他状态（target或initial）完成时，解锁状态变化
         console.log(`到达稳定状态: ${animationState}，解锁状态变化`);
         stateChangeLockedRef.current = false;
+        // 确保清除所有动画标志
+        animationCompletedRef.current = {};
       }
     }
   }, [animationState, isClient])
@@ -332,10 +340,11 @@ export function useParticleAnimation({
         animationCompletedRef.current[animationState] = true;
         setAnimationStateWithLog('targetReached');
         
-        // 确保下一帧立即触发回调
+        // 确保下一帧立即触发回调，并解锁状态
         setTimeout(() => {
+          stateChangeLockedRef.current = false;
           onAnimationComplete?.('targetReached');
-        }, 0);
+        }, 50);
         
         needsUpdate = true;
       }
@@ -375,10 +384,11 @@ export function useParticleAnimation({
         animationCompletedRef.current[animationState] = true;
         setAnimationStateWithLog('initial');
         
-        // 确保下一帧立即触发回调
+        // 确保下一帧立即触发回调，并解锁状态
         setTimeout(() => {
+          stateChangeLockedRef.current = false;
           onAnimationComplete?.('initial');
-        }, 0);
+        }, 50);
         
         needsUpdate = true;
       }
@@ -434,8 +444,13 @@ export function useParticleAnimation({
        now - stateChangeTimeRef.current > minStateDuration)
     ) {
       // 在设置动画完成标志之前先触发回调，避免标志阻止回调
-      onAnimationComplete?.(animationState);
+      stateChangeLockedRef.current = false; // 确保状态锁被释放
       animationCompletedRef.current[animationState] = true;
+      
+      // 使用setTimeout防止状态更新过快
+      setTimeout(() => {
+        onAnimationComplete?.(animationState);
+      }, 50);
     }
   }, [animationState, onAnimationComplete, isClient])
   
