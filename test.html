@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>亮色科技风网页</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        /* --- Global Styles & Background --- */
+        body {
+            font-family: 'Inter', sans-serif;
+            color: #374151; /* gray-700 - Default dark gray text */
+            background-color: #f3f4f6; /* gray-100 - Fallback background color */
+            position: relative; /* Ensure body is above the background layer */
+            z-index: 1;
+            padding-top: 100px; /* Add padding for the fixed header */
+        }
+
+        #background-blur {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: -1; /* Place behind content */
+            /* --- Replace with your background image URL --- */
+            /* [Image of 背景图片] */
+            background-image: url('https://placehold.co/1920x1080/a0c4ff/ffffff?text=背景图片');
+            background-size: cover;
+            background-position: center;
+            filter: blur(12px); /* Adjust blur intensity */
+            overflow: hidden;
+            transform: scale(1.05); /* Prevent blurred edges */
+        }
+
+        /* --- Lucide Icons Font --- */
+        @font-face {
+            font-family: 'LucideIcons';
+            src: url(https://cdn.jsdelivr.net/npm/lucide-static@latest/font/Lucide.ttf) format('truetype');
+        }
+        .lucide {
+            font-family: 'LucideIcons';
+            font-size: 1.25rem; /* Default icon size, adjustable */
+            line-height: 1;
+            display: inline-block;
+            vertical-align: middle;
+            font-style: normal; /* Ensure icons render correctly */
+            font-weight: normal; /* Ensure icons render correctly */
+        }
+
+        /* --- Core Effects --- */
+        .glass-effect {
+            background-color: rgba(255, 255, 255, 0.55); /* White semi-transparent */
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px); /* Safari support */
+            border: 1px solid rgba(255, 255, 255, 0.2); /* Subtle border */
+            color: #1f2937; /* Ensure inner text color contrast */
+        }
+
+        /* --- Component Styles (Derived from Asset Library) --- */
+
+        /* Main Content Container Style */
+        .content-container {
+           background-color: rgba(255, 255, 255, 0.75); /* White semi-transparent background */
+           position: relative;
+           z-index: 2;
+        }
+
+        /* Active Navigation Link Style */
+        header nav a.active-nav {
+            background-color: rgba(209, 213, 219, 0.8); /* bg-gray-300/80 */
+            color: #1f2937; /* text-gray-800 */
+        }
+
+        /* Movie Card Fallback Image Style */
+        .fallback-img {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #e5e7eb; /* bg-gray-200 */
+            color: #6b7280; /* text-gray-500 */
+            font-size: 0.875rem; /* text-sm */
+            width: 100%;
+            height: 12rem; /* h-48 */
+            text-align: center;
+        }
+
+        /* Custom scrollbar for better aesthetics (optional) */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(156, 163, 175, 0.5); /* gray-400 with transparency */
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(107, 114, 128, 0.7); /* gray-500 with transparency */
+        }
+
+    </style>
+</head>
+<body class="antialiased">
+
+    <div id="background-blur"></div>
+
+    <header class="fixed top-4 left-4 right-4 z-20 glass-effect rounded-2xl shadow-xl p-4 flex items-center justify-between">
+        <div class="flex items-center gap-8">
+            <h1 class="text-2xl font-bold text-gray-800">TechFlix</h1>
+            <nav class="hidden md:flex items-center gap-1 bg-white/30 rounded-lg p-1 backdrop-blur-sm">
+                <a href="#" class="rounded-md px-4 py-1.5 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-200/50 active-nav">首页</a>
+                <a href="#" class="rounded-md px-4 py-1.5 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-200/50">电影</a>
+                <a href="#" class="rounded-md px-4 py-1.5 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-200/50">电视剧</a>
+                <a href="#" class="rounded-md px-4 py-1.5 text-sm font-medium text-gray-700 hover:text-gray-900 hover:bg-gray-200/50">关于</a>
+            </nav>
+        </div>
+
+        <div class="flex items-center gap-2 bg-white/30 rounded-full p-1 backdrop-blur-sm">
+            <button class="p-2 rounded-full hover:bg-gray-200/50 transition-colors text-gray-600 hover:text-gray-800" aria-label="搜索">
+                <span class="lucide text-lg">&#xe03e;</span> </button>
+            <button class="p-2 rounded-full hover:bg-gray-200/50 transition-colors text-gray-600 hover:text-gray-800" aria-label="通知">
+                <span class="lucide text-lg">&#xe05a;</span> </button>
+            <div class="user-info flex items-center gap-2 pr-3 pl-1">
+                 <img src="https://placehold.co/40x40/e2e8f0/cbd5e1?text=头像" alt="用户头像" class="w-8 h-8 rounded-full border-2 border-gray-300 object-cover">
+                <div class="hidden sm:block">
+                    <span class="text-sm font-medium text-gray-800">用户名</span>
+                    <span class="block text-xs text-gray-600">在线</span>
+                </div>
+                 <span class="lucide text-xs text-gray-500">&#xe0a1;</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="container mx-auto px-4 pb-12 relative z-1">
+        <div class="content-container rounded-2xl p-6 shadow-xl mt-6">
+
+            <h2 class="text-2xl font-semibold text-gray-800 mb-6">为你推荐</h2>
+
+            <div class="flex flex-wrap items-center gap-3 mb-8">
+                <button class="flex items-center gap-2 px-4 py-2 rounded-full text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-200/80 transition-colors backdrop-blur-sm border border-gray-300/60 active bg-gray-300/80 text-gray-800 border-gray-400/60 font-semibold shadow">
+                    <span class="lucide text-base">&#xe4e0;</span> 全部
+                </button>
+                <button class="flex items-center gap-2 px-4 py-2 rounded-full text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-200/80 transition-colors backdrop-blur-sm border border-gray-300/60">
+                    <span class="lucide text-base">&#xe4fe;</span> 科幻
+                </button>
+                <button class="flex items-center gap-2 px-4 py-2 rounded-full text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-200/80 transition-colors backdrop-blur-sm border border-gray-300/60">
+                     <span class="lucide text-base">&#xe1a4;</span> 剧情
+                </button>
+                <button class="flex items-center gap-2 px-4 py-2 rounded-full text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-200/80 transition-colors backdrop-blur-sm border border-gray-300/60">
+                     <span class="lucide text-base">&#xe0e9;</span> 喜剧
+                </button>
+                 <button class="flex items-center gap-2 px-4 py-2 rounded-full text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-200/80 transition-colors backdrop-blur-sm border border-gray-300/60">
+                     <span class="lucide text-base">&#xe0e6;</span> 爱情
+                </button>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+                <div class="bg-white/65 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300 border border-gray-200/50 overflow-hidden">
+                     <img src="https://placehold.co/300x450/93c5fd/ffffff?text=电影海报1" alt="电影海报1" class="w-full h-48 object-cover" onerror="this.onerror=null; this.parentElement.innerHTML = '<div class=\'fallback-img\'>图片加载失败</div>';">
+                    <div class="p-3">
+                        <h4 class="text-sm font-semibold text-gray-800 whitespace-nowrap overflow-hidden text-ellipsis mb-1">赛博先锋</h4>
+                        <p class="text-xs text-gray-600">8.5 | 2077</p>
+                    </div>
+                </div>
+
+                <div class="bg-white/65 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300 border border-gray-200/50 overflow-hidden">
+                     <img src="https://placehold.co/300x450/6ee7b7/ffffff?text=电影海报2" alt="电影海报2" class="w-full h-48 object-cover" onerror="this.onerror=null; this.parentElement.innerHTML = '<div class=\'fallback-img\'>图片加载失败</div>';">
+                    <div class="p-3">
+                        <h4 class="text-sm font-semibold text-gray-800 whitespace-nowrap overflow-hidden text-ellipsis mb-1">星际迷航：超越边界</h4>
+                        <p class="text-xs text-gray-600">7.9 | 2016</p>
+                    </div>
+                </div>
+
+                <div class="bg-white/65 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300 border border-gray-200/50 overflow-hidden">
+                     <img src="https://placehold.co/300x450/fca5a5/ffffff?text=电影海报3" alt="电影海报3" class="w-full h-48 object-cover" onerror="this.onerror=null; this.parentElement.innerHTML = '<div class=\'fallback-img\'>图片加载失败</div>';">
+                    <div class="p-3">
+                        <h4 class="text-sm font-semibold text-gray-800 whitespace-nowrap overflow-hidden text-ellipsis mb-1">银翼杀手 2049</h4>
+                        <p class="text-xs text-gray-600">8.3 | 2017</p>
+                    </div>
+                </div>
+
+                <div class="bg-white/65 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300 border border-gray-200/50 overflow-hidden">
+                     <img src="https://placehold.co/300x450/c4b5fd/ffffff?text=电影海报4" alt="电影海报4" class="w-full h-48 object-cover" onerror="this.onerror=null; this.parentElement.innerHTML = '<div class=\'fallback-img\'>图片加载失败</div>';">
+                    <div class="p-3">
+                        <h4 class="text-sm font-semibold text-gray-800 whitespace-nowrap overflow-hidden text-ellipsis mb-1">黑客帝国</h4>
+                        <p class="text-xs text-gray-600">9.1 | 1999</p>
+                    </div>
+                </div>
+
+                 <div class="bg-white/65 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300 border border-gray-200/50 overflow-hidden">
+                     <img src="https://placehold.co/300x450/fdba74/ffffff?text=电影海报5" alt="电影海报5" class="w-full h-48 object-cover" onerror="this.onerror=null; this.parentElement.innerHTML = '<div class=\'fallback-img\'>图片加载失败</div>';">
+                    <div class="p-3">
+                        <h4 class="text-sm font-semibold text-gray-800 whitespace-nowrap overflow-hidden text-ellipsis mb-1">头号玩家</h4>
+                        <p class="text-xs text-gray-600">8.7 | 2018</p>
+                    </div>
+                </div>
+                 <div class="bg-white/65 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300 border border-gray-200/50 overflow-hidden">
+                     <img src="https://placehold.co/300x450/a5f3fc/ffffff?text=电影海报6" alt="电影海报6" class="w-full h-48 object-cover" onerror="this.onerror=null; this.parentElement.innerHTML = '<div class=\'fallback-img\'>图片加载失败</div>';">
+                    <div class="p-3">
+                        <h4 class="text-sm font-semibold text-gray-800 whitespace-nowrap overflow-hidden text-ellipsis mb-1">流浪地球</h4>
+                        <p class="text-xs text-gray-600">7.9 | 2019</p>
+                    </div>
+                </div>
+                 <div class="bg-white/65 rounded-xl shadow-lg hover:shadow-xl transform hover:scale-105 transition-all duration-300 border border-gray-200/50 overflow-hidden">
+                     <img src="https://placehold.co/300x450/fecaca/ffffff?text=电影海报7" alt="电影海报7" class="w-full h-48 object-cover" onerror="this.onerror=null; this.parentElement.innerHTML = '<div class=\'fallback-img\'>图片加载失败</div>';">
+                    <div class="p-3">
+                        <h4 class="text-sm font-semibold text-gray-800 whitespace-nowrap overflow-hidden text-ellipsis mb-1">攻壳机动队</h4>
+                        <p class="text-xs text-gray-600">8.9 | 1995</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-12 pt-8 border-t border-gray-300/50">
+                <h3 class="text-xl font-semibold text-gray-800 mb-4">操作按钮示例</h3>
+                <div class="flex flex-wrap gap-4 items-center">
+                    <button class="inline-flex items-center justify-center px-5 py-2.5 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 bg-blue-600 text-white hover:bg-blue-700 focus:ring-blue-500 shadow-md hover:shadow-lg transition-shadow rounded-lg">
+                        <span class="lucide mr-2 text-base">&#xe1f4;</span> 主要操作
+                    </button>
+                    <button class="inline-flex items-center justify-center px-5 py-2.5 text-sm font-medium transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 bg-gray-200/70 text-gray-700 hover:bg-gray-300/80 focus:ring-gray-400 backdrop-blur-sm border border-gray-300/50 rounded-lg">
+                        次要操作
+                    </button>
+                     <button class="p-3 rounded-full hover:bg-gray-200/50 transition-colors text-gray-600 hover:text-gray-800 border border-gray-300/50" aria-label="设置">
+                        <span class="lucide text-lg">&#xe045;</span> </button>
+                </div>
+            </div>
+
+        </div>
+    </main>
+
+    <footer class="text-center py-6 mt-8 text-sm text-gray-500/80 relative z-1">
+        &copy; 2025 TechFlix. 保留所有权利。
+    </footer>
+
+</body>
+</html>
