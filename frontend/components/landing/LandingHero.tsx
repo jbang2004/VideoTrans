@@ -22,7 +22,7 @@ export const LandingHero: React.FC<LandingHeroProps> = ({ onTryFree }) => {
           e.preventDefault();
           onTryFree();
         }}
-        className="mt-12 text-base md:text-lg px-6 py-3 rounded-md bg-white text-black font-semibold flex items-center space-x-1.5 hover:bg-gray-200 transition-colors"
+        className="mt-12 text-base md:text-lg px-8 py-3 rounded-full bg-blue-600/90 text-white font-medium flex items-center space-x-2 hover:bg-blue-700 transition-all duration-300 shadow-lg"
       >
         <span>免费试用</span>
         <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

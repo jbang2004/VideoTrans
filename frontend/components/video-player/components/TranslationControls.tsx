@@ -75,7 +75,7 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
             {selectedLanguage}
           </Button>
         </PopoverTrigger>
-        <PopoverContent className="w-28 bg-neutral-800/90 backdrop-blur-lg border-white/10 rounded-xl shadow-2xl p-1.5">
+        <PopoverContent className="w-28 bg-neutral-800/90 backdrop-blur-lg border-white/10 rounded-xl shadow-2xl p-1.5" side="top" sideOffset={5}>
           <div className="space-y-0.5">
             {LANGUAGES.map((language) => (
               <Button
@@ -83,7 +83,10 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
                 size="sm"
                 variant="ghost"
                 className="w-full justify-start text-xs px-2 py-1 h-7 text-white/80 hover:text-white hover:bg-white/10 rounded-lg"
-                onClick={() => handleLanguageSelect(language.label)}
+                onClick={(e) => {
+                  e.stopPropagation(); // 防止点击穿透
+                  handleLanguageSelect(language.label);
+                }}
               >
                 {language.label}
               </Button>

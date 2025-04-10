@@ -167,14 +167,15 @@ export function useParticleAnimation({
     
     // 创建材质
     const material = new THREE.PointsMaterial({
-      size: 15,
+      size: 25,
       map: texture,
       sizeAttenuation: true,
       vertexColors: false,
       blending: THREE.AdditiveBlending,
       transparent: true,
       opacity: 0.8,
-      depthWrite: false
+      depthWrite: false,
+      color: new THREE.Color(0x0047AB) // 更深的蓝色(钴蓝色)
     })
     
     // 创建粒子系统

@@ -42,79 +42,83 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onTryFree }) => {
 
 
  return (
-  <nav id="navbar" className="flex justify-between items-center p-4 md:p-6 transition-opacity duration-500 ease-out fade-in">
-   <div className="text-xl md:text-2xl font-semibold text-white">智译视界 ::</div> {/* 确保文字颜色为白色 */}
+  <nav id="navbar" className="flex justify-center items-center p-4 md:p-6 w-full transition-opacity duration-500 ease-out fade-in">
+   {/* 导航栏容器 - 使用灰黑色磨砂玻璃效果 */}
+   <div className="glass-effect flex items-center justify-between px-6 py-3 rounded-full w-full max-w-4xl">
+     {/* 左侧Logo */}
+     <div className="text-xl md:text-2xl font-semibold text-white">智译视界 ::</div>
 
-   {/* 使用 Tailwind 类替代 .nav-container */}
-   <div className="relative inline-flex items-center gap-1 bg-gray-100 rounded-lg p-1">
-    {/* 高亮背景块 */}
-    <div
-     className="absolute transition-all duration-300 ease-in-out rounded-md bg-gray-800 pointer-events-none" // 使用 Tailwind 颜色
-     style={{
-      left: `${highlightStyle.left}px`,
-      width: `${highlightStyle.width}px`,
-      height: `${highlightStyle.height}px`,
-      opacity: highlightStyle.opacity,
-      zIndex: 0 // 确保在文字下方
-     }}
-    />
+     {/* 右侧导航项 */}
+     <div className="relative inline-flex items-center gap-1 bg-black/30 backdrop-blur-sm rounded-lg p-1">
+      {/* 高亮背景块 - 使用蓝色 */}
+      <div
+       className="absolute transition-all duration-300 ease-in-out rounded-md bg-blue-600/90 pointer-events-none"
+       style={{
+        left: `${highlightStyle.left}px`,
+        width: `${highlightStyle.width}px`,
+        height: `${highlightStyle.height}px`,
+        opacity: highlightStyle.opacity,
+        zIndex: 0 // 确保在文字下方
+       }}
+      />
 
-    {/* 导航项 - 使用 Tailwind 类替代 .nav-button-inner */}
-    <a
-     ref={(el) => { navItemsRef.current[0] = el; }}
-     href="#"
-     className={cn(
-            "relative z-10 flex items-center px-3 py-1 rounded-md text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
-            activeIndex === 0 ? "text-white" : "text-gray-700 hover:bg-black/5" // 高亮时文字白色，否则灰色并有悬停效果
-          )}
-     onMouseEnter={() => setActiveIndex(0)}
-    >
-     项目案例
-    </a>
-    <a
-     ref={(el) => { navItemsRef.current[1] = el; }}
-     href="#"
-     className={cn(
-            "relative z-10 flex items-center px-3 py-1 rounded-md text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
-            activeIndex === 1 ? "text-white" : "text-gray-700 hover:bg-black/5"
-          )}
-     onMouseEnter={() => setActiveIndex(1)}
-    >
-     功能特性
-    </a>
-    <a
-     ref={(el) => { navItemsRef.current[2] = el; }}
-     href="#"
-     className={cn(
-            "relative z-10 flex items-center px-3 py-1 rounded-md text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
-            activeIndex === 2 ? "text-white" : "text-gray-700 hover:bg-black/5"
-          )}
-     onMouseEnter={() => setActiveIndex(2)}
-    >
-     关于我们
-    </a>
+      {/* 导航项 - 所有导航项使用相同的圆角和样式 */}
+      <a
+       ref={(el) => { navItemsRef.current[0] = el; }}
+       href="#"
+       className={cn(
+              "relative z-10 flex items-center px-3 py-1 rounded-md text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
+              activeIndex === 0 ? "text-white" : "text-gray-300 hover:bg-white/5" // 高亮时文字白色，否则亮灰色并有悬停效果
+            )}
+       onMouseEnter={() => setActiveIndex(0)}
+      >
+       项目案例
+      </a>
+      <a
+       ref={(el) => { navItemsRef.current[1] = el; }}
+       href="#"
+       className={cn(
+              "relative z-10 flex items-center px-3 py-1 rounded-md text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
+              activeIndex === 1 ? "text-white" : "text-gray-300 hover:bg-white/5"
+            )}
+       onMouseEnter={() => setActiveIndex(1)}
+      >
+       功能特性
+      </a>
+      <a
+       ref={(el) => { navItemsRef.current[2] = el; }}
+       href="#"
+       className={cn(
+              "relative z-10 flex items-center px-3 py-1 rounded-md text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
+              activeIndex === 2 ? "text-white" : "text-gray-300 hover:bg-white/5"
+            )}
+       onMouseEnter={() => setActiveIndex(2)}
+      >
+       关于我们
+      </a>
 
-    {/* 免费试用按钮 - 使用 Tailwind 类替代 .nav-button-primary-inner */}
-    <a
-     ref={(el) => { navItemsRef.current[3] = el; }}
-     href="#"
-     onClick={(e) => {
-      e.preventDefault();
-      onTryFree();
-     }}
-     id="free-trial-button-top"
-     className={cn(
-            "relative z-10 flex items-center px-4 py-1 rounded-md text-sm font-semibold whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out gap-1",
-             activeIndex === 3 ? "text-white" : "text-gray-700 hover:bg-black/5" // 同样应用高亮和悬停
-           )}
-     onMouseEnter={() => setActiveIndex(3)}
-    >
-     免费试用
-     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M7 7h10v10"/>
-      <path d="M7 17 17 7"/>
-     </svg>
-    </a>
+      {/* 免费试用按钮 - 使用相同圆角 */}
+      <a
+       ref={(el) => { navItemsRef.current[3] = el; }}
+       href="#"
+       onClick={(e) => {
+        e.preventDefault();
+        onTryFree();
+       }}
+       id="free-trial-button-top"
+       className={cn(
+              "relative z-10 flex items-center px-4 py-1 rounded-md text-sm font-medium whitespace-nowrap cursor-pointer transition-all duration-300 ease-in-out gap-1",
+               activeIndex === 3 ? "text-white" : "text-gray-300 hover:bg-white/5" // 用一致的样式，高亮效果由背景块提供
+             )}
+       onMouseEnter={() => setActiveIndex(3)}
+      >
+       免费试用
+       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M7 7h10v10"/>
+        <path d="M7 17 17 7"/>
+       </svg>
+      </a>
+     </div>
    </div>
   </nav>
  )

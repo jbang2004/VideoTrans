@@ -45,6 +45,10 @@ export default function HomePage() {
   const particleRef = useRef<ParticleBackgroundRef>(null) // Ref for direct interaction
   const fileInputRef = useRef<HTMLInputElement>(null)
   const stateChangeTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const uploadAreaRef = useRef<HTMLDivElement>(null)
+
+  // Drag and drop state
+  const [isDragging, setIsDragging] = useState(false)
 
   // 清除任何可能存在的超时
   useEffect(() => {
@@ -207,17 +211,58 @@ export default function HomePage() {
     }
   }
 
+  // Drag and drop handlers
+  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDragging(false);
+    
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      const file = files[0];
+      if (file.type.startsWith('video/')) {
+        setSelectedFile(file);
+        setShowUploadButton(false);
+        setShowPlayer(true);
+      } else {
+        alert("请选择一个有效的视频文件。");
+      }
+    }
+  };
+
+  const handleUploadAreaClick = () => {
+    setIgnoreBackgroundReset(true);
+    fileInputRef.current?.click();
+    
+    setTimeout(() => {
+      setIgnoreBackgroundReset(false);
+    }, 100);
+  };
+
   // --- Rendering Logic ---
 
   return (
     // The main container div handles background clicks for reset trigger
     <div
       id="page-container"
-      className="min-h-screen bg-black text-white overflow-hidden relative" // Added relative positioning
+      className="min-h-screen bg-white text-gray-900 overflow-hidden relative" // 修改为白色背景和深色文字
       onClick={handleBackgroundClick} // Attach click handler here
     >
       {/* 使用粒子背景组件 */}
-      <Suspense fallback={<div className="fixed inset-0 bg-black" />}>
+      <Suspense fallback={<div className="fixed inset-0 bg-white" />}>
         <ParticleBackground
           animationState={particleState}
           onAnimationStateChange={handleAnimationStateChange}
@@ -257,7 +302,7 @@ export default function HomePage() {
           }}
         />
 
-        {/* Upload Button - Animated */}
+        {/* 上传组件 - 使用与导航栏一致的磨砂玻璃效果，支持拖拽 */}
         {showUploadButton && (
           <div 
             className="fixed inset-0 flex justify-center items-center z-10 animate-fade-in"
@@ -268,18 +313,41 @@ export default function HomePage() {
               }
             }}
           >
-            <button
-              id="upload-button"
-              className="bg-white text-black font-semibold px-6 py-3 rounded-md flex items-center space-x-1.5 hover:bg-gray-200 transition-all duration-300 ease-in animate-pulse"
-              onClick={handleUploadClick}
+            <div 
+              ref={uploadAreaRef}
+              className={`w-full max-w-5xl aspect-video glass-effect transition-smooth
+                ${isDragging ? 'ring-4 ring-blue-600/70 shadow-xl' : ''}`}
+              onDragEnter={handleDragEnter}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
             >
-              <span>上传视频</span> {/* Upload Video */}
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="17 8 12 3 7 8"/>
-                <line x1="12" x2="12" y1="3" y2="15"/>
-              </svg>
-            </button>
+              <div 
+                className="upload-area cursor-pointer p-6 flex flex-col items-center justify-center h-full"
+                onClick={handleUploadAreaClick}
+              >
+                <div className={`text-center transition-transform duration-300 ${isDragging ? 'scale-110' : ''}`}>
+                  <div className="bg-blue-600/90 rounded-full px-8 py-4 inline-flex items-center gap-3 shadow-lg">
+                    <h3 className="text-xl font-medium text-white">
+                      {isDragging ? '松开以上传视频' : '上传视频文件'}
+                    </h3>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                      <polyline points="17 8 12 3 7 8"/>
+                      <line x1="12" x2="12" y1="3" y2="15"/>
+                    </svg>
+                  </div>
+                  <p className="text-white/70 text-base max-w-md mx-auto mt-6 mb-8">
+                    {isDragging 
+                      ? '准备导入您的视频...' 
+                      : '拖拽文件至此区域或点击上方按钮选择视频文件'}
+                  </p>
+                </div>
+                <div className="absolute bottom-4 left-0 right-0 text-center">
+                  <p className="text-xs text-white/50">支持MP4、MOV、AVI等格式 · 点击页面任意位置返回</p>
+                </div>
+              </div>
+            </div>
           </div>
         )}
 
@@ -288,8 +356,13 @@ export default function HomePage() {
           <div className="video-player-container fixed inset-0 z-20 flex justify-center items-center">
             {/* Added backdrop or background to prevent clicks passing through */}
             <div className="absolute inset-0 bg-black/50 backdrop-blur-sm"></div>
-            <div className="w-full max-w-5xl p-4 z-30"> {/* Ensure player content is above backdrop */}
-              <VideoPlayer initialFile={selectedFile} />
+            <div className="flex flex-col w-full max-w-5xl z-30">
+              {/* 视频区域 - 使用与上传组件相同的样式 */}
+              <div className="aspect-video glass-effect transition-smooth overflow-hidden rounded-2xl">
+                <div className="w-full h-full relative">
+                  <VideoPlayer initialFile={selectedFile} />
+                </div>
+              </div>
             </div>
           </div>
         )}
