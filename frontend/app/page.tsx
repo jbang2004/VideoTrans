@@ -315,7 +315,7 @@ export default function HomePage() {
           >
             <div 
               ref={uploadAreaRef}
-              className={`w-full max-w-5xl aspect-video glass-effect transition-smooth
+              className={`w-full max-w-5xl aspect-video glass-effect-white transition-smooth
                 ${isDragging ? 'ring-4 ring-blue-600/70 shadow-xl' : ''}`}
               onDragEnter={handleDragEnter}
               onDragOver={handleDragOver}
@@ -327,7 +327,7 @@ export default function HomePage() {
                 onClick={handleUploadAreaClick}
               >
                 <div className={`text-center transition-transform duration-300 ${isDragging ? 'scale-110' : ''}`}>
-                  <div className="bg-blue-600/90 rounded-full px-8 py-4 inline-flex items-center gap-3 shadow-lg">
+                  <div className="bg-blue-600 rounded-full px-8 py-4 inline-flex items-center gap-3 shadow-lg">
                     <h3 className="text-xl font-medium text-white">
                       {isDragging ? '松开以上传视频' : '上传视频文件'}
                     </h3>
@@ -337,14 +337,14 @@ export default function HomePage() {
                       <line x1="12" x2="12" y1="3" y2="15"/>
                     </svg>
                   </div>
-                  <p className="text-white/70 text-base max-w-md mx-auto mt-6 mb-8">
+                  <p className="text-gray-700 text-base max-w-md mx-auto mt-6 mb-8">
                     {isDragging 
                       ? '准备导入您的视频...' 
                       : '拖拽文件至此区域或点击上方按钮选择视频文件'}
                   </p>
                 </div>
                 <div className="absolute bottom-4 left-0 right-0 text-center">
-                  <p className="text-xs text-white/50">支持MP4、MOV、AVI等格式 · 点击页面任意位置返回</p>
+                  <p className="text-xs text-gray-500">支持MP4、MOV、AVI等格式 · 点击页面任意位置返回</p>
                 </div>
               </div>
             </div>
@@ -358,7 +358,7 @@ export default function HomePage() {
             <div className="absolute inset-0 bg-black/50 backdrop-blur-sm"></div>
             <div className="flex flex-col w-full max-w-5xl z-30">
               {/* 视频区域 - 使用与上传组件相同的样式 */}
-              <div className="aspect-video glass-effect transition-smooth overflow-hidden rounded-2xl">
+              <div className="aspect-video glass-effect-white transition-smooth overflow-hidden rounded-2xl">
                 <div className="w-full h-full relative">
                   <VideoPlayer initialFile={selectedFile} />
                 </div>

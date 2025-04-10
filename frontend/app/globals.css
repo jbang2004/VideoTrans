@@ -289,3 +289,14 @@ body {
 .transition-smooth {
   transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
+
+/* 添加磨砂浅灰色效果 */
+.glass-effect-white {
+  background-color: rgba(235, 235, 240, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(220, 220, 230, 0.4);
+  color: #1f2937;
+  border-radius: 1rem;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.15), 0 10px 10px -5px rgba(0, 0, 0, 0.08);
+}
