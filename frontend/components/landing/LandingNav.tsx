@@ -49,10 +49,10 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onTryFree }) => {
      <div className="text-xl md:text-2xl font-semibold text-gray-800">智译视界 ::</div>
 
      {/* 右侧导航项 */}
-     <div className="relative inline-flex items-center gap-1 bg-gray-200/40 backdrop-blur-sm rounded-lg p-1">
+     <div className="relative inline-flex items-center gap-1 border border-gray-300/50 backdrop-blur-sm rounded-full p-1">
       {/* 高亮背景块 - 使用蓝色 */}
       <div
-       className="absolute transition-all duration-300 ease-in-out rounded-md bg-blue-600 pointer-events-none"
+       className="absolute transition-all duration-300 ease-in-out rounded-full bg-blue-600 pointer-events-none"
        style={{
         left: `${highlightStyle.left}px`,
         width: `${highlightStyle.width}px`,
@@ -62,12 +62,12 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onTryFree }) => {
        }}
       />
 
-      {/* 导航项 - 所有导航项使用相同的圆角和样式 */}
+      {/* 导航项 - 所有导航项改为圆角药丸形状 */}
       <a
        ref={(el) => { navItemsRef.current[0] = el; }}
        href="#"
        className={cn(
-              "relative z-10 flex items-center px-3 py-1 rounded-md text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
+              "relative z-10 flex items-center px-3 py-1 rounded-full text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
               activeIndex === 0 ? "text-white" : "text-gray-600 hover:bg-gray-200/30" // 高亮时文字白色，否则深灰色并有悬停效果
             )}
        onMouseEnter={() => setActiveIndex(0)}
@@ -78,7 +78,7 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onTryFree }) => {
        ref={(el) => { navItemsRef.current[1] = el; }}
        href="#"
        className={cn(
-              "relative z-10 flex items-center px-3 py-1 rounded-md text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
+              "relative z-10 flex items-center px-3 py-1 rounded-full text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
               activeIndex === 1 ? "text-white" : "text-gray-600 hover:bg-gray-200/30"
             )}
        onMouseEnter={() => setActiveIndex(1)}
@@ -89,7 +89,7 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onTryFree }) => {
        ref={(el) => { navItemsRef.current[2] = el; }}
        href="#"
        className={cn(
-              "relative z-10 flex items-center px-3 py-1 rounded-md text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
+              "relative z-10 flex items-center px-3 py-1 rounded-full text-sm whitespace-nowrap cursor-pointer transition-colors duration-300 ease-in-out",
               activeIndex === 2 ? "text-white" : "text-gray-600 hover:bg-gray-200/30"
             )}
        onMouseEnter={() => setActiveIndex(2)}
@@ -97,7 +97,7 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onTryFree }) => {
        关于我们
       </a>
 
-      {/* 免费试用按钮 - 使用相同圆角 */}
+      {/* 免费试用按钮 - 使用药丸形状 */}
       <a
        ref={(el) => { navItemsRef.current[3] = el; }}
        href="#"
@@ -107,7 +107,7 @@ export const LandingNav: React.FC<LandingNavProps> = ({ onTryFree }) => {
        }}
        id="free-trial-button-top"
        className={cn(
-              "relative z-10 flex items-center px-4 py-1 rounded-md text-sm font-medium whitespace-nowrap cursor-pointer transition-all duration-300 ease-in-out gap-1",
+              "relative z-10 flex items-center px-4 py-1 rounded-full text-sm font-medium whitespace-nowrap cursor-pointer transition-all duration-300 ease-in-out gap-1",
                activeIndex === 3 ? "text-white" : "text-gray-600 hover:bg-gray-200/30" // 用一致的样式，高亮效果由背景块提供
              )}
        onMouseEnter={() => setActiveIndex(3)}
