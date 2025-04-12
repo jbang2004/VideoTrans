@@ -2,8 +2,8 @@ import logging
 from typing import Dict
 import asyncio
 
-import google.generativeai as genai
-from google.generativeai.types import GenerationConfig
+from google import genai
+from google.genai import types
 
 from json_repair import loads
 
@@ -15,9 +15,9 @@ class GeminiClient:
         if not api_key:
             raise ValueError("Gemini API key must be provided")
         # 配置 Gemini
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel('gemini-1.5-flash')  # 或 'gemini-2.0-flash-exp'
-        logger.info("Gemini 客户端初始化成功")
+        self.client = genai.Client(api_key=api_key)
+        self.model_name = 'gemini-2.0-flash'
+        logger.info("Gemini 客户端初始化成功 (使用 google-genai SDK)")
     
     async def translate(
         self,
@@ -28,10 +28,14 @@ class GeminiClient:
         直接调用 Gemini API，要求返回 JSON 格式的内容。
         """
         try:
+
             response = await asyncio.to_thread(
-                self.model.generate_content,
-                [system_prompt, user_prompt],
-                generation_config=GenerationConfig(temperature=0.8)
+                self.client.models.generate_content,
+                model=self.model_name,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0.8)
             )
             logger.info(f"Gemini 原文请求内容:\n{user_prompt}")
             result_text = response.text

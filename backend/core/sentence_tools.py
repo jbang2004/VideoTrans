@@ -2,10 +2,11 @@ import os
 import torch
 import torchaudio
 import numpy as np
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from dataclasses import dataclass, field
 from pathlib import Path
 from config import Config
+import math
 
 Token = int
 Timestamp = Tuple[float, float]
@@ -149,51 +150,149 @@ def merge_sentences(raw_sentences: List[Tuple[List[Token], List[Timestamp], int]
 
     return merged_sentences
 
-def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, config: Config) -> List[Sentence]:
-    target_samples = int(config.SPEAKER_AUDIO_TARGET_DURATION * sr)
-    speech = speech.unsqueeze(0) if speech.dim() == 1 else speech
+def _extract_segment(speech: torch.Tensor, start: int, end: int, target_samples: int, ignore_samples: int) -> Optional[torch.Tensor]:
+    """Helper to extract audio segment based on rules."""
+    # Ensure non-negative duration and valid indices
+    start = max(0, start)
+    end = max(start, end) # Duration can be 0
+    duration = end - start
+    if duration < 0: return None # Should not happen with max() guards, but safety first
 
-    speaker_segments: Dict[int, List[Tuple[int, int, int]]] = {}
+    # Try extracting after ignoring samples
+    adj_start = start + ignore_samples
+    adj_start = max(0, adj_start) # Ensure non-negative start
+    avail_len_adj = end - adj_start
+
+    if avail_len_adj >= target_samples:
+        adj_end = adj_start + target_samples
+        if adj_end <= speech.shape[-1]:
+            return speech[:, adj_start : adj_end]
+        else:
+             # If adjusted end goes beyond speech length, but start was valid
+             # take what's available from adjusted start
+             if adj_start < speech.shape[-1]:
+                  return speech[:, adj_start:]
+             else:
+                  return None # Cannot extract anything valid
+
+    # If ignoring makes it too short or invalid, try from the original start
+    elif duration > 0:
+        extract_len = min(target_samples, duration)
+        adj_end = start + extract_len
+        if adj_end <= speech.shape[-1]:
+            return speech[:, start : adj_end]
+        else:
+            # If end goes beyond speech length, take what's available
+            if start < speech.shape[-1]:
+                 return speech[:, start:]
+            else:
+                 return None # Cannot extract anything valid
+    else:
+        # Duration is 0 or negative (after guards, should be 0)
+        return None
+
+def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, config: Config) -> List[Sentence]:
+    """
+    Extracts audio for EACH sentence based on simplified priority:
+    1. Current sentence (if long enough after ignore).
+    2. Nearest neighbor (before/after, same speaker, long enough).
+    3. Absolute longest sentence (same speaker).
+    No files are saved.
+
+    Args:
+        sentences: List of Sentence objects.
+        speech: The full audio waveform tensor.
+        sr: Sample rate.
+        config: Configuration object.
+
+    Returns:
+        The list of sentences with the .audio field populated for each sentence.
+    """
+    target_samples = int(config.SPEAKER_AUDIO_TARGET_DURATION * sr)
+    ignore_samples = int(0.5 * sr)
+    speech = speech.unsqueeze(0) if speech.dim() == 1 else speech # Ensure batch dim
+
+    # --- Pre-computation ---
+    num_sentences = len(sentences)
+    sentence_details = []
+    long_enough_indices: Dict[int, List[int]] = {} # speaker_id -> list of indices of long-enough sentences
+    speaker_longest_idx: Dict[int, int] = {} # speaker_id -> index of the longest sentence
+
     for idx, s in enumerate(sentences):
         start_sample = int(s.start * sr / 1000)
         end_sample = int(s.end * sr / 1000)
-        speaker_segments.setdefault(s.speaker_id, []).append((start_sample, end_sample, idx))
+        speaker_id = s.speaker_id
 
-    speaker_audio_cache: Dict[int, torch.Tensor] = {}
+        # Ensure non-negative duration and valid indices
+        start_sample = max(0, start_sample)
+        end_sample = max(start_sample, end_sample) # duration can be 0
+        duration = end_sample - start_sample
 
-    for speaker_id, segments in speaker_segments.items():
-        segments.sort(key=lambda x: x[1] - x[0], reverse=True)
-        longest_start, longest_end, _ = segments[0]
+        adjusted_start = start_sample + ignore_samples
+        available_length_adjusted = end_sample - adjusted_start
+        is_long_enough = available_length_adjusted >= target_samples
 
-        ignore_samples = int(0.5 * sr)
-        adjusted_start = longest_start + ignore_samples
-        available_length_adjusted = longest_end - adjusted_start
+        details = {
+            "index": idx,
+            "speaker_id": speaker_id,
+            "start_sample": start_sample,
+            "end_sample": end_sample,
+            "duration": duration,
+            "is_long_enough": is_long_enough
+        }
+        sentence_details.append(details)
 
-        if available_length_adjusted > 0:
-            audio_length = min(target_samples, available_length_adjusted)
-            speaker_audio = speech[:, adjusted_start:adjusted_start + audio_length]
-        else:
-            available_length_original = longest_end - longest_start
-            audio_length = min(target_samples, available_length_original)
-            speaker_audio = speech[:, longest_start:longest_start + audio_length]
+        if is_long_enough:
+            long_enough_indices.setdefault(speaker_id, []).append(idx)
 
-        speaker_audio_cache[speaker_id] = speaker_audio
+        # Track longest sentence index per speaker
+        if speaker_id not in speaker_longest_idx or duration > sentence_details[speaker_longest_idx[speaker_id]]["duration"]:
+            speaker_longest_idx[speaker_id] = idx
 
-    for sentence in sentences:
-        sentence.audio = speaker_audio_cache.get(sentence.speaker_id)
+    # --- Assign Audio per Sentence ---
+    for i, s in enumerate(sentences):
+        details = sentence_details[i]
+        speaker_id = details["speaker_id"]
+        audio_segment = None
 
-    output_dir = Path(config.TASKS_DIR) / sentences[0].task_id / 'speakers'
-    output_dir.mkdir(parents=True, exist_ok=True)
+        # Rule 1: Try current sentence
+        if details["is_long_enough"]:
+            audio_segment = _extract_segment(speech, details["start_sample"], details["end_sample"], target_samples, ignore_samples)
 
-    for speaker_id, audio in speaker_audio_cache.items():
-        if audio is not None:
-            output_path = output_dir / f'speaker_{speaker_id}.wav'
-            torchaudio.save(str(output_path), audio, sr)
+        # Rule 2: Find nearest long-enough neighbor (same speaker)
+        if audio_segment is None and speaker_id in long_enough_indices:
+            possible_indices = long_enough_indices[speaker_id]
+            nearest_idx = -1
+            min_dist = float('inf')
 
-    # Explicitly delete potentially large cache and intermediate variable
-    del speaker_audio_cache
-    if 'speaker_audio' in locals(): del speaker_audio
-            
+            for idx in possible_indices:
+                if idx == i: continue # Skip self
+                dist = abs(idx - i)
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_idx = idx
+                # If distance is equal, prefer the one that comes earlier? Or later? Let's stick with the first closest found.
+
+            if nearest_idx != -1:
+                neighbor_details = sentence_details[nearest_idx]
+                audio_segment = _extract_segment(speech, neighbor_details["start_sample"], neighbor_details["end_sample"], target_samples, ignore_samples)
+
+        # Rule 3: Use the absolute longest sentence (same speaker)
+        if audio_segment is None and speaker_id in speaker_longest_idx:
+            longest_idx = speaker_longest_idx[speaker_id]
+            longest_details = sentence_details[longest_idx]
+            # Only extract from longest if it has positive duration
+            if longest_details["duration"] > 0:
+                audio_segment = _extract_segment(speech, longest_details["start_sample"], longest_details["end_sample"], target_samples, ignore_samples)
+
+        # Assign the determined audio segment (can be None if all fails)
+        s.audio = audio_segment
+
+    # Clean up precomputed dictionaries (optional)
+    del sentence_details
+    del long_enough_indices
+    del speaker_longest_idx
+
     return sentences
 
 def get_sentences(tokens: List[Token],

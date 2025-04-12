@@ -362,7 +362,6 @@ class VideoTransPipe:
                     # 生成模型输入，简化嵌套层级
                     async for modelin_sentences in self.model_in.modelin_maker.remote(
                         translated_sentences, 
-                        reuse_speaker=False, 
                         batch_size=self.config.MODELIN_BATCH_SIZE
                     ):
                         try:

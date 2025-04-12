@@ -30,7 +30,7 @@ class DurationAligner:
             if fast_indices:
                 fast_sentences = [aligned_sentences[idx] for idx in fast_indices]
                 async for simplified_batch in self.simplifier.options(stream=True).simplify_sentences.remote(fast_sentences, target_speed=max_speed):
-                    async for modelin_batch in self.model_in.options(stream=True).modelin_maker.remote(simplified_batch, reuse_speaker=True, batch_size=self.config.MODELIN_BATCH_SIZE):
+                    async for modelin_batch in self.model_in.options(stream=True).modelin_maker.remote(simplified_batch, batch_size=self.config.MODELIN_BATCH_SIZE):
                         refined_sentences = await self.tts_token_gen.generate_tts_tokens.remote(modelin_batch)
                 if refined_sentences:
                     result_sentences = aligned_sentences.copy()
