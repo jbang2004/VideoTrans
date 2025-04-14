@@ -14,10 +14,7 @@ import gc
 # 然后导入config
 from config import Config
 from core.translation.translator import Translator
-from core.model_in_maker import ModelInMaker
 from core.media_mixer import MediaMixer
-from core.tts_token_generator import TtsTokenGenerator
-from core.audio_generator import AudioGenerator
 from core.video_separator import VideoSeparator
 from core.asr_model import ASRModel
 from core.timeadjust.duration_aligner import DurationAligner
@@ -35,23 +32,6 @@ translator_handle = Translator.options(
     num_replicas=1,
     max_ongoing_requests=3,
     ray_actor_options={"num_cpus": 0.5}  # 翻译器CPU资源
-).bind()
-
-model_in_handle = ModelInMaker.options(
-    num_replicas=1,
-    max_ongoing_requests=3,
-    ray_actor_options={"num_cpus": 0.5, "num_gpus": 0.1}  # 模型输入CPU资源
-).bind()
-
-tts_token_gen_handle = TtsTokenGenerator.options(
-    num_replicas=1,
-    max_ongoing_requests=1,
-    ray_actor_options={"num_cpus":1, "num_gpus": 0.5}  # TTS标记生成器资源
-).bind()
-
-audio_gen_handle = AudioGenerator.options(
-    num_replicas=1,
-    ray_actor_options={"num_cpus": 0.5, "num_gpus": 0.1}  # 音频生成器资源
 ).bind()
 
 simplifier_handle = Translator.options(
@@ -79,7 +59,7 @@ asr_handle = ASRModel.options(
 duration_aligner_handle = DurationAligner.options(
     num_replicas=1,
     ray_actor_options={"num_cpus": 0.5}  # 时长对齐器GPU资源
-).bind(simplifier_handle, model_in_handle, tts_token_gen_handle)
+).bind(simplifier_handle)
 
 timestamp_adjuster_handle = TimestampAdjuster.options(
     num_replicas=1,
@@ -123,10 +103,7 @@ class VideoTransPipe:
                  video_separator_handle: DeploymentHandle = None,
                  asr_handle: DeploymentHandle = None,
                  translator_handle: DeploymentHandle = None,
-                 model_in_handle: DeploymentHandle = None,
-                 tts_token_gen_handle: DeploymentHandle = None,
                  duration_aligner_handle: DeploymentHandle = None,
-                 audio_gen_handle: DeploymentHandle = None,
                  timestamp_adjuster_handle: DeploymentHandle = None,
                  media_mixer_handle: DeploymentHandle = None,
                  hls_manager_handle: DeploymentHandle = None):
@@ -140,10 +117,7 @@ class VideoTransPipe:
         self.video_separator = video_separator_handle or video_separator_handle
         self.asr = asr_handle or asr_handle
         self.translator = translator_handle.options(stream=True) if translator_handle else translator_handle.options(stream=True)
-        self.model_in = model_in_handle.options(stream=True) if model_in_handle else model_in_handle.options(stream=True)
-        self.tts_token_gen = tts_token_gen_handle or tts_token_gen_handle
         self.duration_aligner = duration_aligner_handle or duration_aligner_handle
-        self.audio_gen = audio_gen_handle or audio_gen_handle
         self.timestamp_adjuster = timestamp_adjuster_handle or timestamp_adjuster_handle
         self.media_mixer = media_mixer_handle or media_mixer_handle
         
@@ -348,6 +322,7 @@ class VideoTransPipe:
             int: 处理的批次数量
         """
         batch_counter = 0
+        task_id = task_state.task_id
         
         try:
             # 使用异步生成器处理翻译
@@ -358,138 +333,71 @@ class VideoTransPipe:
             ):
                 try:
                     batch_counter += 1
+                    # 插入my_index_tts
+
+
+                    aligned_sentences = await self.duration_aligner.remote(translated_sentences, 1.1)
+
+                    sentences_with_timestamps = await self.timestamp_adjuster.remote(
+                        aligned_sentences, 
+                        self.config.TARGET_SR,
+                        task_state.current_time
+                    )
+                    output_path = await self.media_mixer.mix_media.remote(
+                        sentences_with_timestamps,
+                        task_state
+                    )
                     
-                    # 生成模型输入，简化嵌套层级
-                    async for modelin_sentences in self.model_in.modelin_maker.remote(
-                        translated_sentences, 
-                        batch_size=self.config.MODELIN_BATCH_SIZE
-                    ):
-                        try:
-                            # 处理音频生成和混合
-                            await self._generate_audio_and_mix(
-                                modelin_sentences,
-                                task_state,
-                                seg_idx
-                            )
-                                
-                            # 内存管理：每批次处理后强制释放无需保留的对象
-                            del modelin_sentences
-                            
-                            # 每处理5个批次强制GC
-                            if batch_counter % 5 == 0:
-                                self._clean_memory()
-                                await asyncio.sleep(0.1)  # 让事件循环运行
-                                
-                        except Exception as e:
-                            self.logger.error(f"处理模型输入批次失败: {str(e)}")
-                            # 继续尝试下一批
+                    # 更新处理状态
+                    task_state.merged_segments.append(output_path)
+                    task_state.batch_counter += 1
                     
-                    # 每个翻译批次处理完成后删除引用
+                    # 6. HLS处理
+                    hls_add_result = await self.hls_manager.add_segment.remote(
+                        task_id, 
+                        output_path, 
+                        task_state.batch_counter
+                    )
+                    
+                    if hls_add_result["status"] == "success":
+                        is_first_hls = not task_state.hls_ready
+                        task_state.hls_ready = True
+                        await self.state_manager.update_task_progress.remote(
+                            task_id, 
+                            batch_counter=task_state.batch_counter,
+                            hls_ready=task_state.hls_ready
+                        )
+                        if is_first_hls:
+                            self.logger.info(f"[{task_id}] HLS播放就绪")
+                    
+                    # 显式删除无需继续使用的大型变量
                     del translated_sentences
+                    del aligned_sentences
+                    del sentences_with_timestamps
                     
                 except Exception as e:
-                    self.logger.error(f"处理翻译批次失败: {str(e)}")
-                    # 继续尝试下一批
+                    self.logger.error(f"[{task_id}][分段{seg_idx}] 音频生成和混合失败: {str(e)}")
+                finally:
+                    # 确保清理GPU内存
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+
         except Exception as e:
             self.logger.error(f"翻译处理生成器错误: {str(e)}")
         finally:
             # 释放资源
             self._clean_memory()
             
-        return batch_counter
-
-    async def _generate_audio_and_mix(self, modelin_sentences: List, task_state: TaskState, seg_idx: int) -> None:
-        """
-        处理单个句子批次的音频生成和混合
-        
-        Args:
-            modelin_sentences: 带有模型输入的句子列表
-            task_state: 当前任务状态
-            seg_idx: 当前处理的分段索引
-        """
-        task_id = task_state.task_id
-        
-        try:
-            # 1. 生成TTS Token
-            tts_token_sentences = await self.tts_token_gen.generate_tts_tokens.remote(modelin_sentences)
+        return batch_counter            
             
-            # 2. 时长对齐
-            aligned_sentences = await self.duration_aligner.remote(tts_token_sentences, 1.1)
-            
-            # 3. 音频生成
-            audio_gen_sentences = await self.audio_gen.generate_audio.remote(aligned_sentences)
-            
-            # 4. 时间戳调整
-            sentences_with_timestamps = await self.timestamp_adjuster.remote(
-                audio_gen_sentences, 
-                self.config.TARGET_SR,
-                task_state.current_time
-            )
-            
-            if not sentences_with_timestamps:
-                self.logger.warning(f"[{task_id}][分段{seg_idx}] 时间戳调整返回空结果")
-                return
-            
-            # 更新当前时间
-            last_sentence = sentences_with_timestamps[-1]
-            task_state.current_time = last_sentence.adjusted_start + last_sentence.adjusted_duration
-            
-            # 5. 媒体混合
-            output_path = await self.media_mixer.mix_media.remote(
-                sentences_with_timestamps,
-                task_state
-            )
-            
-            if not output_path:
-                self.logger.warning(f"[{task_id}][分段{seg_idx}] 媒体混合未返回有效路径")
-                return
-            
-            # 更新处理状态
-            task_state.merged_segments.append(output_path)
-            task_state.batch_counter += 1
-            
-            # 6. HLS处理
-            hls_add_result = await self.hls_manager.add_segment.remote(
-                task_id, 
-                output_path, 
-                task_state.batch_counter
-            )
-            
-            if hls_add_result["status"] == "success":
-                is_first_hls = not task_state.hls_ready
-                task_state.hls_ready = True
-                await self.state_manager.update_task_progress.remote(
-                    task_id, 
-                    batch_counter=task_state.batch_counter,
-                    hls_ready=task_state.hls_ready
-                )
-                if is_first_hls:
-                    self.logger.info(f"[{task_id}] HLS播放就绪")
-            
-            # 显式删除无需继续使用的大型变量
-            del tts_token_sentences
-            del aligned_sentences
-            del audio_gen_sentences
-            del sentences_with_timestamps
-            
-        except Exception as e:
-            self.logger.error(f"[{task_id}][分段{seg_idx}] 音频生成和混合失败: {str(e)}")
-        finally:
-            # 确保清理GPU内存
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
 # 创建应用部署
 app = VideoTransPipe.bind(
     None,  # state_manager_handle在VideoTransPipe初始化时会自动获取
     video_segmenter_handle,
     video_separator_handle,
     asr_handle,
-    translator_handle, 
-    model_in_handle, 
-    tts_token_gen_handle, 
+    translator_handle,
     duration_aligner_handle,
-    audio_gen_handle, 
     timestamp_adjuster_handle,
     media_mixer_handle,
     None   # hls_manager_handle在VideoTransPipe初始化时会自动获取

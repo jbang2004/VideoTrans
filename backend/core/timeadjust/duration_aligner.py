@@ -12,10 +12,9 @@ logger = logging.getLogger("duration_aligner")
     ray_actor_options={"num_cpus": 0.25}
 )
 class DurationAligner:
-    def __init__(self, simplifier_handle: DeploymentHandle, model_in_handle: DeploymentHandle, tts_token_gen_handle: DeploymentHandle):
+    def __init__(self, simplifier_handle: DeploymentHandle, index_tts_handle: DeploymentHandle):
         self.simplifier = simplifier_handle
-        self.model_in = model_in_handle
-        self.tts_token_gen = tts_token_gen_handle
+        self.index_tts = index_tts_handle
         self.config = Config()
     async def __call__(self, sentences: List, max_speed: float = 1.1) -> List:
         if not sentences:
@@ -30,19 +29,18 @@ class DurationAligner:
             if fast_indices:
                 fast_sentences = [aligned_sentences[idx] for idx in fast_indices]
                 async for simplified_batch in self.simplifier.options(stream=True).simplify_sentences.remote(fast_sentences, target_speed=max_speed):
-                    async for modelin_batch in self.model_in.options(stream=True).modelin_maker.remote(simplified_batch, batch_size=self.config.MODELIN_BATCH_SIZE):
-                        refined_sentences = await self.tts_token_gen.generate_tts_tokens.remote(modelin_batch)
-                if refined_sentences:
-                    result_sentences = aligned_sentences.copy()
-                    for i, orig_idx in enumerate(fast_indices):
-                        if i < len(refined_sentences):
-                            result_sentences[orig_idx] = refined_sentences[i]
-                    logger.info("精简完成，进行最终对齐...")
-                    # 直接使用asyncio.to_thread包装同步函数
-                    return await asyncio.to_thread(_align_batch, result_sentences)
-                else:
-                    logger.warning("精简过程未能生成有效句子，保持原句子")
-                    return aligned_sentences
+                    async for refined_sentences in self.index_tts.options(stream=True).audio_maker.remote(simplified_batch, batch_size=self.config.TTS_BATCH_SIZE):
+                        if refined_sentences:
+                            result_sentences = aligned_sentences.copy()
+                            for i, orig_idx in enumerate(fast_indices):
+                                if i < len(refined_sentences):
+                                    result_sentences[orig_idx] = refined_sentences[i]
+                            logger.info("精简完成，进行最终对齐...")
+                            # 直接使用asyncio.to_thread包装同步函数
+                            return await asyncio.to_thread(_align_batch, result_sentences)
+                        else:
+                            logger.warning("精简过程未能生成有效句子，保持原句子")
+                            return aligned_sentences
             else:
                 logger.info(f"时长对齐处理完成，共处理 {len(aligned_sentences)} 个句子")
                 return aligned_sentences
