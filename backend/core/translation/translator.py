@@ -148,6 +148,13 @@ class Translator:
             self.logger.warning("收到空的句子列表")
             return
 
+        # 确保 batch_size 是整数
+        try:
+            batch_size = int(batch_size)
+        except (ValueError, TypeError):
+            self.logger.warning(f"无效的 batch_size 类型 {type(batch_size)}: {batch_size}，将使用默认值 100")
+            batch_size = 100 # 使用默认值
+
         config = BatchConfig(initial_size=batch_size)
 
         async def process_batch(batch: List) -> Optional[List]:
@@ -208,6 +215,13 @@ class Translator:
             return
 
         self.logger.debug(f"处理 {len(sentences)} 个句子")
+
+        # 确保 batch_size 是整数
+        try:
+            batch_size = int(batch_size)
+        except (ValueError, TypeError):
+            self.logger.warning(f"无效的 batch_size 类型 {type(batch_size)}: {batch_size}，将使用默认值 4")
+            batch_size = 4 # 使用默认值
 
         config = BatchConfig(initial_size=batch_size, min_size=1, required_successes=2)
 
@@ -314,86 +328,3 @@ class Translator:
         except Exception as e:
             self.logger.error(f"简化句子生成器发生错误: {e}")
             raise
-
-    async def translate_sentences_simple(self, sentences, target_language, batch_size=5):
-        """
-        一次性翻译多个句子，返回翻译结果的列表
-        避免使用流式处理导致的内存管理问题
-        
-        Args:
-            sentences: 句子列表
-            target_language: 目标语言代码
-            batch_size: 批处理大小
-            
-        Returns:
-            翻译完成的句子列表
-        """
-        if not sentences:
-            self.logger.warning("收到空的句子列表，跳过翻译")
-            return []
-            
-        self.logger.info(f"一次性翻译 {len(sentences)} 个句子，目标语言: {target_language}")
-        
-        # 处理小批次，避免一次处理太多句子
-        translated_sentences = []
-        batch_count = (len(sentences) + batch_size - 1) // batch_size
-        
-        try:
-            for i in range(batch_count):
-                start_idx = i * batch_size
-                end_idx = min(start_idx + batch_size, len(sentences))
-                batch = sentences[start_idx:end_idx]
-                
-                texts = None
-                translations = None
-                
-                try:
-                    # 翻译一批句子
-                    texts = {str(j): s.raw_text for j, s in enumerate(batch)}
-                    
-                    # 使用翻译方法翻译
-                    translated = await self.translate(texts, target_language)
-                    
-                    # 提取翻译结果
-                    if "output" in translated:
-                        translations = translated["output"]
-                        
-                        # 更新翻译结果
-                        for j, s in enumerate(batch):
-                            s.trans_text = translations.get(str(j), s.raw_text)
-                    else:
-                        self.logger.error(f"翻译结果缺少输出字段，批次 {i+1}/{batch_count}")
-                        # 回退使用原始文本
-                        for s in batch:
-                            s.trans_text = s.raw_text
-                        
-                    # 添加到结果
-                    translated_sentences.extend(batch)
-                    
-                    # 输出进度日志
-                    self.logger.debug(f"已翻译 {end_idx}/{len(sentences)} 个句子")
-                    
-                except Exception as e:
-                    self.logger.error(f"批次翻译失败: {str(e)}, 批次 {i+1}/{batch_count}")
-                    # 对于失败的批次，使用原始文本作为翻译
-                    for s in batch:
-                        s.trans_text = s.raw_text
-                    translated_sentences.extend(batch)
-                finally:
-                    # 释放大型临时变量
-                    if texts is not None: del texts
-                    if translations is not None: del translations
-                    # 让Python有更多机会进行垃圾回收
-                    if i % 5 == 0:  # 每5个批次
-                        await asyncio.sleep(0.1)  # 允许事件循环运行并有机会进行垃圾回收
-            
-            self.logger.info(f"翻译完成，共 {len(translated_sentences)} 个句子")
-            return translated_sentences
-            
-        except Exception as e:
-            self.logger.error(f"翻译句子失败: {str(e)}", exc_info=True)
-            # 确保即使出错也返回原始句子（使用原文作为翻译）
-            for s in sentences:
-                if not hasattr(s, 'trans_text') or s.trans_text is None:
-                    s.trans_text = s.raw_text
-            return sentences

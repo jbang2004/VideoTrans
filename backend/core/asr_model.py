@@ -48,13 +48,36 @@ class ASRModel:
             self.logger.error(f"ASR模型加载失败: {str(e)}")
             raise
     
-    async def generate(self, input, **kwargs):
-        """执行模型生成方法 - 已有良好的内存管理"""
+    async def generate(self, input, task_id=None, segment_index=None, task_paths=None, **kwargs):
+        """
+        执行ASR模型生成方法
+        
+        Args:
+            input: 输入音频文件路径
+            task_id: 任务ID
+            segment_index: 分段索引
+            task_paths: 任务路径对象
+            **kwargs: 其他参数
+            
+        Returns:
+            识别结果，句子列表
+        """
         result = None
         try:
             self.logger.info(f"开始ASR识别音频: {input if isinstance(input, str) else '(已加载音频)'}")
-            # 使用asyncio.to_thread包装同步调用
-            result = await asyncio.to_thread(self.model.generate, input, **kwargs)
+            
+            # 创建一个包含所有参数的字典，但将显式参数放在前面
+            call_kwargs = {
+                'task_id': task_id,
+                'segment_index': segment_index,
+                'task_paths': task_paths,
+                **kwargs  # 将原始kwargs合并进来
+            }
+                
+            # 使用asyncio.to_thread包装同步调用，传递合并后的参数字典
+            # 注意：self.model.generate 预期接收一个字典作为其 kwargs
+            # 如果 generate 需要 **kwargs，这种方式是兼容的
+            result = await asyncio.to_thread(self.model.generate, input, **call_kwargs)
             self.logger.info(f"ASR识别完成，获得 {len(result)} 个句子")
             return result
         except Exception as e:

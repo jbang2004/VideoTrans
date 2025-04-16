@@ -30,7 +30,7 @@ class SenseAutoModel(BaseAutoModel):
                 self.logger.error("spk_mode 应该是 'default', 'vad_segment' 或 'punc_segment' 之一。")
             self.spk_mode = spk_mode
 
-    def inference_with_vad(self, input, input_len=None, **cfg):
+    def inference_with_vad(self, input, input_len=None, task_id=None, segment_index=None, task_paths=None, **cfg):
         kwargs = self.kwargs
         self.tokenizer = kwargs.get("tokenizer")
         deep_update(self.vad_kwargs, cfg)
@@ -124,6 +124,7 @@ class SenseAutoModel(BaseAutoModel):
                             self.logger.error(f"speaker diarization 依赖于时间戳对于 utt: {key}")
                             sentence_list = []
                         else:
+                            # 传递显式参数给get_sentences
                             sentence_list = get_sentences(
                                 tokens=result["token"],
                                 timestamps=result["timestamp"],
@@ -131,7 +132,10 @@ class SenseAutoModel(BaseAutoModel):
                                 speech=speech,
                                 sd_time_list=sv_output,
                                 sample_rate=fs,
-                                config=self.config
+                                config=self.config,
+                                task_id=task_id,
+                                segment_index=segment_index,
+                                task_paths=task_paths
                             )
                             results_ret_list = sentence_list
                     else:

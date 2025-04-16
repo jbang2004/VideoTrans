@@ -24,6 +24,7 @@ class TaskPaths:
 
         self.media_dir = self.processing_dir / "media"
         self.processing_segments_dir = self.processing_dir / "segments"
+        self.audio_prompts_dir = self.processing_dir / "audio_prompts"
 
     def create_directories(self):
         """同步创建目录，可以被asyncio.to_thread包装成异步调用"""
@@ -34,7 +35,8 @@ class TaskPaths:
             self.output_dir,
             self.segments_dir,
             self.media_dir,
-            self.processing_segments_dir
+            self.processing_segments_dir,
+            self.audio_prompts_dir
         ]
         for d in dirs:
             d.mkdir(parents=True, exist_ok=True)

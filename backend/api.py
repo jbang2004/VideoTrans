@@ -51,11 +51,17 @@ templates = Jinja2Templates(directory=str(current_dir / "templates"))
 class VideoTransAPI:
     """视频翻译API服务"""
     def __init__(self):
-        """初始化API服务，直接通过名称获取StateManager和PipelineEngine的handles"""
-        self.state_manager = serve.get_deployment_handle("StateManager", app_name="StateManager")
-        self.pipeline = serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
-        self.logger = logger
-        self.logger.info("VideoTransAPI初始化完成")
+        """初始化API服务，从 PipelineEngine 应用获取 handles"""
+        try:
+            # 所有核心服务现在都在 PipelineEngine 应用下
+            self.state_manager = serve.get_deployment_handle("StateManager", app_name="PipelineEngine")
+            self.pipeline = serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
+            self.logger = logger
+            self.logger.info("VideoTransAPI 初始化成功，已连接到 PipelineEngine 中的服务")
+        except Exception as e:
+            self.logger.error(f"VideoTransAPI 初始化失败，无法连接到 PipelineEngine 中的服务: {e}", exc_info=True)
+            # 在初始化失败时抛出异常，阻止服务启动
+            raise RuntimeError(f"VideoTransAPI 无法连接到必要的服务: {e}")
 
     @app.get("/")
     async def index(self, request: Request):
@@ -227,20 +233,22 @@ def setup_server():
     if not ray.is_initialized():
         ray.init(address="auto", namespace="videotrans", ignore_reinit_error=True)
         logger.info("已连接到Ray集群")
-    
-    # 检查核心服务是否已部署
+
+    # 检查核心服务 PipelineEngine 是否已部署
     try:
-        state_manager = serve.get_deployment_handle("StateManager", app_name="StateManager")
-        pipeline = serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
-        logger.info("成功连接到已部署的核心服务")
+        # 只需要检查 PipelineEngine 应用是否存在即可
+        serve.get_app_handle("PipelineEngine")
+        logger.info("成功连接到已部署的 PipelineEngine 应用")
     except Exception as e:
-        logger.error(f"连接核心服务失败，请确保pipeline_scheduler已经启动: {e}")
-        raise
-    
-    # 直接部署API服务，此时Ray和Serve肯定都在运行
+        logger.error(f"连接 PipelineEngine 应用失败，请确保 pipeline_scheduler 已经成功启动并部署了 PipelineEngine: {e}")
+        # 如果核心管道不存在，API无法工作，直接退出
+        raise RuntimeError(f"无法连接到核心 PipelineEngine 应用: {e}")
+
+    # 直接部署API服务
+    # 注意：这里的 VideoTransAPI 初始化会尝试获取 PipelineEngine 内的句柄
     video_api = VideoTransAPI.bind()
     serve.run(video_api, name="VideoAPI", route_prefix="/", blocking=True)
-    
+
     logger.info("API服务部署完成: VideoAPI")
 
 if __name__ == "__main__":

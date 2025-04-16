@@ -2,11 +2,12 @@ import os
 import torch
 import torchaudio
 import numpy as np
-from typing import List, Tuple, Dict, Optional
-from dataclasses import dataclass, field
+from typing import List, Tuple, Dict, Optional, Union
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from config import Config
 import math
+import json
 
 Token = int
 Timestamp = Tuple[float, float]
@@ -20,7 +21,7 @@ class Sentence:
     speaker_id: int
     trans_text: str = field(default="")
     sentence_id: int = field(default=-1)
-    audio: torch.Tensor = field(default=None)
+    audio: str = field(default="")  # 音频文件路径
     target_duration: float = field(default=None)
     duration: float = field(default=0.0)
     diff: float = field(default=0.0)
@@ -199,26 +200,35 @@ def _extract_segment(speech: torch.Tensor, start: int, end: int, target_samples:
     else:
         return None
 
-def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, config: Config) -> List[Sentence]:
+def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, config: Config, 
+                 task_id: str = None, segment_index: int = None, task_paths = None) -> List[Sentence]:
     """
-    Extracts audio for EACH sentence based ONLY on the current sentence's audio.
-    No fallback to neighbors or longest sentence.
-    No files are saved.
+    提取每个句子的音频并保存为文件，设置句子的audio属性为文件路径。
 
     Args:
-        sentences: List of Sentence objects.
-        speech: The full audio waveform tensor.
-        sr: Sample rate.
-        config: Configuration object.
+        sentences: 句子对象列表
+        speech: 完整音频波形张量
+        sr: 采样率
+        config: 配置对象
+        task_id: 任务ID (可选)
+        segment_index: 分段索引 (可选)
+        task_paths: 任务路径对象 (可选)
 
     Returns:
-        The list of sentences with the .audio field populated (or None if extraction failed).
+        更新了audio字段(文件路径)的句子列表
     """
     target_samples = int(config.SPEAKER_AUDIO_TARGET_DURATION * sr)
     ignore_samples = int(0.5 * sr)  # Consider moving 0.5 to config if variable
     speech = speech.unsqueeze(0) if speech.dim() == 1 else speech # Ensure batch dim
 
-    for s in sentences:
+    # 获取音频保存目录 (如果 task_paths 有效且包含该属性)
+    audio_prompts_dir = None
+    if task_paths is not None and hasattr(task_paths, 'audio_prompts_dir'):
+        audio_prompts_dir = Path(task_paths.audio_prompts_dir)
+        # 确保目录存在 (TaskPaths.create_directories 应该已经创建)
+        audio_prompts_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, s in enumerate(sentences):
         start_sample = int(s.start * sr / 1000)
         end_sample = int(s.end * sr / 1000)
 
@@ -226,13 +236,99 @@ def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, conf
         start_sample = max(0, start_sample)
         end_sample = max(start_sample, end_sample) # duration can be 0
 
-        # Attempt to extract audio only from the current sentence
+        # Attempt to extract audio
         audio_segment = _extract_segment(speech, start_sample, end_sample, target_samples, ignore_samples)
 
-        # Assign the determined audio segment (can be None if extraction failed)
-        s.audio = audio_segment
+        # 如果有任务ID，设置到句子对象
+        if task_id:
+            s.task_id = task_id
+            
+        # 如果有segment_index，设置到句子对象
+        if segment_index is not None:
+            s.segment_index = segment_index
+            
+        # 只有当能够提取音频和有保存目录时才保存
+        if audio_segment is not None and audio_prompts_dir is not None:
+            # 使用任务ID、分段索引和句子索引创建唯一文件名
+            seg_part = f"seg{segment_index}" if segment_index is not None else "seg_unknown"
+            audio_filename = f"{task_id}_{seg_part}_s{i}.wav"
+            audio_path = audio_prompts_dir / audio_filename
+            
+            try:
+                # 保存音频文件
+                torchaudio.save(
+                    str(audio_path),
+                    audio_segment,
+                    sr
+                )
+                # 设置音频路径到句子对象
+                s.audio = str(audio_path)
+            except Exception as e:
+                print(f"保存音频文件时出错: {e}")
+                s.audio = ""  # 保存失败则设置为空字符串
+        else:
+            s.audio = ""  # 无法提取音频或无保存目录时设置为空字符串
 
     return sentences
+
+def export_sentences_to_txt(sentences: List[Sentence], output_path: Union[str, Path]):
+    """
+    将句子列表导出为易于阅读的文本文件。
+
+    Args:
+        sentences: Sentence对象的列表。
+        output_path: 输出文本文件的路径。
+    """
+    try:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True) # 确保目录存在
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write("--- Sentence Export ---\n\n")
+            for i, s in enumerate(sentences):
+                # 为每个句子生成唯一的ID，如果sentence_id未设置
+                display_id = s.sentence_id if s.sentence_id != -1 else f"auto_{i+1}"
+                f.write(f"--- Sentence {display_id} (Task: {s.task_id}, Seg: {s.segment_index}) ---\n")
+                f.write(f"  Original Time : {s.start/1000:.3f}s - {s.end/1000:.3f}s\n")
+                f.write(f"  Adjusted Time : {s.adjusted_start/1000:.3f}s - {(s.adjusted_start + s.adjusted_duration)/1000:.3f}s (Duration: {s.adjusted_duration/1000:.3f}s)\n")
+                f.write(f"  TTS Duration  : {s.duration/1000:.3f}s (Speed: {s.speed:.2f}x)\n")
+                f.write(f"  Speaker ID    : {s.speaker_id}\n")
+                f.write(f"  Raw Text      : {s.raw_text}\n")
+                f.write(f"  Translated    : {s.trans_text}\n")
+                f.write(f"  Audio Path    : {s.audio}\n")
+                f.write("\n") # 每个句子后加空行
+            f.write("--- End of Export ---\n")
+        print(f"句子已成功导出到: {output_path}")
+    except Exception as e:
+        print(f"导出句子到文本文件失败: {e}")
+
+def export_sentences_to_json(sentences: List[Sentence], output_path: Union[str, Path]):
+    """
+    将句子列表导出为JSON文件。
+
+    Args:
+        sentences: Sentence对象的列表。
+        output_path: 输出JSON文件的路径。
+    """
+    try:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True) # 确保目录存在
+
+        # 将Sentence对象列表转换为字典列表，忽略ndarray
+        sentences_dict_list = []
+        for s in sentences:
+            s_dict = asdict(s)
+            # 移除不可序列化的 generated_audio (ndarray)
+            if 'generated_audio' in s_dict:
+                del s_dict['generated_audio']
+            sentences_dict_list.append(s_dict)
+
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(sentences_dict_list, f, ensure_ascii=False, indent=4)
+
+        print(f"句子已成功导出为JSON到: {output_path}")
+    except Exception as e:
+        print(f"导出句子到JSON文件失败: {e}")
 
 def get_sentences(tokens: List[Token],
                   timestamps: List[Timestamp],
@@ -240,7 +336,28 @@ def get_sentences(tokens: List[Token],
                   tokenizer,
                   sd_time_list: List[SpeakerSegment],
                   sample_rate: int = 16000,
-                  config: Config = None) -> List[Sentence]:
+                  config: Config = None,
+                  task_id: str = None,
+                  segment_index: int = None,
+                  task_paths = None) -> List[Sentence]:
+    """
+    获取句子列表，包括音频提取和可选的文件保存，并在最后导出句子信息。
+
+    Args:
+        tokens: 文本标记
+        timestamps: 时间戳
+        speech: 语音音频
+        tokenizer: 分词器
+        sd_time_list: 说话人分段列表
+        sample_rate: 采样率
+        config: 配置
+        task_id: 任务ID (可选)
+        segment_index: 分段索引 (可选)
+        task_paths: 任务路径对象 (可选)
+
+    Returns:
+        句子列表
+    """
     if config is None:
         config = Config()
 
@@ -248,6 +365,26 @@ def get_sentences(tokens: List[Token],
 
     raw_sentences = tokens_timestamp_sentence(tokens, timestamps, sd_time_list, tokenizer, config)
     merged_sentences = merge_sentences(raw_sentences, tokenizer, input_duration, config)
-    sentences_with_audio = extract_audio(merged_sentences, speech, sample_rate, config)
+    sentences_with_audio = extract_audio(merged_sentences, speech, sample_rate, config, 
+                                         task_id, segment_index, task_paths)
+
+    # 在函数末尾，如果提供了任务信息，则导出句子到TXT文件
+    if sentences_with_audio and task_id and task_paths and hasattr(task_paths, 'processing_dir'):
+        try:
+            # 定义导出文件名
+            seg_part = f"seg{segment_index}" if segment_index is not None else "seg_all" # 如果没有分段索引，用'all'
+            export_filename = f"sentences_{task_id}_{seg_part}.txt"
+            export_path = Path(task_paths.processing_dir) / export_filename
+
+            # 调用导出函数 (直接调用，因为get_sentences在asyncio.to_thread中运行)
+            export_sentences_to_txt(sentences_with_audio, export_path)
+
+            # 可选：也可以同时导出JSON
+            # json_export_filename = f"sentences_{task_id}_{seg_part}.json"
+            # json_export_path = Path(task_paths.processing_dir) / json_export_filename
+            # export_sentences_to_json(sentences_with_audio, json_export_path)
+
+        except Exception as export_e:
+            print(f"在get_sentences中导出句子时出错: {export_e}")
 
     return sentences_with_audio
