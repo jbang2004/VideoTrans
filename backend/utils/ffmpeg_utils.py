@@ -7,28 +7,28 @@ import subprocess
 from pathlib import Path
 from typing import List, Tuple, Optional, Union
 import asyncio
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
-async def run_command(cmd: List[str]) -> Tuple[bytes, bytes]:
+async def run_command(cmd: List[str], input_bytes: Optional[bytes] = None) -> Tuple[bytes, bytes]:
     """
-    异步运行 ffmpeg 命令，返回 (stdout, stderr)。
+    异步运行 ffmpeg 命令，返回 (stdout, stderr)，支持输入管道数据 input_bytes。
     若命令返回码非 0，则抛出 RuntimeError。
     """
     logger.debug(f"[FFmpegUtils] Running command: {' '.join(cmd)}")
     process = await asyncio.create_subprocess_exec(
         *cmd,
+        stdin=asyncio.subprocess.PIPE if input_bytes is not None else None,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
-    stdout, stderr = await process.communicate()
-
+    stdout, stderr = await process.communicate(input=input_bytes)
     if process.returncode != 0:
         error_msg = stderr.decode() or "Unknown error"
         logger.error(f"[FFmpegUtils] Command failed with error: {error_msg}")
         raise RuntimeError(f"FFmpeg command failed: {error_msg}")
-
     return stdout, stderr
 
 async def extract_audio(
@@ -248,3 +248,16 @@ async def concat_videos(input_list: str, output_path: str) -> Union[Path, None]:
     except Exception as e:
         logger.error(f"[FFmpegUtils] 合并视频失败: {e}")
         return None
+
+async def change_speed_ffmpeg(audio: np.ndarray, speed: float, sample_rate: int = 24000) -> np.ndarray:
+    """使用 FFmpeg 的 atempo 滤镜对 PCM float32 数组进行变速，保持音高不变（异步）。"""
+    if speed <= 0:
+        raise ValueError(f"Invalid speed factor: {speed}")
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "f32le", "-ar", str(sample_rate), "-ac", "1", "-i", "pipe:0",
+        "-filter:a", f"atempo={speed}",
+        "-f", "f32le", "pipe:1"
+    ]
+    stdout, _ = await run_command(cmd, input_bytes=audio.tobytes())
+    return np.frombuffer(stdout, dtype=np.float32)

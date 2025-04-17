@@ -43,6 +43,7 @@ class MyIndexTTSDeployment:
         self.tts_model = MyIndexTTS(cfg_path=CFG_PATH, model_dir=MODEL_DIR, is_fp16=True, device=self.device)
         self.sampling_rate = 24000  # 采样率固定为24kHz
         self.yield_batch_size = getattr(self.config, 'TTS_BATCH_SIZE', 8)
+        self._tts_lock = asyncio.Lock()  # 添加类级别的锁
 
     def _clean_memory(self):
         gc.collect()
@@ -52,14 +53,16 @@ class MyIndexTTSDeployment:
     def _generate_single_sentence_audio(self, sentence: Sentence) -> Optional[np.ndarray]:
         try:
             text = sentence.trans_text
-            logger.info(f"Origin text: {text}")
+            # 简化日志，只打印清理后的文本
+            logger.info(f"TTS处理文本 (ID:{sentence.sentence_id}): {text}")
             
             # 检查音频文件路径
             if sentence.audio and os.path.exists(sentence.audio):
                 audio_prompt = sentence.audio
-                logger.info(f"使用保存的音频文件: {audio_prompt}")
+                # 简化音频路径输出
+                logger.debug(f"使用音频参考: {os.path.basename(audio_prompt)}")
             else:
-                logger.warning(f"Sentence {sentence.sentence_id} missing audio prompt file, skipping TTS.")
+                logger.warning(f"句子ID {sentence.sentence_id} 缺少音频参考文件，跳过TTS生成。")
                 return None
 
             # 调用 infer 方法获取音频张量
@@ -72,14 +75,15 @@ class MyIndexTTSDeployment:
             if generated_audio_tensor is not None and generated_audio_tensor.numel() > 0:
                 # 将 Tensor 转换为 NumPy 数组
                 generated_audio_np = generated_audio_tensor.numpy()
-                logger.debug(f"Sentence {sentence.sentence_id}: TTS successful, audio length {len(generated_audio_np)} samples.")
+                # 只打印基本长度信息
+                logger.debug(f"句子ID {sentence.sentence_id} TTS成功: 音频长度 {len(generated_audio_np)/self.sampling_rate:.2f}秒")
                 return generated_audio_np
             else:
-                logger.warning(f"Sentence {sentence.sentence_id}: TTS infer failed or returned empty audio.")
+                logger.warning(f"句子ID {sentence.sentence_id}: TTS处理失败或返回空音频")
                 return None
                 
         except Exception as e:
-            logger.error(f"Error generating audio for sentence {sentence.sentence_id}: {e}", exc_info=True)
+            logger.error(f"生成句子ID {sentence.sentence_id} 音频时出错: {str(e)}")
             return None
         finally:
             self._clean_memory()
@@ -97,20 +101,20 @@ class MyIndexTTSDeployment:
                             and 'duration' updated.
         """
         if not sentences:
-            logger.warning("generate_audio_stream received an empty sentence list.")
+            logger.warning("生成音频流收到空句子列表")
             return
 
-        logger.info(f"Received {len(sentences)} sentences for TTS processing.")
+        logger.info(f"开始处理 {len(sentences)} 个句子的TTS生成")
         tts_batch: List[Sentence] = []
-        # start_time = time.time()  # 未用到可移除
 
         for i, sentence in enumerate(sentences):
-            loop_start_time = time.time()
             try:
-                # 使用 asyncio.to_thread 调用同步函数
-                generated_wav_np = await asyncio.to_thread(
-                    self._generate_single_sentence_audio, sentence
-                )
+                async with self._tts_lock:  # 锁保护整个TTS处理和清理过程
+                    generated_wav_np = await asyncio.to_thread(
+                        self._generate_single_sentence_audio, sentence
+                    )
+                    # 处理完后在锁内清理
+                    self._clean_memory()
 
                 if generated_wav_np is not None and len(generated_wav_np) > 0:
                     if generated_wav_np.ndim > 1:
@@ -118,37 +122,37 @@ class MyIndexTTSDeployment:
                     sentence.generated_audio = generated_wav_np
                     duration_ms = (len(generated_wav_np) / self.sampling_rate) * 1000
                     sentence.duration = duration_ms
-                    logger.debug(f"Sentence {sentence.sentence_id} processed. Duration: {duration_ms:.2f} ms")
+                    # 简化日志，只打印ID和最终时长
+                    logger.debug(f"句子ID {sentence.sentence_id} 处理完成: 时长 {duration_ms/1000:.2f}秒")
                 else:
                     sentence.generated_audio = None
                     sentence.duration = 0.0
-                    logger.warning(f"Failed to generate audio for sentence {sentence.sentence_id}. Duration set to 0.")
+                    logger.warning(f"句子ID {sentence.sentence_id} 音频生成失败，时长设为0")
 
                 tts_batch.append(sentence)
 
                 if len(tts_batch) >= self.yield_batch_size:
                     yield tts_batch
-                    logger.info(f"Yielded batch of {len(tts_batch)} sentences.")
+                    logger.info(f"已生成一批 {len(tts_batch)} 个句子的音频")
                     tts_batch = []
 
             except Exception as e:
-                logger.error(f"Error processing sentence {sentence.sentence_id} in main loop: {e}", exc_info=True)
+                logger.error(f"处理句子ID {sentence.sentence_id} 时出错: {str(e)}")
                 sentence.generated_audio = None
                 sentence.duration = 0.0
                 tts_batch.append(sentence)
                 if len(tts_batch) >= self.yield_batch_size:
                     yield tts_batch
-                    logger.info(f"Yielded batch of {len(tts_batch)} sentences (containing error).")
+                    logger.info(f"已生成一批 {len(tts_batch)} 个句子的音频 (含错误)")
                     tts_batch = []
 
             finally:
-                self._clean_memory()
-                loop_end_time = time.time()
-                logger.debug(f"Sentence {i+1}/{len(sentences)} processing took {loop_end_time - loop_start_time:.2f}s")
+                # 移除不必要的处理时间日志，只保留在debug级别
+                if (i+1) % 5 == 0:  # 每5个句子记录一次进度
+                    logger.info(f"TTS进度: {i+1}/{len(sentences)}")
 
         if tts_batch:
             yield tts_batch
-            logger.info(f"Yielded final batch of {len(tts_batch)} sentences.")
+            logger.info(f"已生成最后一批 {len(tts_batch)} 个句子的音频")
 
-        # end_time = time.time()  # 未用到可移除
-        logger.info(f"Finished TTS processing for {len(sentences)} sentences.")
+        logger.info(f"所有 {len(sentences)} 个句子的TTS处理完成")

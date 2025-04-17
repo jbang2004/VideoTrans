@@ -146,7 +146,7 @@ class VideoTransPipe:
             task_state.segments = segments
             self.logger.info(f"[{task_id}] 视频分段完成，共 {len(segments)} 段")
             for seg_idx, (seg_start, seg_duration) in enumerate(segments):
-                await self._process_segment(task_id, task_state, seg_idx, seg_start, seg_duration)
+                await self._segment_maker(task_id, task_state, seg_idx, seg_start, seg_duration)
             merge_result = await self._merge_segments(task_id, task_state)
             return merge_result
         except Exception as e:
@@ -193,7 +193,7 @@ class VideoTransPipe:
             return None
         return segment_result["segments"]
 
-    async def _process_segment(self, task_id, task_state, seg_idx, seg_start, seg_duration):
+    async def _segment_maker(self, task_id, task_state, seg_idx, seg_start, seg_duration):
         seg_start_time = time.time()
         self.logger.info(f"[{task_id}] 开始处理分段 {seg_idx+1}/{len(task_state.segments)}")
         try:

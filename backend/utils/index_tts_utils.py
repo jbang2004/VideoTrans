@@ -76,9 +76,7 @@ class MyIndexTTS(IndexTTS):
             生成的音频波形 (torch.Tensor)，如果失败则返回 None。
         """
         # 覆写 infer 方法，使其结构更接近原始版本，但使用 self.tokenizer
-        print(f"Origin text: {text}")
         text = self.preprocess_text(text)
-        print(f"Normalized text: {text}")
 
         # --- 处理音频输入 --- 
         if isinstance(audio_prompt, str):
@@ -95,19 +93,8 @@ class MyIndexTTS(IndexTTS):
              audio = torchaudio.transforms.Resample(sr, 24000)(audio)
              
         cond_mel = MelSpectrogramFeatures()(audio).to(self.device)
-        print(f"cond_mel shape: {cond_mel.shape}", "dtype:", cond_mel.dtype)
         auto_conditioning = cond_mel
         # --- 音频输入处理结束 --- 
-
-        # --- 移除句子分割逻辑 --- 
-        # punctuation = ["!", "?", ".", ";", "！", "？", "。", "；"]
-        # pattern = r"(?<=[{0}])\s*".format("".join(re.escape(p) for p in punctuation))
-        # sentences = [s for s in re.split(pattern, text) if s.strip()]
-        # if not sentences:
-        #      print("Warning: No sentences found after splitting text.")
-        #      return None
-        # print("Sentences:", sentences)
-        # --- 句子分割逻辑移除结束 --- 
 
         # --- 推理参数 --- 
         top_p = .8
@@ -126,8 +113,6 @@ class MyIndexTTS(IndexTTS):
         print(">> Start inference...")
         start_time = time.time()
 
-        # for sent in sentences: # 移除循环
-        # print(f"Processing sentence: {sent}") # 直接处理text
         cleand_text = tokenize_by_CJK_char(text) # 使用传入的text
         print("Cleaned text:", cleand_text)
 
@@ -138,8 +123,6 @@ class MyIndexTTS(IndexTTS):
             print(f"Warning: Empty token sequence for text: {text}")
             # continue # 改为返回None
             return None 
-
-        print(f"text_tokens shape: {text_tokens.shape}, type: {text_tokens.dtype}")
 
         text_len = torch.IntTensor([text_tokens.size(1)]).to(self.device)
 
@@ -161,9 +144,6 @@ class MyIndexTTS(IndexTTS):
                     max_generate_length=max_mel_tokens,
                 )
             codes, code_lens = self.remove_long_silence(codes, silent_token=52, max_consecutive=30)
-            print(codes, type(codes))
-            print(f"fix codes shape: {codes.shape}, codes type: {codes.dtype}")
-            print(f"code len: {code_lens}")
             
             if codes is None or codes.numel() == 0: # 检查生成的codes是否有效
                 print("Warning: Code generation failed.")
@@ -193,34 +173,12 @@ class MyIndexTTS(IndexTTS):
             wav, _ = self.bigvgan(latent, auto_conditioning.transpose(1, 2))
         wav = wav.squeeze(1).cpu() # 直接得到CPU上的tensor
 
-        # 移除后期处理和保存逻辑
-        # wav = 32767.0 * wav
-        # wav = torch.clamp(wav, -32767.0, 32767.0)
-        # print(f"Generated wav part shape: {wav.shape}")
-        # wavs.append(wav)
-        # --- 句子循环处理结束 --- 
-
         end_time = time.time()
         elapsed_time = end_time - start_time
         minutes, seconds = divmod(int(elapsed_time), 60)
         milliseconds = int((elapsed_time - int(elapsed_time)) * 1000)
         print(f">> Inference done. Time: {minutes:02d}:{seconds:02d}.{milliseconds:03d}")
 
-        # --- 移除结果检查和保存逻辑 --- 
-        # if not wavs:
-        #      print("Error: No audio generated.")
-        #      return None
-
-        # print(">> Saving wav file...")
-        # try:
-        #     final_wav = torch.cat(wavs, dim=1)
-        #     torchaudio.save(output_path, final_wav.to(torch.int16), sampling_rate)
-        #     print(f">> Wav file saved to: {output_path}")
-        # except Exception as e:
-        #     print(f"Error saving wav file: {e}")
-        # --- 保存逻辑移除结束 ---
-        
-        # 返回生成的音频张量
         return wav
 
 
