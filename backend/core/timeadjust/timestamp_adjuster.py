@@ -2,7 +2,7 @@ from ray import serve
 import logging
 from typing import List
 
-logger = logging.getLogger("timestamp_adjuster")
+logger = logging.getLogger(__name__)
 
 @serve.deployment(
     name="timestamp_adjuster",

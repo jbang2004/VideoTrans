@@ -9,7 +9,7 @@ from typing import List
 # 导入新的工具函数
 from utils.duration_utils import apply_speed_and_silence, align_batch
 
-logger = logging.getLogger("duration_aligner")
+logger = logging.getLogger(__name__)
 
 @serve.deployment(
     name="duration_aligner",

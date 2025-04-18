@@ -25,7 +25,7 @@ from ray import serve
 from ray.serve.handle import DeploymentHandle
 
 # 项目模块
-from config import Config
+from config import Config, init_logging
 from core.state_manager import StateManager
 from core.hls_manager import HLSManager
 from core.video_segmenter import VideoSegmenter
@@ -39,12 +39,9 @@ from core.media_mixer import MediaMixer
 from utils.task_state import TaskState
 from utils.ffmpeg_utils import concat_videos
 
-# --- 日志配置 ---
-logging.basicConfig(
-    level=logging.INFO, # 可以根据需要调整为 DEBUG 或 WARNING
-    format="%(levelname)s | %(asctime)s | %(name)s | L%(lineno)d | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+# 初始化全局日志配置
+init_logging()
+
 logger = logging.getLogger(__name__)
 
 # --- 全局配置 ---

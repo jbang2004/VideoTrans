@@ -15,13 +15,6 @@ from utils.task_storage import TaskPaths
 from config import Config
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # 确保日志级别设置为INFO
-if not logger.handlers:  # 如果没有处理器，添加一个控制台处理器
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(levelname)s | %(asctime)s | %(name)s | L%(lineno)d | %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
 
 @serve.deployment(
     name="hls_manager"

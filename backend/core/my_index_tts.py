@@ -27,7 +27,7 @@ MODEL_DIR = CHECKPOINTS_DIR
 # 导入自定义的 MyIndexTTS
 from utils.index_tts_utils import MyIndexTTS
 
-logger = logging.getLogger("ray.serve")
+logger = logging.getLogger(__name__)
 
 @serve.deployment(
     name="my_index_tts",

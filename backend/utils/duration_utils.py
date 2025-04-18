@@ -6,7 +6,7 @@ from core.sentence_tools import Sentence
 from utils.ffmpeg_utils import change_speed_ffmpeg
 import asyncio
 
-logger = logging.getLogger("duration_utils")
+logger = logging.getLogger(__name__)
 
 async def apply_speed_and_silence(sentences: List[Sentence], sample_rate: int = 24000) -> None:
     """异步应用速度调整和添加静音到句子的音频数据中

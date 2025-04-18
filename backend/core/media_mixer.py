@@ -14,15 +14,8 @@ from config import Config
 from core.sentence_tools import Sentence
 from utils.task_state import TaskState
 
-# 修改日志配置
+# 使用全局日志配置，直接获取 logger
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # 确保日志级别设置为INFO
-if not logger.handlers:  # 如果没有处理器，添加一个控制台处理器
-    handler = logging.StreamHandler()
-    handler.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(levelname)s | %(asctime)s | %(name)s | L%(lineno)d | %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
 
 @serve.deployment(
     name="media_mixer",

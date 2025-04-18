@@ -17,17 +17,15 @@ from ray import serve
 import os
 import time
 
-from config import Config
+from config import Config, init_logging
 config = Config()
 config.init_directories()
 
+# 初始化全局日志配置
+init_logging()
+
 sys.path.extend(config.SYSTEM_PATHS)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s | %(asctime)s | %(name)s | L%(lineno)d | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(debug=True)

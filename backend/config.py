@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import logging.config
 
 current_dir = Path(__file__).parent
 env_path = current_dir / '.env'
@@ -100,3 +101,47 @@ class Config:
     ASR_MERGE_VAD = False  # 是否合并VAD结果
 
     COSYVOICE_MODEL_PATH = "models/CosyVoice/pretrained_models/CosyVoice2-0.5B"
+
+# --- 全局日志配置 ---
+LOG_DIR = storage_dir / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# 日志配置模板
+LOGGING_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "%(levelname)s | %(asctime)s | %(name)s | L%(lineno)d | %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "INFO",
+            "formatter": "standard",
+            "stream": "ext://sys.stdout",
+        },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "level": "DEBUG",
+            "formatter": "standard",
+            "filename": str(LOG_DIR / "app.log"),
+            "maxBytes": 10 * 1024 * 1024,
+            "backupCount": 5,
+            "encoding": "utf-8",
+        },
+    },
+    "root": {
+        "level": "DEBUG",
+        "handlers": ["console", "file"],
+    },
+    "loggers": {
+        # 如需单独对第三方库或子系统配置，可在此添加
+    },
+}
+
+def init_logging():
+    """初始化全局日志配置，推荐在应用入口调用一次。"""
+    logging.config.dictConfig(LOGGING_CONFIG)
