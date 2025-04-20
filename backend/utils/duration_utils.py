@@ -130,7 +130,7 @@ def align_batch(sentences: List[Sentence]) -> List[Sentence]:
                 if negative_diff_sum_abs > 0:
                     proportion = abs(diff) / negative_diff_sum_abs
                     total_needed = abs(total_diff_to_adjust) * proportion
-                    max_slowdown = s.duration * 0.07
+                    max_slowdown = s.duration * 0.12
                     slowdown = min(total_needed, max_slowdown)
                     s.adjusted_duration = s.duration + slowdown
                     s.speed = s.duration / max(s.adjusted_duration, 0.001)

@@ -37,6 +37,7 @@ class Config:
     ZHIPUAI_API_KEY = os.getenv("ZHIPUAI_API_KEY", "")
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+    XAI_API_KEY = os.getenv("XAI_API_KEY", "")
 
     SYSTEM_PATHS = [
         str(current_dir / 'models' / 'CosyVoice'),

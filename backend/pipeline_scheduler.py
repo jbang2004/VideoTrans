@@ -302,7 +302,7 @@ class VideoTransPipe:
                         processed_tts_batches += 1
                         try:
                             # 3. 时长对齐
-                            aligned_batch = await self.duration_aligner.remote(tts_batch, max_speed=1.1)
+                            aligned_batch = await self.duration_aligner.remote(tts_batch, max_speed=1.5)
                             if not aligned_batch: continue
 
                             # 4. 时间戳调整 (更新 task_state.current_time)
