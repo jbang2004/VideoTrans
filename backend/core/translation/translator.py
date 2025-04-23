@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import Dict, List, AsyncGenerator, Optional, TypeVar, Generic
+from typing import Dict, List, AsyncGenerator, Optional, TypeVar, Any
 from dataclasses import dataclass
 import ray
 from ray import serve
@@ -33,6 +33,9 @@ T = TypeVar('T')
     num_replicas=2  # 增加副本以提高并发处理能力
 )
 class Translator:
+    # 简化等级常量
+    SIMPLIFICATION_LEVELS = ["minimal", "slight", "moderate", "significant", "extreme"]
+
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.config = Config()
@@ -48,41 +51,31 @@ class Translator:
             raise ValueError(f"不支持的翻译模型：{translation_model}")
         self.logger.info(f"初始化翻译Actor，使用模型: {translation_model}")
 
+    # 私有方法：统一调用模型接口
+    async def _invoke_client(self, system_prompt: str, user_prompt: str, default: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            result = await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
+            return result if result else default
+        except Exception as e:
+            self.logger.error(f"模型调用失败: {e}")
+            raise
+
     async def translate(self, texts: Dict[str, str], target_language: str = "zh") -> Dict[str, str]:
         """翻译文本"""
-        try:
-            system_prompt = TRANSLATION_SYSTEM_PROMPT.format(
-                target_language=LANGUAGE_MAP.get(target_language, target_language)
-            )
-            user_prompt = TRANSLATION_USER_PROMPT.format(
-                target_language=LANGUAGE_MAP.get(target_language, target_language),
-                json_content=texts
-            )
-            result = await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
-            # 确保模型返回的是字典
-            return result if result else {"output": {}}
-        except Exception as e:
-            self.logger.error(f"翻译失败: {str(e)}")
-            raise
-        finally:
-            # 显式删除大型提示文本，帮助内存回收
-            if 'system_prompt' in locals(): del system_prompt
-            if 'user_prompt' in locals(): del user_prompt
+        system_prompt = TRANSLATION_SYSTEM_PROMPT.format(
+            target_language=LANGUAGE_MAP.get(target_language, target_language)
+        )
+        user_prompt = TRANSLATION_USER_PROMPT.format(
+            target_language=LANGUAGE_MAP.get(target_language, target_language),
+            json_content=texts
+        )
+        return await self._invoke_client(system_prompt, user_prompt, {"output": {}})
 
     async def simplify(self, texts: Dict[str, str]) -> Dict[str, str]:
         """简化文本"""
-        try:
-            system_prompt = SIMPLIFICATION_SYSTEM_PROMPT
-            user_prompt = SIMPLIFICATION_USER_PROMPT.format(json_content=texts)
-            result = await self.client.translate(system_prompt=system_prompt, user_prompt=user_prompt)
-            return result if result else {}
-        except Exception as e:
-            self.logger.error(f"简化失败: {str(e)}")
-            raise
-        finally:
-            # 显式删除大型提示文本，帮助内存回收
-            if 'system_prompt' in locals(): del system_prompt
-            if 'user_prompt' in locals(): del user_prompt
+        system_prompt = SIMPLIFICATION_SYSTEM_PROMPT
+        user_prompt = SIMPLIFICATION_USER_PROMPT.format(json_content=texts)
+        return await self._invoke_client(system_prompt, user_prompt, {})
 
     async def _process_batch(
         self,
@@ -135,10 +128,6 @@ class Translator:
                         yield error_handler(batch)
                     if batch:
                         i += len(batch)
-            finally:
-                # 显式删除批处理结果以帮助内存回收
-                if batch is not None: del batch
-                if results is not None: del results
 
     async def translate_sentences(
         self,
@@ -182,10 +171,6 @@ class Translator:
             except Exception as e:
                 self.logger.error(f"处理翻译批次失败: {e}")
                 raise
-            finally:
-                # 显式删除临时变量以帮助内存回收
-                if texts is not None: del texts
-                if translated_texts is not None: del translated_texts
 
         def handle_error(batch: List) -> List:
             # 错误处理：使用原始文本作为翻译
@@ -237,7 +222,7 @@ class Translator:
                 self.logger.debug(f"简化批次: {len(texts)}条文本")
                 batch_result = await self.simplify(texts)
                 
-                if "thinking" not in batch_result or not any(key in batch_result for key in ["minimal", "slight", "moderate", "significant", "extreme"]):
+                if "thinking" not in batch_result or not any(key in batch_result for key in self.SIMPLIFICATION_LEVELS):
                     self.logger.error("简化结果格式不正确，缺少必要字段")
                     return None
                     
@@ -245,7 +230,7 @@ class Translator:
                     old_text = s.trans_text
                     str_i = str(i)
                     
-                    if not any(str_i in batch_result.get(key, {}) for key in ["minimal", "slight", "moderate", "significant", "extreme"]):
+                    if not any(str_i in batch_result.get(key, {}) for key in self.SIMPLIFICATION_LEVELS):
                         self.logger.error(f"句子 {i} 的简化结果不完整")
                         continue
 
@@ -256,8 +241,7 @@ class Translator:
                     non_acceptable_candidates = {}
                     
                     # 按精简程度检查候选文本
-                    simplification_levels = ["minimal", "slight", "moderate", "significant", "extreme"]
-                    for key in simplification_levels:
+                    for key in self.SIMPLIFICATION_LEVELS:
                         if key in batch_result and str_i in batch_result[key]:
                             candidate_text = batch_result[key][str_i]
                             if candidate_text:
@@ -303,18 +287,10 @@ class Translator:
                         f"精简[{chosen_key}]: {old_text} -> {chosen_text} (理想长度: {ideal_length}, 实际长度: {len(chosen_text)}, s.speed: {s.speed})"
                     )
                     
-                    # 释放不再需要的候选文本字典
-                    del acceptable_candidates
-                    del non_acceptable_candidates
-                        
                 return batch
             except Exception as e:
                 self.logger.error(f"处理简化批次失败: {e}")
                 raise
-            finally:
-                # 显式删除临时变量以帮助内存回收
-                if texts is not None: del texts
-                if batch_result is not None: del batch_result
 
         def handle_error(batch: List) -> List:
             return batch
