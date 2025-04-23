@@ -218,6 +218,7 @@ def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, conf
         更新了audio字段(文件路径)的句子列表
     """
     target_samples = int(config.SPEAKER_AUDIO_TARGET_DURATION * sr)
+    min_samples = int(config.SPEAKER_AUDIO_MIN_DURATION * sr)
     ignore_samples = int(0.5 * sr)  # Consider moving 0.5 to config if variable
     speech = speech.unsqueeze(0) if speech.dim() == 1 else speech # Ensure batch dim
 
@@ -238,6 +239,57 @@ def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, conf
 
         # Attempt to extract audio
         audio_segment = _extract_segment(speech, start_sample, end_sample, target_samples, ignore_samples)
+
+        # 优化补全：如果片段长度不足，则累积前后同说话人片段直到满足最短长度，并使用 ignore_samples
+        if audio_segment is not None and audio_segment.shape[-1] < min_samples:
+            needed = min_samples - audio_segment.shape[-1]
+            # 向前累积补齐
+            for j in range(i-1, -1, -1):
+                prev = sentences[j]
+                if prev.speaker_id != s.speaker_id:
+                    continue
+                prev_start = int(prev.start * sr / 1000)
+                prev_end   = int(prev.end   * sr / 1000)
+                prev_seg = _extract_segment(speech, prev_start, prev_end, needed, ignore_samples)
+                if prev_seg is None or prev_seg.shape[-1] == 0:
+                    continue
+                prev_len = prev_seg.shape[-1]
+                if prev_len >= needed:
+                    # 截取最后 needed
+                    audio_segment = torch.cat([prev_seg[:, -needed:], audio_segment], dim=-1)
+                    needed = 0
+                    break
+                else:
+                    # 累积整个片段
+                    audio_segment = torch.cat([prev_seg, audio_segment], dim=-1)
+                    needed = min_samples - audio_segment.shape[-1]
+                    if needed <= 0:
+                        break
+            # 向后累积补齐
+            if needed > 0:
+                for j in range(i+1, len(sentences)):
+                    nxt = sentences[j]
+                    if nxt.speaker_id != s.speaker_id:
+                        continue
+                    next_start = int(nxt.start * sr / 1000)
+                    next_end   = int(nxt.end   * sr / 1000)
+                    next_seg = _extract_segment(speech, next_start, next_end, needed, ignore_samples)
+                    if next_seg is None or next_seg.shape[-1] == 0:
+                        continue
+                    next_len = next_seg.shape[-1]
+                    if next_len >= needed:
+                        # 截取前 needed
+                        audio_segment = torch.cat([audio_segment, next_seg[:, :needed]], dim=-1)
+                        needed = 0
+                        break
+                    else:
+                        audio_segment = torch.cat([audio_segment, next_seg], dim=-1)
+                        needed = min_samples - audio_segment.shape[-1]
+                        if needed <= 0:
+                            break
+            # 最终截断到 min_samples 样本
+            if audio_segment.shape[-1] > min_samples:
+                audio_segment = audio_segment[:, -min_samples:]
 
         # 如果有任务ID，设置到句子对象
         if task_id:
@@ -378,11 +430,6 @@ def get_sentences(tokens: List[Token],
 
             # 调用导出函数 (直接调用，因为get_sentences在asyncio.to_thread中运行)
             export_sentences_to_txt(sentences_with_audio, export_path)
-
-            # 可选：也可以同时导出JSON
-            # json_export_filename = f"sentences_{task_id}_{seg_part}.json"
-            # json_export_path = Path(task_paths.processing_dir) / json_export_filename
-            # export_sentences_to_json(sentences_with_audio, json_export_path)
 
         except Exception as export_e:
             print(f"在get_sentences中导出句子时出错: {export_e}")
