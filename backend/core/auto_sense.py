@@ -30,29 +30,36 @@ class SenseAutoModel(BaseAutoModel):
                 self.logger.error("spk_mode 应该是 'default', 'vad_segment' 或 'punc_segment' 之一。")
             self.spk_mode = spk_mode
 
+    def run_vad(self, input, input_len=None, **cfg):
+        """调用VAD模型进行推断并返回结果"""
+        # 更新VAD配置并执行VAD推断
+        deep_update(self.vad_kwargs, cfg)
+        return self.inference(input, input_len=input_len, model=self.vad_model, kwargs=self.vad_kwargs, **cfg)
+
     def inference_with_vad(self, input, input_len=None, task_id=None, segment_index=None, task_paths=None, **cfg):
         kwargs = self.kwargs
         self.tokenizer = kwargs.get("tokenizer")
-        deep_update(self.vad_kwargs, cfg)
-        
         results = None # Initialize
         spk_res = None # Initialize
         results_ret_list = []
         
         try:
-            res = self.inference(input, input_len=input_len, model=self.vad_model, kwargs=self.vad_kwargs, **cfg)
+            # 调用独立的 VAD 推断
+            res = self.run_vad(input, input_len=input_len, **cfg)
             model = self.model
             deep_update(kwargs, cfg)
             kwargs["batch_size"] = max(int(kwargs.get("batch_size_s", 300)) * 1000, 1)
             batch_size_threshold_ms = int(kwargs.get("batch_size_threshold_s", 60)) * 1000
 
-            key_list, data_list = prepare_data_iterator(input, input_len=input_len, data_type=kwargs.get("data_type", None))
+            # 获取输入数据列表，丢弃 key_list
+            _, data_list = prepare_data_iterator(input, input_len=input_len, data_type=kwargs.get("data_type", None))
 
             pbar_total = tqdm(total=len(res), dynamic_ncols=True, disable=kwargs.get("disable_pbar", False))
 
             for i, item in enumerate(res):
                 try:
-                    key, vadsegments = item["key"], item["value"]
+                    # 获取 VAD 分段结果
+                    vadsegments = item["value"]
                     input_i = data_list[i]
                     fs = kwargs["frontend"].fs if hasattr(kwargs["frontend"], "fs") else 16000
                     speech = load_audio_text_image_video(input_i, fs=fs, audio_fs=kwargs.get("fs", 16000))
@@ -64,7 +71,7 @@ class SenseAutoModel(BaseAutoModel):
 
                     sorted_data = sorted([(seg, idx) for idx, seg in enumerate(vadsegments)], key=lambda x: x[0][1] - x[0][0])
                     if not sorted_data:
-                        self.logger.info(f"解码, utt: {key}, 空语音")
+                        self.logger.info(f"解码，第 {i} 条，空语音")
                         continue
 
                     results_sorted = []
@@ -105,7 +112,7 @@ class SenseAutoModel(BaseAutoModel):
                         # --- End Memory cleanup ---
 
                     if len(results_sorted) != len(sorted_data):
-                        self.logger.info(f"解码，utt: {key}，空结果")
+                        self.logger.info(f"解码，第 {i} 条，空结果")
                         continue
 
                     restored_data = [0] * len(sorted_data)
@@ -121,7 +128,7 @@ class SenseAutoModel(BaseAutoModel):
                         sv_output = postprocess(all_segments, None, labels, spk_embedding.cpu())
 
                         if "timestamp" not in result:
-                            self.logger.error(f"speaker diarization 依赖于时间戳对于 utt: {key}")
+                            self.logger.error("speaker diarization 依赖于时间戳")
                             sentence_list = []
                         else:
                             # 传递显式参数给get_sentences

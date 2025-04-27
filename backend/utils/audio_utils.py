@@ -59,13 +59,24 @@ async def mix_with_background(
     Returns:
         混合后的音频数据
     """
-    # 异步读取背景音乐
-    background_audio, sr = await asyncio.to_thread(sf.read, bg_path)
-    background_audio = np.asarray(background_audio, dtype=np.float32)
-    if sr != sample_rate:
-        logger.warning(
-            f"背景音采样率={sr} 与目标={sample_rate}不匹配, 未做重采样, 可能有问题."
-        )
+    try: # 添加 try...except 来捕获 sf.read 的潜在错误
+        # 异步读取背景音乐
+        background_audio, sr = await asyncio.to_thread(sf.read, bg_path)
+        logger.debug(f"mix_with_background: 读取背景音频: {bg_path}, 长度: {len(background_audio)}, 采样率: {sr}") # 使用 debug 级别
+        background_audio = np.asarray(background_audio, dtype=np.float32)
+        if sr != sample_rate:
+            logger.warning(
+                f"背景音采样率={sr} 与目标={sample_rate}不匹配, 未做重采样, 可能有问题."
+            )
+    except Exception as e:
+        logger.error(f"mix_with_background: 读取背景音频失败: {bg_path}, 错误: {e}", exc_info=True)
+        # 如果读取失败，直接返回原始人声音频（应用音量）
+        target_length = int(duration * sample_rate)
+        result = np.zeros(target_length, dtype=np.float32)
+        audio_len = min(len(audio_data), target_length)
+        if audio_len > 0:
+             result[:audio_len] = audio_data[:audio_len] * vocals_volume
+        return result
 
     target_length = int(duration * sample_rate)
     start_sample = int(start_time * sample_rate)
@@ -83,8 +94,23 @@ async def mix_with_background(
     # 混合人声 & 背景
     if audio_len > 0:
         result[:audio_len] = audio_data[:audio_len] * vocals_volume
+        logger.warning(f"mix_with_background: 添加人声后 result 最大绝对值: {np.max(np.abs(result)):.4f} (vocals_volume={vocals_volume:.2f})")
+    else:
+         logger.warning("mix_with_background: 人声音频长度为 0")
+
+
     if bg_len > 0:
-        result[:bg_len] += bg_segment[:bg_len] * background_volume
+        # 检查 NaN 或 Inf
+        if np.isnan(bg_segment).any() or np.isinf(bg_segment).any():
+             logger.error("mix_with_background: 背景音频片段包含 NaN 或 Inf 值！跳过混合背景音。")
+        else:
+            # 直接按背景音量系数缩放并混合背景音
+            bg_scaled = bg_segment[:bg_len] * background_volume
+            result[:bg_len] += bg_scaled
+            logger.debug(f"mix_with_background: 混合背景音后 result 最大绝对值: {np.max(np.abs(result)):.4f} (background_volume={background_volume:.2f})")
+    else:
+        logger.warning("mix_with_background: 背景音频片段长度为 0，不进行混合")
+
 
     return result
 
@@ -100,8 +126,14 @@ def normalize_audio(audio_data: np.ndarray, max_val: float = 1.0) -> np.ndarray:
         归一化后的音频数据
     """
     if len(audio_data) == 0:
+        logger.debug("normalize_audio: 音频数据为空，跳过归一化")
         return audio_data
     current_max = np.max(np.abs(audio_data))
+    logger.debug(f"normalize_audio: 归一化前最大绝对值: {current_max:.4f}, 目标 max_val: {max_val:.2f}")
     if current_max > max_val:
-        audio_data = audio_data * (max_val / current_max)
+        scale_factor = max_val / current_max
+        audio_data = audio_data * scale_factor
+        logger.debug(f"normalize_audio: 执行归一化，缩放因子: {scale_factor:.4f}")
+    else:
+        logger.debug("normalize_audio: 无需归一化")
     return audio_data 
