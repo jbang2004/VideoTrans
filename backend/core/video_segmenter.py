@@ -27,41 +27,16 @@ class VideoSegmenter:
 
     async def segment_video(self, video_path: str) -> Dict:
         """
-        分析视频并划分为多个时间片段
-        
-        Args:
-            video_path: 视频文件路径
-            
-        Returns:
-            包含视频时长和分段信息的字典
+        分析视频并划分为多个时间片段（已简化：始终作为整段处理）
         """
         try:
             start_time = time.time()
-            
-            # 1. 获取视频总时长
+            # 始终获取完整视频时长并作为单段处理
             duration = await self._get_video_duration(video_path)
-            
-            # 2. 划分分段 - 使用asyncio.to_thread包装同步函数调用
-            segments = await asyncio.to_thread(
-                self._get_audio_segments,
-                duration=duration, 
-                segment_minutes=self.config.SEGMENT_MINUTES, 
-                min_segment_minutes=self.config.MIN_SEGMENT_MINUTES
-            )
-            
+            segments = [(0, duration)]
             elapsed = time.time() - start_time
-            self.logger.info(f"视频分段完成：总长度={duration:.2f}s, 分段数={len(segments)}, 耗时={elapsed:.2f}s")
-            
-            if not segments:
-                self.logger.warning(f"没有可用分段，视频路径: {video_path}")
-                return {"status": "error", "message": "无法获取有效分段"}
-            
-            return {
-                "status": "success",
-                "duration": duration,
-                "segments": segments
-            }
-            
+            self.logger.info(f"视频分段跳过，处理整段视频：总长度={duration:.2f}s, 段数=1, 耗时={elapsed:.2f}s")
+            return {"status": "success", "duration": duration, "segments": segments}
         except Exception as e:
             self.logger.exception(f"视频分段失败: {e}")
             return {"status": "error", "message": str(e)}
