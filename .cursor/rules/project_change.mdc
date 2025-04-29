@@ -1,0 +1,301 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# VideoTrans 两阶段处理流程与数据库设计指南
+
+本规则详细描述如何将 VideoTrans 项目修改为"预处理（分离+ASR）"和"翻译（翻译→TTS→合成→HLS）"两阶段流程，并实现基于 Supabase 的持久化存储设计。
+
+## 1. 流程修改概述
+
+**当前流程**：用户上传视频后，后端自动执行完整处理流水线（分离→ASR→翻译→TTS→对齐→合成→HLS生成）。
+
+**目标流程**：
+1. **预处理阶段**：用户上传视频后，后端仅执行分离和ASR，生成句子列表并存入Supabase，然后提示用户预处理完成。
+2. **翻译阶段**：用户点击"开始翻译"按钮后，后端从Supabase获取句子列表，执行翻译、TTS、对齐、合成和HLS生成。
+
+## 2. 数据库设计
+
+在 Supabase 中创建两个表：
+
+### 2.1 tasks 表
+
+```sql
+CREATE TABLE tasks (
+    -- 核心标识
+    task_id TEXT PRIMARY KEY,
+    user_id UUID REFERENCES auth.users,
+
+    -- 任务状态与控制流
+    status TEXT NOT NULL CHECK (status IN (
+        'uploading', 'preprocessing', 'preprocessed', 
+        'translating', 'generating_audio', 'aligning_duration', 
+        'mixing', 'generating_hls', 'success', 'error'
+    )),
+    target_language TEXT NOT NULL,
+    generate_subtitle BOOLEAN DEFAULT FALSE NOT NULL,
+
+    -- 文件路径
+    original_video_path TEXT NOT NULL,
+    silent_video_path TEXT,
+    vocals_audio_path TEXT,
+    background_audio_path TEXT,
+    hls_playlist_url TEXT,
+    download_video_path TEXT,
+
+    -- 错误处理
+    error_message TEXT,
+
+    -- 时间戳
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
+);
+
+-- 索引
+CREATE INDEX idx_tasks_status ON tasks(status);
+CREATE INDEX idx_tasks_user_id ON tasks(user_id);
+```
+
+### 2.2 sentences 表
+
+```sql
+CREATE TABLE sentences (
+    -- 核心标识
+    id BIGSERIAL PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+    sentence_index INT NOT NULL,
+
+    -- ASR输出与原始计时
+    raw_text TEXT NOT NULL,
+    start_ms DOUBLE PRECISION NOT NULL,
+    end_ms DOUBLE PRECISION NOT NULL,
+    speaker_id INT NOT NULL,
+
+    -- TTS与对齐数据
+    audio_prompt_path TEXT,
+    target_duration_ms DOUBLE PRECISION NOT NULL,
+    trans_text TEXT,
+    tts_duration_ms DOUBLE PRECISION,
+    speed_adjustment DOUBLE PRECISION DEFAULT 1.0,
+    silence_padding_ms DOUBLE PRECISION DEFAULT 0.0,
+    
+    -- 最终计时
+    final_start_ms DOUBLE PRECISION,
+    final_duration_ms DOUBLE PRECISION,
+
+    -- 时间戳
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+
+    -- 约束
+    UNIQUE (task_id, sentence_index)
+);
+
+-- 索引
+CREATE INDEX idx_sentences_task_id ON sentences(task_id);
+CREATE INDEX idx_sentences_task_id_sentence_index ON sentences(task_id, sentence_index);
+```
+
+## 3. 后端修改
+
+### 3.1 修改 [backend/config.py](mdc:backend/config.py)
+
+1. 添加 Supabase 配置
+
+```python
+# Supabase 数据库配置
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://your-project-id.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "your-anon-key")
+```
+
+2. 在 requirements.txt 中添加依赖：`supabase-py==1.0.3`
+
+### 3.2 创建 Supabase 客户端服务 [backend/core/supabase_client.py](mdc:backend/core/supabase_client.py)
+
+```python
+from supabase import create_client
+from config import Config
+
+class SupabaseClient:
+    def __init__(self, config=None):
+        self.config = config or Config()
+        self.client = create_client(self.config.SUPABASE_URL, self.config.SUPABASE_KEY)
+    
+    async def store_task(self, task_data):
+        """存储任务信息"""
+        return self.client.table('tasks').insert(task_data).execute()
+    
+    async def update_task(self, task_id, update_data):
+        """更新任务信息"""
+        return self.client.table('tasks').update(update_data).eq('task_id', task_id).execute()
+    
+    async def get_task(self, task_id):
+        """获取任务信息"""
+        return self.client.table('tasks').select('*').eq('task_id', task_id).execute()
+    
+    async def store_sentences(self, sentences_data):
+        """批量存储句子信息"""
+        return self.client.table('sentences').insert(sentences_data).execute()
+    
+    async def get_sentences(self, task_id):
+        """获取任务的所有句子，按索引排序"""
+        return self.client.table('sentences').select('*').eq('task_id', task_id).order('sentence_index').execute()
+```
+
+### 3.3 拆分 [backend/pipeline_scheduler.py](mdc:backend/pipeline_scheduler.py)
+
+1. 创建两个独立的管道 Deployment：
+
+```python
+@serve.deployment(route_prefix="/asrpipe", name="asrpipe")
+class ASRPipe:
+    def __init__(self, config=None):
+        # 初始化配置、状态管理器和必要的模型句柄
+        # 只包含分离和ASR所需的依赖
+        
+    async def __call__(self, task_id, video_path, target_language, generate_subtitle=False):
+        # 1. 初始化任务状态
+        # 2. 执行视频分离
+        # 3. 执行ASR生成句子列表
+        # 4. 将句子列表和文件路径存入Supabase
+        # 5. 更新任务状态为'preprocessed'
+        # 6. 返回任务状态
+
+@serve.deployment(route_prefix="/translatepipe", name="translatepipe")
+class TranslatePipe:
+    def __init__(self, config=None):
+        # 初始化配置和后续处理所需的依赖
+        # (翻译、TTS、对齐、混合、HLS管理)
+        
+    async def __call__(self, task_id):
+        # 1. 从Supabase获取任务信息和句子列表
+        # 2. 更新任务状态为'translating'
+        # 3. 执行翻译
+        # 4. 执行TTS、对齐和合成
+        # 5. 生成HLS流
+        # 6. 更新任务状态为'success'
+        # 7. 返回最终任务状态
+```
+
+### 3.4 修改 [backend/api.py](mdc:backend/api.py)
+
+1. 修改 `/upload` 端点，只调用 `ASRPipe` 而不是完整流程
+2. 添加新的 `/translate/{task_id}` 端点，调用 `TranslatePipe`
+
+```python
+@app.post("/translate/{task_id}")
+async def translate_video(task_id: str):
+    """启动翻译阶段"""
+    
+    # 检查任务是否存在且处于'preprocessed'状态
+    task = await supabase_client.get_task(task_id)
+    if not task or task[0]['status'] != 'preprocessed':
+        raise HTTPException(status_code=404, detail="任务不存在或未处于可翻译状态")
+    
+    # 调用TranslatePipe开始翻译
+    translate_ref = translate_pipe.remote(task_id)
+    # 立即返回，翻译在后台进行
+    return {"task_id": task_id, "status": "translating"}
+```
+
+## 4. 前端修改 
+
+### 4.1 修改 [frontend/components/video-player/index.tsx](mdc:frontend/components/video-player/index.tsx)
+
+添加状态和翻译按钮：
+
+```tsx
+// 添加状态显示和翻译按钮逻辑
+const [isPreprocessed, setIsPreprocessed] = useState(false);
+
+// 在 useEffect 监听任务状态变化中判断预处理状态
+useEffect(() => {
+  if (task && task.status === 'preprocessed') {
+    setIsPreprocessed(true);
+  } else if (task && ['translating', 'success'].includes(task.status)) {
+    setIsPreprocessed(false); // 已开始翻译或完成
+  }
+}, [task]);
+
+// 添加翻译函数
+const startTranslation = async () => {
+  try {
+    await axios.post(`/api/translate/${taskId}`);
+    // 开始轮询以获取更新的状态
+    startPolling();
+  } catch (error) {
+    console.error('启动翻译失败', error);
+  }
+};
+
+// 在渲染中添加翻译按钮
+{isPreprocessed && (
+  <div className="translation-start-container">
+    <h3>预处理完成！</h3>
+    <Button onClick={startTranslation}>开始翻译</Button>
+  </div>
+)}
+```
+
+### 4.2 状态渲染逻辑
+
+添加不同阶段的状态显示：
+
+```tsx
+const renderStatus = () => {
+  if (!task) return "加载中...";
+  
+  switch (task.status) {
+    case 'uploading':
+      return "正在上传视频...";
+    case 'preprocessing':
+      return "正在预处理视频 (分离和语音识别)...";
+    case 'preprocessed':
+      return "预处理完成，点击开始翻译";
+    case 'translating':
+      return "正在翻译文本...";
+    case 'generating_audio':
+      return "正在生成翻译语音...";
+    case 'aligning_duration':
+      return "正在对齐音频时长...";
+    case 'mixing':
+      return "正在混合音视频...";
+    case 'generating_hls':
+      return "正在生成流媒体...";
+    case 'success':
+      return "处理完成";
+    case 'error':
+      return `处理失败: ${task.error_message || '未知错误'}`;
+    default:
+      return `状态: ${task.status}`;
+  }
+};
+```
+
+## 5. 数据流程示例
+
+1. **预处理阶段** (ASRPipe):
+   ```
+   用户 → 上传视频 → API:/upload → ASRPipe → 视频分离 → ASR → Supabase(tasks, sentences) → 返回状态:"preprocessed"
+   ```
+
+2. **翻译阶段** (TranslatePipe):
+   ```
+   用户 → 点击"开始翻译" → API:/translate/{task_id} → TranslatePipe → Supabase查询 → 翻译 → TTS → 对齐 → 混合 → HLS生成 → 更新状态:"success"
+   ```
+
+## 6. 具体实现注意事项
+
+1. **Sentence对象序列化**:
+   - 将`Sentence`对象存储到数据库前，必须排除`generated_audio`字段(numpy数组不可序列化)
+   - 从数据库重建`Sentence`对象时，需创建新实例并填充各字段
+
+2. **文件路径处理**:
+   - 存储相对路径或使用文件服务器URLs，确保在不同服务实例间访问一致性
+
+3. **任务状态监控**:
+   - API轮询增加对新状态的支持，特别是`preprocessed`阶段的UI处理
+
+4. **错误处理**:
+   - 确保任何阶段失败都正确记录到数据库，方便前端显示错误消息
