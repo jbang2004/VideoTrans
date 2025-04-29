@@ -1,0 +1,188 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# VideoTrans 项目结构和指南
+
+## 概述
+
+VideoTrans 是一个视频翻译项目，包含后端处理流水线和前端用户界面。它通过一系列步骤处理上传的视频，最终生成带有翻译后语音和可选字幕的视频流。
+
+## Sentence 对象详解
+
+`Sentence` 对象是整个后端处理流水线的核心数据结构，它在不同阶段被创建、传递和修改。其定义位于 `[backend/core/sentence_tools.py](mdc:backend/core/sentence_tools.py)`，包含以下字段：
+
+*   `raw_text` (str): ASR 识别出的原始句子文本。
+*   `start` (float): 原始句子在音频中的开始时间 (毫秒)。
+*   `end` (float): 原始句子在音频中的结束时间 (毫秒)。
+*   `speaker_id` (int): 识别出的说话人 ID。
+*   `trans_text` (str, default=""): 翻译后的句子文本。
+*   `sentence_id` (int, default=-1): 句子的唯一标识符 (在某些流程中可能自动生成或手动设置)。
+*   `audio` (str, default=""): **(重要)** 指向为该句子提取的参考音频片段的文件路径 (用于 IndexTTS 的音色克隆)。通常保存在 `storage/tasks/{task_id}/audio_prompts/`。
+*   `target_duration` (float, default=None): **(重要)** 句子的目标时长 (毫秒)，通常基于 ASR 原始时间戳或相邻句子间隙计算得出。这是时长对齐模块的主要目标。
+*   `duration` (float, default=0.0): **(重要)** TTS 生成的音频的实际时长 (毫秒)，在应用速度和静音调整前。
+*   `diff` (float, default=0.0): `duration` 与 `target_duration` 之间的差异 (毫秒)，用于对齐计算。
+*   `silence_duration` (float, default=0.0): **(重要)** 需要在调整速度后的音频末尾添加的静音时长 (毫秒)，以精确匹配 `target_duration`。
+*   `speed` (float, default=1.0): **(重要)** 为了匹配 `target_duration` 而需要对 TTS 生成的音频应用的速度倍率。
+*   `is_first` (bool, default=False): 标记是否为整个音频流的第一个句子。
+*   `is_last` (bool, default=False): 标记是否为整个音频流的最后一个句子。
+*   `model_input` (Dict, default_factory=dict): 可能存储传递给特定模型（如 TTS）的额外输入参数。
+*   `generated_audio` (np.ndarray, default=None): **(重要)** TTS 生成的音频数据 (NumPy 数组, float32, 范围 [-1, 1])。**注意：这个字段不会也不能直接存入数据库，因为它不是可序列化的。** 在应用速度和静音调整后，它代表最终要混合的音频。
+*   `adjusted_start` (float, default=0.0): **(重要)** 在整个音频流中，该句子调整后实际开始播放的时间点 (毫秒)。由 `TimestampAdjuster` (或在 `MediaMixer` 中隐式计算) 确定。
+*   `adjusted_duration` (float, default=0.0): **(重要)** 句子应用速度和静音调整后的最终实际时长 (毫秒)。等于 `len(generated_audio) / sample_rate * 1000`。
+*   `task_id` (str, default=""): 关联的任务 ID。
+
+## 后端 (`backend/`)
+
+后端使用 FastAPI 和 Ray Serve 构建，负责处理视频上传、翻译和 HLS 流媒体服务。
+
+### 关键文件和目录:
+
+*   **API 入口:**
+    *   `[backend/api.py](mdc:backend/api.py)`: 定义 FastAPI 应用 (`VideoTransAPI`) 和 API 接口。
+        *   `/upload`: 接收视频文件和目标语言，创建任务 ID，保存视频到 `storage/tasks/{task_id}/input/`，并触发 `VideoTransPipe` 处理。
+        *   `/task/{task_id}`: 查询任务状态（调用 `StateManager`）。
+        *   `/playlists/{task_id}/{filename}`: 提供 HLS 播放列表文件 (`.m3u8`)。
+        *   `/segments/{task_id}/{filename}`: 提供 HLS 视频片段文件 (`.ts`)。
+        *   `/download/{task_id}`: 提供最终合并后的完整视频文件下载。
+        *   依赖 `PipelineEngine` 应用中的 `VideoTransPipe` 和 `StateManager`句柄。
+*   **核心处理流水线:**
+    *   `[backend/pipeline_scheduler.py](mdc:backend/pipeline_scheduler.py)`: 定义了 `PipelineEngine` Ray Serve 应用，其核心是 `VideoTransPipe` Deployment。
+        *   `VideoTransPipe`: 视频翻译的核心协调器，接收来自 `api.py` 的任务请求。
+        *   它按顺序编排以下处理阶段（大部分通过调用 `backend/core/` 中的其他 Ray Serve Deployment 来完成）。
+*   **配置:**
+    *   `[backend/config.py](mdc:backend/config.py)`: 包含项目的所有配置，如 API 密钥、文件/目录路径 (`storage/` 下)、模型设置、处理参数（如采样率 `TARGET_SR`、批次大小）、日志配置等。定义了 `storage/` 目录结构并负责初始化。
+    *   `[backend/.env](mdc:backend/.env)`: (如果存在) 存储敏感配置，如 API 密钥，由 `config.py` 加载。
+*   **核心模块 (`backend/core/`):**
+    *   包含视频处理流水线中各个阶段的具体实现，通常部署为独立的 Ray Serve Deployment。
+*   **工具函数 (`backend/utils/`):**
+    *   包含各种辅助函数，如 FFMpeg 操作 (`[backend/utils/ffmpeg_utils.py](mdc:backend/utils/ffmpeg_utils.py)`)、音频处理 (`[backend/utils/audio_utils.py](mdc:backend/utils/audio_utils.py)`)、字幕处理 (`[backend/utils/subtitle_utils.py](mdc:backend/utils/subtitle_utils.py)`)、任务状态定义 (`[backend/utils/task_state.py](mdc:backend/utils/task_state.py)`)、任务路径管理 (`[backend/utils/task_storage.py](mdc:backend/utils/task_storage.py)`) 等。
+*   **模型 (`backend/models/`):**
+    *   存放或引用实际的 AI 模型文件和代码（如 ClearVoice, SenseVoice, IndexTTS）。
+
+### 后端启动流程:
+
+1.  启动 Ray 集群 (如果尚未运行)。
+2.  运行 `python backend/pipeline_scheduler.py`：
+    *   连接到 Ray 集群。
+    *   初始化并部署 `PipelineEngine` Serve 应用，包括 `StateManager`, `VideoSeparator`, `ASRModel`, `Translator`, `MyIndexTTSDeployment`, `DurationAligner`, `MediaMixer`, `HLSManager` 以及核心的 `VideoTransPipe`。
+3.  运行 `python backend/api.py`：
+    *   连接到 Ray 集群。
+    *   检查 `PipelineEngine` 是否已部署。
+    *   部署 `VideoAPI` Serve 应用，该应用会获取 `PipelineEngine` 中 `VideoTransPipe` 和 `StateManager` 的句柄。
+
+### 视频处理流水线详解 (`VideoTransPipe` in `pipeline_scheduler.py`)
+
+`VideoTransPipe` 的 `__call__` 方法处理单个任务，主要流程如下:
+
+1.  **初始化 (`_init_task_state`, `_init_hls`):**
+    *   调用 `[backend/core/state_manager.py](mdc:backend/core/state_manager.py)` 创建或获取 `TaskState` 对象，管理任务信息和路径。
+    *   调用 `[backend/core/hls_manager.py](mdc:backend/core/hls_manager.py)` 为该任务初始化 HLS 管理器，创建空的播放列表文件。
+2.  **视频分离与识别 (`_run_sep_asr`):**
+    *   **a. 音视频分离 (`VideoSeparator`):** 调用 `[backend/core/video_separator.py](mdc:backend/core/video_separator.py)` 处理原始视频 (`video_path`)。
+        *   使用 `ffmpeg` (via `utils/ffmpeg_utils`) 提取完整的音频轨道和无声的视频轨道。
+        *   使用 `ClearVoice` 模型 (`models/ClearVoice`) 将完整音频分离为人声音频 (`vocals.wav`) 和背景音频 (`background.wav`)。
+        *   音频会被重采样到 `TARGET_SR` (来自 `config.py`) 并归一化。
+        *   输出文件路径字典：`{'video': silent_video_path, 'vocals': vocals_audio_path, 'background': background_audio_path}`。
+    *   **b. 语音识别 (ASR) (`ASRModel`):** 调用 `[backend/core/asr_model.py](mdc:backend/core/asr_model.py)` 处理人声音频 (`vocals.wav`)。
+        *   使用 `SenseVoice` 模型 (`models/SenseVoice`, 通过 `core/auto_sense.py` 加载) 进行语音识别。
+        *   输出一个 `Sentence` 对象列表，每个对象包含原始文本 (`raw_text`)、开始时间 (`start`) 和结束时间 (`end`)。
+3.  **翻译、TTS与对齐 (`_run_translation_pipeline` - 内部调用链):**
+    *   **a. 文本翻译 (`Translator`):** 调用 `[backend/core/translation/translator.py](mdc:backend/core/translation/translator.py)` 处理 `Sentence` 列表。
+        *   将 `Sentence` 列表分批（大小由 `config.TRANSLATION_BATCH_SIZE` 控制）。
+        *   使用配置的 LLM 客户端（DeepSeek, Gemini, Grok - 通过 `config.TRANSLATION_MODEL` 选择）将 `raw_text` 翻译成目标语言，结果存入 `trans_text`。
+        *   使用动态批处理和重试逻辑提高鲁棒性。
+        *   以异步生成器方式 (`translate_sentences`) 返回处理后的 `Sentence` 批次。
+    *   **b. 文本转语音 (TTS) (`MyIndexTTSDeployment`):** 调用 `[backend/core/my_index_tts.py](mdc:backend/core/my_index_tts.py)` 处理翻译后的 `Sentence` 列表。
+        *   接收 `Sentence` 批次。
+        *   使用 `IndexTTS` 模型 (`models/IndexTTS`) 将 `trans_text` 合成语音。
+        *   生成的音频（numpy 数组，float32, 范围 [-1, 1]）存入 `generated_audio`，计算出的音频时长 (ms) 存入 `duration`。
+        *   使用异步生成器方式 (`generate_audio_stream`) 返回处理后的 `Sentence` 批次。
+        *   使用 `asyncio.Lock` 控制对 GPU 资源的访问。
+    *   **c. 时长对齐 (`DurationAligner`):** 调用 `[backend/core/timeadjust/duration_aligner.py](mdc:backend/core/timeadjust/duration_aligner.py)` 处理带有生成音频的 `Sentence` 列表。
+        *   计算每个句子的目标时长 (`target_duration`)，通常基于 ASR 的原始时间戳。
+        *   计算所需语速 (`speed = generated_duration / target_duration`)。
+        *   **如果 `speed > max_speed` (e.g., 1.1x):**
+            *   调用 `Translator` 的 `simplify_sentences` 方法简化 `trans_text`。
+            *   再次调用 `MyIndexTTSDeployment` 重新生成音频。
+            *   重新计算 `speed`。
+        *   使用 `utils/duration_utils.apply_speed_and_silence` 调整 `generated_audio`：
+            *   应用计算出的 `speed`（变速）。
+            *   在音频末尾添加静音 (`silence_duration`)，使最终音频长度精确匹配 `target_duration`。
+        *   最终更新 `Sentence` 对象的 `generated_audio`。
+    *   **d. 时间戳调整 (`TimestampAdjuster`):** (当前在 `pipeline_scheduler.py` 中未显式调用，可能未使用或集成在 `MediaMixer` 中) `[backend/core/timeadjust/timestamp_adjuster.py](mdc:backend/core/timeadjust/timestamp_adjuster.py)` 的预期功能是根据对齐后的音频时长微调句子的 `start` 和 `end` 时间戳，以确保混合时时间准确。
+4.  **媒体混合 (`MediaMixer`):** 调用 `[backend/core/media_mixer.py](mdc:backend/core/media_mixer.py)` 合并最终结果。
+    *   接收最终处理好的 `Sentence` 列表（包含时间戳和对齐后的 `generated_audio`）、原始无声视频路径和背景音频路径。
+    *   使用 `ffmpeg` (via `utils/ffmpeg_utils`)：
+        *   将所有 `generated_audio` 按 `start` 时间戳顺序混合成一条完整的人声轨道。
+        *   将这条人声轨道、背景音轨（音量可调，见 `config.BACKGROUND_VOLUME`）和无声视频合并。
+        *   如果设置了 `generate_subtitle`，可能会调用 `utils/subtitle_utils.py` 生成字幕文件并烧录到视频中。
+    *   输出最终处理好的视频片段路径。
+5.  **HLS 分片 (`HLSManager`):**
+    *   `VideoTransPipe` 将 `MediaMixer` 输出的视频片段路径传递给 `[backend/core/hls_manager.py](mdc:backend/core/hls_manager.py)` 的 `add_segment` 方法。
+    *   `HLSManager` 使用 `ffmpeg` (via `utils/ffmpeg_utils.hls_segment`) 将传入的视频片段切割成多个 `.ts` 文件，存入 `storage/public/segments/{task_id}/`。
+    *   更新 `storage/public/playlists/{task_id}/playlist.m3u8` 文件，添加新的 `.ts` 片段信息。
+6.  **任务完成:**
+    *   所有片段处理完成后，`VideoTransPipe` 调用 `HLSManager` 的 `finalize_playlist` 方法，标记播放列表结束。
+    *   `VideoTransPipe` (或 `MediaMixer` 如果有最终合并步骤) 调用 `StateManager` 的 `complete_task` 方法，更新任务状态为 `success` 或 `error`，并记录最终视频路径 (如果生成了完整可下载文件)。
+
+## 前端 (`frontend/`)
+
+前端使用 Next.js 和 React 构建，提供用户上传视频、查看处理状态和播放翻译后视频的界面。
+
+### 关键文件和目录:
+
+*   **主页面:**
+    *   `[frontend/app/page.tsx](mdc:frontend/app/page.tsx)`: 项目的主入口页面，包含 Landing Page 和 App 视图之间的切换逻辑。处理用户交互，如文件上传（点击或拖放）、状态转换动画。
+*   **布局和样式:**
+    *   `[frontend/app/layout.tsx](mdc:frontend/app/layout.tsx)`: 全局页面布局。
+    *   `[frontend/app/globals.css](mdc:frontend/app/globals.css)`: 全局 CSS 样式。
+    *   `[frontend/tailwind.config.ts](mdc:frontend/tailwind.config.ts)`: Tailwind CSS 配置。
+*   **组件 (`frontend/components/`):**
+    *   `[frontend/components/video-player/index.tsx](mdc:frontend/components/video-player/index.tsx)`: 视频播放器组件，使用 `hls.js` 库加载和播放由后端 API 提供的 `.m3u8` HLS 流。
+    *   `[frontend/components/particle-background/index.tsx](mdc:frontend/components/particle-background/index.tsx)`: 实现页面背景的粒子动画效果，并处理 Landing 和 App 视图之间的转场动画。
+    *   `[frontend/components/landing/](mdc:frontend/components/landing)`: 包含 Landing Page 相关的组件（导航栏、主要内容等）。
+    *   `[frontend/components/ui/](mdc:frontend/components/ui)`: 可能包含基于 Shadcn UI 的通用 UI 组件。
+*   **库/工具函数 (`frontend/lib/`):**
+    *   `[frontend/lib/utils.ts](mdc:frontend/lib/utils.ts)`: 前端辅助函数。
+*   **配置:**
+    *   `[frontend/package.json](mdc:frontend/package.json)`: 定义项目依赖 (如 `hls.js`, `react`, `next`) 和脚本。
+    *   `[frontend/next.config.mjs](mdc:frontend/next.config.mjs)`: Next.js 配置文件。
+    *   `[frontend/tsconfig.json](mdc:frontend/tsconfig.json)`: TypeScript 配置文件。
+
+### 前端交互流程:
+
+1.  用户访问 Landing Page (`page.tsx` 初始状态)。
+2.  用户点击 "Free Trial" 或类似按钮，触发 `handleTryFreeClick`。
+3.  `ParticleBackground` 执行向前转场动画 (`transitioningForward`)。
+4.  动画完成后 (`targetReached`)，`page.tsx` 切换到 `app` 模式，显示上传区域。
+5.  用户上传视频文件（点击或拖放），触发 `handleFileChange` 或 `handleDrop`。
+6.  文件信息被设置，上传按钮隐藏，`VideoPlayer` 组件显示。
+7.  `VideoPlayer` 组件内部（或 `page.tsx`）调用后端 `/upload` API 上传视频，并获取 `task_id`。
+8.  前端（可能是 `VideoPlayer` 或 `page.tsx`）轮询 `/task/{task_id}` API 获取任务状态和进度。
+9.  当任务状态指示 HLS 就绪 (`hls_ready: true`) 或完成 (`status: success`) 时，`VideoPlayer` 使用 HLS.js 加载 `/playlists/{task_id}/playlist.m3u8` 并开始播放视频流。
+10. 用户点击背景空白区域（非交互元素），触发 `handleBackgroundClick`。
+11. `ParticleBackground` 执行重置动画 (`transitioningReset`)。
+12. 动画完成后 (`initial`)，`page.tsx` 切换回 `landing` 模式。
+
+## 数据流总结
+
+1.  **上传:** 前端 (`page.tsx`) -> 后端 API (`api.py:/upload`)
+2.  **任务启动:** API (`api.py`) -> 管道调度器 (`pipeline_scheduler.py:VideoTransPipe`)
+3.  **核心处理:** `VideoTransPipe` 协调 `core` 模块 (Separator -> ASR -> Translator -> TTS -> Aligner -> Mixer)
+4.  **状态更新/查询:** `VideoTransPipe`/`core` 模块 -> `StateManager`; 前端 -> API (`api.py:/task/{task_id}`) -> `StateManager`
+5.  **HLS 生成/更新:** `MediaMixer` -> `VideoTransPipe` -> `HLSManager`
+6.  **视频播放:** 前端 (`VideoPlayer`) -> 后端 API (`api.py:/playlists/...`, `api.py:/segments/...`) -> `HLSManager`/静态文件服务
+
+## 存储 (`storage/`)
+
+*   **任务数据:** `storage/tasks/{task_id}/`
+    *   `input/`: 存放上传的原始视频。
+    *   `media/`: 存放音视频分离后的文件 (silent video, vocals, background)。
+    *   `processing/`: 可能存放中间处理文件 (如临时播放列表)。
+    *   `output/`: 存放最终混合后的视频片段或完整视频 (`final_{task_id}.mp4`)。
+*   **公共文件:** `storage/public/`
+    *   `playlists/{task_id}/`: 存放 HLS 播放列表 (`.m3u8`)。
+    *   `segments/{task_id}/`: 存放 HLS 视频片段 (`.ts`)。
+*   **日志:** `storage/logs/app.log` (根据 `config.py` 配置)

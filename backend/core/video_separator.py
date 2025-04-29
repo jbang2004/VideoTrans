@@ -70,22 +70,16 @@ class VideoSeparator:
     async def separate_video(
         self,
         video_path: str,
-        start: float,
         output_dir: str,
-        segment_index: int,
-        target_sr: int,
-        duration: float = None
+        target_sr: int
     ) -> Dict[str, Union[str, float]]:
         """
         提取视频片段，分离人声和背景音乐
         
         Args:
             video_path: 视频文件路径
-            start: 开始时间（秒）
             output_dir: 输出目录
-            segment_index: 分段索引
             target_sr: 目标采样率
-            duration: 分段持续时间（可选）
             
         Returns:
             Dict[str, Union[str, float]]: 包含分离后文件路径的字典
@@ -106,21 +100,21 @@ class VideoSeparator:
             output_dir_path = Path(output_dir)
             output_dir_path.mkdir(parents=True, exist_ok=True)
             
-            silent_video = str(output_dir_path / f"video_silent_{segment_index}.mp4")
-            full_audio = str(output_dir_path / f"audio_full_{segment_index}.wav")
-            vocals_audio = str(output_dir_path / f"vocals_{segment_index}.wav")
-            background_audio = str(output_dir_path / f"background_{segment_index}.wav")
+            silent_video = str(output_dir_path / "video_silent.mp4")
+            full_audio = str(output_dir_path / "audio_full.wav")
+            vocals_audio = str(output_dir_path / "vocals.wav")
+            background_audio = str(output_dir_path / "background.wav")
 
-            # (1) 提取音频 & 视频
-            await extract_audio(video_path, full_audio, start, duration)
-            await extract_video(video_path, silent_video, start, duration)
+            # (1) 提取音频 & 视频（整段）
+            await extract_audio(video_path, full_audio)
+            await extract_video(video_path, silent_video)
 
             # (2) 分离人声
             vocals, background, sr = await self.separate_audio(full_audio)
 
             # 检查是否成功分离
             if vocals is None or background is None:
-                self.logger.error(f"音频分离失败，未能产生有效的vocals或background，segment_index={segment_index}")
+                self.logger.error("音频分离失败，未能产生有效的vocals或background")
                 return {}
 
             # (3) 重采样和归一化 - 使用asyncio.to_thread包装同步函数调用
@@ -154,12 +148,12 @@ class VideoSeparator:
 
             # 返回临时文件路径
             elapsed = time.time() - start_time
-            self.logger.debug(f"separate_video 完成，耗时 {elapsed:.2f}s，segment_index={segment_index}")
+            self.logger.debug(f"separate_video 完成，耗时 {elapsed:.2f}s")
             return temp_files
             
         except Exception as e:
             elapsed = time.time() - start_time
-            self.logger.error(f"separate_video 执行出错，耗时 {elapsed:.2f}s, 错误: {e}, segment_index={segment_index}")
+            self.logger.error(f"separate_video 执行出错，耗时 {elapsed:.2f}s, 错误: {e}")
             
             # 清理已生成的临时文件
             for file_path in temp_files.values():

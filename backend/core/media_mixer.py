@@ -46,9 +46,8 @@ class MediaMixer:
                 logger.warning("[MediaMixerActor] mix_media: 收到空的句子列表")
                 return None
             
-            seg_index = sentences_batch[0].segment_index
             batch_counter = task_state.batch_counter
-            logger.info(f"[MediaMixerActor] 开始处理分段 {seg_index}, 批次 {batch_counter}, 句子数 {len(sentences_batch)}")
+            logger.info(f"[MediaMixerActor] 开始处理批次 {batch_counter}, 句子数 {len(sentences_batch)}")
             
             # 生成输出路径
             output_path = task_state.task_paths.segments_dir / f"segment_{batch_counter}.mp4"
@@ -70,7 +69,7 @@ class MediaMixer:
             )
             
             if not success:
-                logger.error(f"[MediaMixerActor] 分段 {batch_counter} 处理失败, TaskID={task_state.task_id}")
+                logger.error(f"[MediaMixerActor] 批次 {batch_counter} 处理失败, TaskID={task_state.task_id}")
                 return None
             
             # 更新Actor中的音频缓冲区，但限制大小以节省内存
@@ -81,7 +80,7 @@ class MediaMixer:
             else:
                 self.full_audio_buffer = updated_buffer
                 
-            logger.info(f"[MediaMixerActor] 更新音频缓冲区, 分段 {batch_counter}, 句子数 {len(sentences_batch)}")
+            logger.info(f"[MediaMixerActor] 更新音频缓冲区, 批次 {batch_counter}, 句子数 {len(sentences_batch)}")
             
             # 返回处理后的视频片段路径
             return str(output_path)
@@ -127,13 +126,12 @@ async def create_mixed_segment(
         start_time_param, duration = await asyncio.to_thread(_calculate_time_params, sentences)
 
         # 3. 背景音乐混合
-        segment_index = sentences[0].segment_index
-        segment_files = task_state.segment_media_files.get(segment_index)
-        if not segment_files:
-            logger.error(f"[MediaMixer] 找不到分段 {segment_index} 对应的媒体文件信息")
+        media_files = task_state.media_files
+        if not media_files:
+            logger.error(f"[MediaMixer] 找不到媒体文件信息")
             return False, full_audio_buffer
 
-        background_audio_path = segment_files.get('background')
+        background_audio_path = media_files.get('background')
         if background_audio_path:
             # 调用异步函数 _process_background_audio
             audio_data = await _process_background_audio(
@@ -157,7 +155,7 @@ async def create_mixed_segment(
         updated_audio_buffer = np.concatenate((full_audio_buffer, full_audio))
 
         # 5. 处理视频
-        video_path = segment_files.get('video')
+        video_path = media_files.get('video')
         if not video_path:
             logger.warning("[MediaMixer] create_mixed_segment: 本片段无video_path可用")
             return False, full_audio_buffer
@@ -214,7 +212,7 @@ def _calculate_time_params(sentences: List[Sentence]) -> tuple:
 
     start_time = 0.0
     if not sentences[0].is_first:
-        start_time = (sentences[0].adjusted_start - sentences[0].segment_start * 1000) / 1000.0
+        start_time = sentences[0].adjusted_start / 1000.0
     duration = sum(s.adjusted_duration for s in sentences) / 1000.0
     return start_time, duration
 

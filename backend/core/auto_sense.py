@@ -36,7 +36,7 @@ class SenseAutoModel(BaseAutoModel):
         deep_update(self.vad_kwargs, cfg)
         return self.inference(input, input_len=input_len, model=self.vad_model, kwargs=self.vad_kwargs, **cfg)
 
-    def inference_with_vad(self, input, input_len=None, task_id=None, segment_index=None, task_paths=None, **cfg):
+    def inference_with_vad(self, input, input_len=None, task_id=None, task_paths=None, **cfg):
         kwargs = self.kwargs
         self.tokenizer = kwargs.get("tokenizer")
         results = None # Initialize
@@ -141,7 +141,6 @@ class SenseAutoModel(BaseAutoModel):
                                 sample_rate=fs,
                                 config=self.config,
                                 task_id=task_id,
-                                segment_index=segment_index,
                                 task_paths=task_paths
                             )
                             results_ret_list = sentence_list

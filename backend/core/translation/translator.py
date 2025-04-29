@@ -132,7 +132,7 @@ class Translator:
     async def translate_sentences(
         self,
         sentences: List,
-        batch_size: int = 100,
+        batch_size: int = 50,
         target_language: str = "zh"
     ) -> AsyncGenerator[List, None]:
         """翻译句子，返回异步生成器"""
@@ -144,8 +144,8 @@ class Translator:
         try:
             batch_size = int(batch_size)
         except (ValueError, TypeError):
-            self.logger.warning(f"无效的 batch_size 类型 {type(batch_size)}: {batch_size}，将使用默认值 100")
-            batch_size = 100 # 使用默认值
+            self.logger.warning(f"无效的 batch_size 类型 {type(batch_size)}: {batch_size}，将使用默认值 50")
+            batch_size = 50 # 使用默认值
 
         config = BatchConfig(initial_size=batch_size)
 

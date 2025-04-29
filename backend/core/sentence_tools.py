@@ -33,8 +33,6 @@ class Sentence:
     generated_audio: np.ndarray = field(default=None)
     adjusted_start: float = field(default=0.0)
     adjusted_duration: float = field(default=0.0)
-    segment_index: int = field(default=-1)
-    segment_start: float = field(default=0.0)
     task_id: str = field(default="")
 
 def tokens_timestamp_sentence(tokens: List[Token], timestamps: List[Timestamp], speaker_segments: List[SpeakerSegment], tokenizer, config: Config) -> List[Tuple[List[Token], List[Timestamp], int]]:
@@ -201,7 +199,7 @@ def _extract_segment(speech: torch.Tensor, start: int, end: int, target_samples:
         return None
 
 def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, config: Config, 
-                 task_id: str = None, segment_index: int = None, task_paths = None) -> List[Sentence]:
+                 task_id: str = None, task_paths = None) -> List[Sentence]:
     """
     提取每个句子的音频并保存为文件，设置句子的audio属性为文件路径。
 
@@ -211,7 +209,6 @@ def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, conf
         sr: 采样率
         config: 配置对象
         task_id: 任务ID (可选)
-        segment_index: 分段索引 (可选)
         task_paths: 任务路径对象 (可选)
 
     Returns:
@@ -295,15 +292,10 @@ def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, conf
         if task_id:
             s.task_id = task_id
             
-        # 如果有segment_index，设置到句子对象
-        if segment_index is not None:
-            s.segment_index = segment_index
-            
         # 只有当能够提取音频和有保存目录时才保存
         if audio_segment is not None and audio_prompts_dir is not None:
-            # 使用任务ID、分段索引和句子索引创建唯一文件名
-            seg_part = f"seg{segment_index}" if segment_index is not None else "seg_unknown"
-            audio_filename = f"{task_id}_{seg_part}_s{i}.wav"
+            # 使用任务ID和句子索引创建唯一文件名
+            audio_filename = f"{task_id}_s{i}.wav"
             audio_path = audio_prompts_dir / audio_filename
             
             try:
@@ -340,7 +332,7 @@ def export_sentences_to_txt(sentences: List[Sentence], output_path: Union[str, P
             for i, s in enumerate(sentences):
                 # 为每个句子生成唯一的ID，如果sentence_id未设置
                 display_id = s.sentence_id if s.sentence_id != -1 else f"auto_{i+1}"
-                f.write(f"--- Sentence {display_id} (Task: {s.task_id}, Seg: {s.segment_index}) ---\n")
+                f.write(f"--- Sentence {display_id} (Task: {s.task_id}) ---\n")
                 f.write(f"  Original Time : {s.start/1000:.3f}s - {s.end/1000:.3f}s\n")
                 f.write(f"  Adjusted Time : {s.adjusted_start/1000:.3f}s - {(s.adjusted_start + s.adjusted_duration)/1000:.3f}s (Duration: {s.adjusted_duration/1000:.3f}s)\n")
                 f.write(f"  TTS Duration  : {s.duration/1000:.3f}s (Speed: {s.speed:.2f}x)\n")
@@ -390,7 +382,6 @@ def get_sentences(tokens: List[Token],
                   sample_rate: int = 16000,
                   config: Config = None,
                   task_id: str = None,
-                  segment_index: int = None,
                   task_paths = None) -> List[Sentence]:
     """
     获取句子列表，包括音频提取和可选的文件保存，并在最后导出句子信息。
@@ -404,7 +395,6 @@ def get_sentences(tokens: List[Token],
         sample_rate: 采样率
         config: 配置
         task_id: 任务ID (可选)
-        segment_index: 分段索引 (可选)
         task_paths: 任务路径对象 (可选)
 
     Returns:
@@ -418,14 +408,13 @@ def get_sentences(tokens: List[Token],
     raw_sentences = tokens_timestamp_sentence(tokens, timestamps, sd_time_list, tokenizer, config)
     merged_sentences = merge_sentences(raw_sentences, tokenizer, input_duration, config)
     sentences_with_audio = extract_audio(merged_sentences, speech, sample_rate, config, 
-                                         task_id, segment_index, task_paths)
+                                         task_id, task_paths)
 
     # 在函数末尾，如果提供了任务信息，则导出句子到TXT文件
     if sentences_with_audio and task_id and task_paths and hasattr(task_paths, 'processing_dir'):
         try:
             # 定义导出文件名
-            seg_part = f"seg{segment_index}" if segment_index is not None else "seg_all" # 如果没有分段索引，用'all'
-            export_filename = f"sentences_{task_id}_{seg_part}.txt"
+            export_filename = f"sentences_{task_id}.txt"
             export_path = Path(task_paths.processing_dir) / export_filename
 
             # 调用导出函数 (直接调用，因为get_sentences在asyncio.to_thread中运行)

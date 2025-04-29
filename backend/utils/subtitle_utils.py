@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 def generate_subtitles_for_segment(
     sentences: List[Any],
-    segment_start_ms: float,
+    start_time_ms: float,
     output_sub_path: str,
     target_language: str = "en"
 ):
@@ -18,7 +18,7 @@ def generate_subtitles_for_segment(
 
     Args:
         sentences: 本段的句子列表
-        segment_start_ms: 当前段在全局中起始毫秒 (用来计算相对时间)
+        start_time_ms: 当前片段的起始时间（毫秒）
         output_sub_path: 存放字幕的 .ass 路径
         target_language: 用来确定拆分逻辑(中文/英文/日文/韩文)
     """
@@ -26,7 +26,7 @@ def generate_subtitles_for_segment(
 
     for s in sentences:
         # 计算相对时间
-        start_local = s.adjusted_start - segment_start_ms - s.segment_start * 1000
+        start_local = s.adjusted_start - start_time_ms
 
         sub_text = (s.trans_text or s.raw_text or "").strip()
         if not sub_text:

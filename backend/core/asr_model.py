@@ -48,14 +48,13 @@ class ASRModel:
             self.logger.error(f"ASR模型加载失败: {str(e)}")
             raise
     
-    async def generate(self, input, task_id=None, segment_index=None, task_paths=None, **kwargs):
+    async def generate(self, input, task_id=None, task_paths=None, **kwargs):
         """
         执行ASR模型生成方法
         
         Args:
             input: 输入音频文件路径
             task_id: 任务ID
-            segment_index: 分段索引
             task_paths: 任务路径对象
             **kwargs: 其他参数
             
@@ -69,7 +68,6 @@ class ASRModel:
             # 创建一个包含所有参数的字典，但将显式参数放在前面
             call_kwargs = {
                 'task_id': task_id,
-                'segment_index': segment_index,
                 'task_paths': task_paths,
                 **kwargs  # 将原始kwargs合并进来
             }

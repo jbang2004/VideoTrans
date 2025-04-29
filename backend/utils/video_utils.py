@@ -74,7 +74,7 @@ async def add_video_segment(
             await asyncio.to_thread(
                 generate_subtitles_for_segment,
                 sentences,
-                start_time * 1000,   # segment_start_ms
+                start_time * 1000,   # 开始时间（毫秒）
                 temp_ass.name,
                 task_state.target_language
             )
