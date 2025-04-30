@@ -37,6 +37,7 @@ from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.media_mixer import MediaMixer
 from utils.task_state import TaskState
 from utils.ffmpeg_utils import concat_videos, get_duration
+from core.supabase_client import SupabaseClient
 
 # 初始化全局日志配置
 init_logging()
@@ -92,6 +93,13 @@ class VideoTransPipe:
         self.config = global_config
         self.sample_rate = self.config.TARGET_SR
         self.logger = logger
+        
+        # 初始化 Supabase 客户端
+        try:
+            self.supabase_client = SupabaseClient(config=self.config)
+        except Exception as e:
+            self.logger.error(f"Failed to initialize SupabaseClient in VideoTransPipe: {e}", exc_info=True)
+            self.supabase_client = None
         
         # 获取所有必要的服务句柄
         handle_mapping = {
@@ -158,14 +166,26 @@ class VideoTransPipe:
             self._clean_memory()
 
     async def _init_task_state(self, task_id, video_path, target_language, generate_subtitle):
-        """初始化或获取任务状态"""
+        """初始化或获取任务状态，并创建 Supabase 任务记录"""
+        task_state = None
         try:
             if video_path and target_language:
-                # 创建新任务
-                task_data = await self.state_manager.create_task.remote(task_id, video_path, target_language, generate_subtitle)
-                task_state = task_data.get("task_state") if isinstance(task_data, dict) else None
+                # 创建新任务状态 (StateManager)
+                task_data_sm = await self.state_manager.create_task.remote(task_id, video_path, target_language, generate_subtitle)
+                task_state = task_data_sm.get("task_state") if isinstance(task_data_sm, dict) else None
+                
+                # 在 Supabase 中创建初始任务记录
+                if task_state and self.supabase_client:
+                    initial_task_data = {
+                        'task_id': task_id,
+                        'status': 'uploading', # 初始状态
+                        'target_language': target_language,
+                        'generate_subtitle': generate_subtitle,
+                        'original_video_path': str(video_path),
+                    }
+                    await self.supabase_client.store_task(initial_task_data)
             else:
-                # 获取已有任务状态
+                # 获取已有任务状态 (StateManager)
                 task_state = await self.state_manager.get_task_state.remote(task_id)
                 
             if not task_state:
@@ -177,6 +197,8 @@ class VideoTransPipe:
             self.logger.error(f"[{task_id}] 任务状态初始化失败: {e}")
             if task_id:
                 await self.state_manager.complete_task.remote(task_id, False, f"任务状态初始化失败: {e}")
+                if self.supabase_client:
+                    await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"任务状态初始化失败: {e}"})
             return None
 
     async def _init_hls(self, task_id, task_state):
@@ -192,15 +214,28 @@ class VideoTransPipe:
             return False
 
     async def _run_sep_asr(self, task_id, task_state):
-        """分离视频并执行语音识别"""
+        """分离视频并执行语音识别，并将结果存入Supabase"""
         seg_start_time = time.time()
         self.logger.info(f"[{task_id}] 开始处理视频")
         
+        media_files = None
+        sentences = []
+
         try:
             # 1. 获取视频时长和分离音视频
             duration = await get_duration(task_state.video_path)
             self.logger.info(f"[{task_id}] 处理视频，时长={duration:.2f}s")
             
+            # 更新 StateManager 中的任务状态 (只使用 task_id 和 batch_counter 参数)
+            await self.state_manager.update_task_progress.remote(task_id, batch_counter=0)
+            
+            # 单独更新 Supabase 中的状态
+            if self.supabase_client:
+                try:
+                    await self.supabase_client.update_task(task_id, {'status': 'preprocessing'})
+                except Exception as e:
+                    self.logger.error(f"Error updating task {task_id}: {e}")
+
             media_files = await self.video_separator.separate_video.remote(
                 task_state.video_path,
                 str(task_state.task_paths.media_dir),
@@ -209,10 +244,19 @@ class VideoTransPipe:
             
             if not media_files or "vocals" not in media_files or not Path(media_files["vocals"]).exists():
                 self.logger.warning(f"[{task_id}] 视频分离失败或无有效人声，跳过处理")
+                await self.state_manager.complete_task.remote(task_id, False, "视频分离失败或无人声")
                 return
                 
             # 记录分离结果
             task_state.media_files = media_files
+            # 更新 Supabase 中的 task 表 (分离完成)
+            if self.supabase_client:
+                await self.supabase_client.update_task(task_id, {
+                    'status': 'preprocessing', # 保持预处理状态
+                    'silent_video_path': str(media_files.get('video')),
+                    'vocals_audio_path': str(media_files.get('vocals')),
+                    'background_audio_path': str(media_files.get('background'))
+                })
             
             # 2. 执行ASR识别
             sentences = await self.asr.generate.remote(
@@ -228,10 +272,21 @@ class VideoTransPipe:
             
             if not sentences:
                 self.logger.info(f"[{task_id}] ASR未检测到语音，跳过后续处理")
+                # 更新 Supabase 中的 task 表 (即使无语音也要更新状态)
+                if self.supabase_client:
+                    await self.supabase_client.update_task(task_id, {'status': 'preprocessed', 'error_message': 'ASR未检测到语音'}) 
+                await self.state_manager.complete_task.remote(task_id, False, "ASR未检测到语音")
                 return
                 
-            # 3. 更新句子计数并运行翻译流水线
+            # 3. 更新句子计数
             self.logger.info(f"[{task_id}] ASR完成: {len(sentences)}个句子")
+
+            # 准备并将 sentences 保存到 Supabase
+            if self.supabase_client:
+                # 调用新的 store_sentences 方法，传入原始 sentences 列表和 task_id
+                await self.supabase_client.store_sentences(sentences, task_id)
+                # 更新 Supabase 中的 task 表 (预处理完成)
+                await self.supabase_client.update_task(task_id, {'status': 'preprocessed'}) # 标记预处理完成
             
             # 4. 运行翻译和TTS流水线
             pipeline_info = await self._run_translation_pipeline(sentences, task_state)
@@ -239,6 +294,12 @@ class VideoTransPipe:
             
         except Exception as e:
             self.logger.exception(f"[{task_id}] 处理视频时发生错误: {e}")
+            # 更新 Supabase 中的 task 表 (错误状态)
+            if self.supabase_client:
+                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': str(e)})
+            # 更新 StateManager 中的状态
+            await self.state_manager.complete_task.remote(task_id, False, f"处理视频错误: {e}")
+            
         finally:
             self._clean_memory()
             self.logger.info(f"[{task_id}] 视频处理耗时: {time.time() - seg_start_time:.2f}s")
@@ -441,7 +502,6 @@ def setup_pipeline_services():
         serve.run(pipeline_app, name="PipelineEngine", route_prefix=None)
         
         logger.info("主管道应用已部署，等待服务稳定...")
-        time.sleep(10)  # 等待服务稳定
 
         # 检查部署状态
         apps_status = serve.status().applications

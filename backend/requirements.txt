@@ -25,6 +25,7 @@ Requests
 scipy
 setuptools
 soundfile
+supabase>=2.2.0
 tiktoken
 torchinfo
 tqdm
