@@ -1,10 +1,10 @@
 // ===============================================
 // frontend/components/video-player/components/TranslationControls.tsx
 // ===============================================
-import React from "react"
+import React, { useEffect } from "react"
 import { Button } from "../../ui/button"
 import { Popover, PopoverTrigger, PopoverContent } from "../../ui/popover"
-import { ChevronUp, Languages, Subtitles, ArrowRight } from "lucide-react"
+import { ChevronUp, Languages, Subtitles, ArrowRight, Upload, Loader2 } from "lucide-react"
 import { cn } from "../../../lib/utils"
 import { LANGUAGES, API_BASE_URL } from "../utils/format"
 import type { TranslationState, TranslationControls } from "../types"
@@ -22,44 +22,117 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
     selectedLanguage,
     selectedFile,
     taskId,
-    // ============ (新增) ============
     subtitleWanted,
+    // 新增状态
+    isUploaded,
+    isPreprocessing,
+    isPreprocessed
   } = state
 
   const {
     startTranslation,
     stopTranslation,
     setLanguage,
-    // ============ (新增) ============
     toggleSubtitleWanted,
+    // 新增方法
+    uploadVideo,
+    preprocessVideo
   } = controls
+
+  // 当文件被选择后自动上传 - 和index.tsx中的逻辑一起确保上传流程
+  useEffect(() => {
+    if (selectedFile && !isUploaded && !isProcessing) {
+      uploadVideo();
+    }
+  }, [selectedFile, isUploaded, isProcessing]);
 
   // 语言选择 handle
   const handleLanguageSelect = (language: string) => {
     setLanguage(language)
   }
 
-  // 主按钮
-  let buttonText = "翻译"
-  let buttonIcon = <ArrowRight className="h-3 w-3" />
-  
-  if (isCompleted) {
-    buttonText = "下载"
-  } else if (isTranslating) {
-    buttonText = "处理中"
+  // 根据当前状态决定按钮行为和文字
+  const getButtonProps = () => {
+    // 如果已经完成，显示下载按钮
+    if (isCompleted) {
+      return {
+        text: "下载",
+        onClick: () => window.open(`${API_BASE_URL}/download/${taskId}`, "_blank"),
+        disabled: false,
+        icon: null
+      }
+    }
+    
+    // 如果正在翻译中，显示翻译中状态
+    if (isTranslating) {
+      return {
+        text: "翻译中",
+        onClick: () => {},
+        disabled: true,
+        icon: <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+      }
+    }
+    
+    // 如果正在预处理中，显示预处理中状态
+    if (isPreprocessing) {
+      return {
+        text: "预处理中",
+        onClick: () => {},
+        disabled: true,
+        icon: <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+      }
+    }
+    
+    // 如果正在上传中，显示上传中状态
+    if (isProcessing && !isPreprocessing && !isTranslating) {
+      return {
+        text: "上传中",
+        onClick: () => {},
+        disabled: true,
+        icon: <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+      }
+    }
+    
+    // 如果预处理完成，显示翻译按钮
+    if (isPreprocessed) {
+      return {
+        text: "翻译",
+        onClick: startTranslation,
+        disabled: false,
+        icon: <ArrowRight className="h-3 w-3 mr-1" />
+      }
+    }
+    
+    // 如果已上传但未预处理，显示预处理按钮
+    if (isUploaded) {
+      return {
+        text: "预处理",
+        onClick: preprocessVideo,
+        disabled: false,
+        icon: <ArrowRight className="h-3 w-3 mr-1" />
+      }
+    }
+    
+    // 如果有文件但还未上传完成，显示正在上传
+    if (selectedFile && !isUploaded) {
+      return {
+        text: "上传中",
+        onClick: () => {},
+        disabled: true, 
+        icon: <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+      }
+    }
+    
+    // 默认情况，没有文件
+    return {
+      text: "处理",
+      onClick: () => {},
+      disabled: true,
+      icon: null
+    }
   }
 
-  const handleMainButtonClick = async () => {
-    if (isCompleted && taskId) {
-      window.open(`${API_BASE_URL}/download/${taskId}`, "_blank")
-      return
-    }
-    if (isTranslating) {
-      stopTranslation()
-      return
-    }
-    await startTranslation()
-  }
+  const buttonProps = getButtonProps()
 
   return (
     <div className="flex items-center gap-2">
@@ -95,35 +168,32 @@ export function TranslationControls({ state, controls }: TranslationControlsProp
         </PopoverContent>
       </Popover>
 
-      {/* ============== (新增) 字幕开关按钮 ============== */}
+      {/* 字幕开关按钮 */}
       <Button
         size="sm"
         variant="ghost"
         className="h-7 px-2.5 rounded-full hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white text-xs"
-        // 一旦开始翻译 or 已完成，就不可再改
-        disabled={isTranslating || isCompleted || isProcessing}
+        // 一旦开始预处理或翻译或已完成，就不可再改
+        disabled={isPreprocessing || isTranslating || isCompleted || isProcessing || isPreprocessed}
         onClick={() => toggleSubtitleWanted()}
       >
         <Subtitles className="h-3 w-3 mr-1 opacity-70" />
         {subtitleWanted ? '开' : '关'}
       </Button>
 
-      {/* 单个主按钮 => 开始翻译 / 翻译中 / 下载 */}
+      {/* 主操作按钮：上传/预处理/翻译/下载 */}
       <Button
         size="sm"
         variant="ghost"
         className={cn(
           "h-7 px-2.5 rounded-full hover:bg-white/10 active:scale-95 transition-transform text-white/70 hover:text-white text-xs",
-          (selectedFile || isTranslating || isCompleted) && "bg-white/10"
+          (selectedFile || isUploaded || isPreprocessed || isTranslating || isCompleted) && "bg-white/10"
         )}
-        // 若正在处理且没到完成, 也可禁用
-        disabled={isProcessing && !isCompleted}
-        onClick={handleMainButtonClick}
+        disabled={buttonProps.disabled}
+        onClick={buttonProps.onClick}
       >
-        {isTranslating && (
-          <span className="mr-1 h-3 w-3 inline-block animate-pulse rounded-full bg-emerald-400"></span>
-        )}
-        {buttonText}
+        {buttonProps.icon}
+        {buttonProps.text}
       </Button>
     </div>
   )

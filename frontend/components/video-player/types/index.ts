@@ -17,7 +17,7 @@ export interface PlayerControls {
   setLocalVideoUrl: (url: string | null) => void
 }
 
-// ====================== (新增字段) ======================
+// ====================== (更新字段) ======================
 export interface TranslationState {
   isTranslating: boolean
   isProcessing: boolean
@@ -31,9 +31,16 @@ export interface TranslationState {
   
   // HLS播放列表是否已就绪
   hlsReady: boolean
+
+  // 上传状态
+  isUploaded: boolean
+  
+  // 预处理状态
+  isPreprocessing: boolean
+  isPreprocessed: boolean
 }
 
-// ====================== (新增方法) ======================
+// ====================== (更新方法) ======================
 export interface TranslationControls {
   startTranslation: () => Promise<void>
   stopTranslation: () => void
@@ -41,6 +48,12 @@ export interface TranslationControls {
 
   // 切换"字幕Wanted"的布尔值
   toggleSubtitleWanted: () => void
+  
+  // 上传视频
+  uploadVideo: () => Promise<void>
+  
+  // 预处理视频
+  preprocessVideo: () => Promise<void>
 }
 
 export interface HLSInstance {

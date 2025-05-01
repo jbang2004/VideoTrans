@@ -43,15 +43,21 @@ export default function VideoPlayer({ initialFile }: VideoPlayerProps) {
   const handleFileSelect = (file: File) => {
     const previewUrl = URL.createObjectURL(file)
     playerControls.setLocalVideoUrl(previewUrl)
+    
     setTranslationState(prev => ({
       ...prev,
       selectedFile: file,
       isTranslating: false,
       isProcessing: false,
+      isUploaded: false,
+      isPreprocessing: false,
+      isPreprocessed: false,
       taskId: null,
       isCompleted: false,
       hlsReady: false
     }))
+    
+    // 文件选择后自动上传的逻辑已移至TranslationControls组件的useEffect中
   }
 
   const handleMouseMove = (e: React.MouseEvent) => {

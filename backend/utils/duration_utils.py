@@ -79,7 +79,24 @@ async def apply_speed_and_silence(sentences: List[Sentence], sample_rate: int = 
                 except Exception as e:
                     logger.error(f"[{task_id}] 句子 {sentence.sentence_id}: 添加静音失败: {e}")
             
-            # --- 4. 更新句子的duration属性以反映最终音频长度 ---
+            # --- 4. 为最后一个句子添加视频结尾静音 ---
+            if hasattr(sentence, 'is_last') and sentence.is_last and hasattr(sentence, 'ending_silence') and sentence.ending_silence > 0:
+                try:
+                    ending_silence_samples = int(sentence.ending_silence * sample_rate / 1000)
+                    logger.info(f"[{task_id}] 句子 {sentence.sentence_id}: 为视频结尾添加 {sentence.ending_silence:.2f}毫秒静音 ({ending_silence_samples} 个采样点)")
+                    
+                    # 创建静音数据并拼接到音频末尾
+                    ending_silence = np.zeros(ending_silence_samples, dtype=np.float32)
+                    sentence.generated_audio = np.concatenate([sentence.generated_audio, ending_silence])
+                    
+                    # 记录操作结果
+                    new_duration = (len(sentence.generated_audio) / sample_rate) * 1000
+                    logger.warning(f"[{task_id}] 句子 {sentence.sentence_id}: 视频结尾静音已添加，原始时长: {original_duration:.2f}毫秒，新时长: {new_duration:.2f}毫秒")
+                
+                except Exception as e:
+                    logger.error(f"[{task_id}] 句子 {sentence.sentence_id}: 添加视频结尾静音失败: {e}")
+            
+            # --- 5. 更新句子的duration属性以反映最终音频长度 ---
             final_duration = (len(sentence.generated_audio) / sample_rate) * 1000
             sentence.duration = final_duration
             sentence.adjusted_duration = final_duration  # 确保 adjusted_duration 也更新

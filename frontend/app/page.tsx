@@ -40,6 +40,11 @@ export default function HomePage() {
   const [showPlayer, setShowPlayer] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [ignoreBackgroundReset, setIgnoreBackgroundReset] = useState<boolean>(false)
+  const [taskId, setTaskId] = useState<string | null>(null)
+  const [taskStatus, setTaskStatus] = useState<string>('')
+  const [progress, setProgress] = useState<number>(0)
+  const [hlsUrl, setHlsUrl] = useState<string>('')
+  const [downloadUrl, setDownloadUrl] = useState<string>('')
 
   // Refs
   const particleRef = useRef<ParticleBackgroundRef>(null) // Ref for direct interaction
@@ -155,7 +160,8 @@ export default function HomePage() {
 
       if (file.type.startsWith('video/')) {
         setSelectedFile(file)
-        setShowUploadButton(false) // Hide upload button
+        // 上传按钮仍需保留，只改变显示方式
+        setShowUploadButton(false)
         setShowPlayer(true) // Show video player component
       } else {
         alert("请选择一个有效的视频文件。") // Please select a valid video file.
@@ -252,6 +258,80 @@ export default function HomePage() {
     }, 100);
   };
 
+  // 添加任务状态轮询函数，支持自定义终止状态
+  const pollTaskStatus = (id: string, stopStatuses: string[] = ['preprocessed','success','error']) => {
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`http://localhost:8000/task/${id}`)
+        const info = await res.json()
+        setTaskStatus(info.status)
+        setProgress(info.progress)
+        if (info.hls_url) setHlsUrl(info.hls_url)
+        if (info.download_url) setDownloadUrl(info.download_url)
+        if (stopStatuses.includes(info.status)) {
+          clearInterval(interval)
+        }
+      } catch (e) {
+        console.error('获取任务状态失败', e)
+        clearInterval(interval)
+      }
+    }, 2000)
+  }
+
+  // 上传视频，仅保存任务记录
+  const handleUpload = async () => {
+    if (!selectedFile) return
+    const fd = new FormData()
+    fd.append('video', selectedFile)
+    fd.append('target_language', 'zh')
+    fd.append('generate_subtitle', 'false')
+    try {
+      const res = await fetch('http://localhost:8000/upload', {
+        method: 'POST',
+        body: fd
+      })
+      const data = await res.json()
+      setTaskId(data.task_id)
+      setTaskStatus(data.status)
+    } catch (err) {
+      console.error('上传视频失败', err)
+    }
+  }
+
+  // 触发预处理
+  const handleStartPreprocess = async () => {
+    if (!taskId) return
+    const fd = new FormData()
+    fd.append('target_language', 'zh')
+    fd.append('generate_subtitle', 'false')
+    try {
+      const res = await fetch(`http://localhost:8000/preprocess/${taskId}`, {
+        method: 'POST',
+        body: fd
+      })
+      const data = await res.json()
+      setTaskStatus(data.status)
+      pollTaskStatus(taskId, ['preprocessed', 'error'])
+    } catch (err) {
+      console.error('启动预处理失败', err)
+    }
+  }
+
+  // 触发翻译，并在成功后结束轮询
+  const handleTranslateVideo = async () => {
+    if (!taskId) return
+    try {
+      const res = await fetch(`http://localhost:8000/translate/${taskId}`, {
+        method: 'POST'
+      })
+      const data = await res.json()
+      setTaskStatus(data.status)
+      pollTaskStatus(taskId, ['success', 'error'])
+    } catch (err) {
+      console.error('翻译请求失败', err)
+    }
+  }
+
   // --- Rendering Logic ---
 
   return (
@@ -302,8 +382,41 @@ export default function HomePage() {
           }}
         />
 
+        {/* 视频操作控制面板 - 只在有选择文件或任务ID时显示，且不在播放器显示时显示 */}
+        {(selectedFile || taskId) && !showPlayer && (
+          <div className="fixed top-0 left-0 right-0 z-40 bg-white/80 backdrop-blur-sm shadow-md py-4">
+            <div className="container mx-auto px-4 flex flex-col items-center">
+              {/* 按钮组：上传/预处理/翻译/下载 - 移除了选择视频按钮 */}
+              <div className="flex items-center space-x-4">
+                {/* 上传视频 */}
+                {selectedFile && !taskId && (
+                  <button id="upload-button" onClick={handleUpload} className="px-4 py-2 bg-blue-600 text-white rounded">上传视频</button>
+                )}
+                {/* 开始预处理 */}
+                {taskId && taskStatus === 'uploaded' && (
+                  <button id="start-preprocess-button" onClick={handleStartPreprocess} className="px-4 py-2 bg-indigo-600 text-white rounded">开始预处理</button>
+                )}
+                {/* 开始翻译 */}
+                {taskStatus === 'preprocessed' && (
+                  <button id="translate-button" onClick={handleTranslateVideo} className="px-4 py-2 bg-green-600 text-white rounded">开始翻译</button>
+                )}
+                {/* 下载视频 */}
+                {taskStatus === 'success' && downloadUrl && (
+                  <a href={downloadUrl} target="_blank" rel="noopener noreferrer" className="px-4 py-2 bg-purple-600 text-white rounded">下载视频</a>
+                )}
+              </div>
+              {/* 状态信息 */}
+              {taskId && (
+                <div className="mt-2 text-gray-700">
+                  状态: {taskStatus} ({progress}%)
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* 上传组件 - 使用与导航栏一致的磨砂玻璃效果，支持拖拽 */}
-        {showUploadButton && (
+        {showUploadButton && !selectedFile && !taskId && (
           <div 
             className="fixed inset-0 flex justify-center items-center z-10 animate-fade-in"
             onClick={(e) => {

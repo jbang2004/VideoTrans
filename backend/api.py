@@ -51,16 +51,17 @@ templates = Jinja2Templates(directory=str(current_dir / "templates"))
 class VideoTransAPI:
     """视频翻译API服务"""
     def __init__(self):
-        """初始化API服务，从 PipelineEngine 应用获取 handles"""
+        """初始化 API 服务，从 PreprocessingEngine 和 TranslationEngine 应用获取 handles"""
         self.logger = logger
         try:
-            # 获取主流水线句柄
-            self.pipeline = serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
+            # 获取预处理和翻译流水线句柄
+            self.preprocessing_handle = serve.get_deployment_handle("PreprocessingPipe", app_name="PreprocessingEngine")
+            self.translation_handle = serve.get_deployment_handle("TranslationPipe", app_name="TranslationEngine")
             
             # 初始化Supabase客户端
             self.supabase_client = SupabaseClient(config=config)
             
-            self.logger.info("VideoTransAPI 初始化成功，已连接到 PipelineEngine 服务")
+            self.logger.info("VideoTransAPI 初始化成功，已连接到 PreprocessingEngine 和 TranslationEngine 服务")
         except Exception as e:
             self.logger.error(f"VideoTransAPI 初始化失败: {e}", exc_info=True)
             # 在初始化失败时抛出异常，阻止服务启动
@@ -75,16 +76,16 @@ class VideoTransAPI:
     async def upload_video(
         self,
         video: UploadFile = File(...),
-        target_language: str = Form("zh"),
-        generate_subtitle: bool = Form(False),  # 是否烧制字幕
+        target_language: str = Form(None),  # 修改为可选参数
+        generate_subtitle: bool = Form(None),  # 修改为可选参数
     ):
         """
         上传视频接口
         
         Args:
             video: 视频文件
-            target_language: 目标语言
-            generate_subtitle: 是否生成字幕
+            target_language: 目标语言（可选）
+            generate_subtitle: 是否生成字幕（可选）
         """
         try:
             if not video:
@@ -93,7 +94,8 @@ class VideoTransAPI:
             if not video.content_type.startswith('video/'):
                 raise HTTPException(status_code=400, detail="只支持视频文件")
                 
-            if target_language not in ["zh", "en", "ja", "ko"]:
+            # 当target_language被提供时才检查
+            if target_language is not None and target_language not in ["zh", "en", "ja", "ko"]:
                 raise HTTPException(status_code=400, detail=f"不支持的目标语言: {target_language}")
             
             # 生成任务ID
@@ -113,30 +115,81 @@ class VideoTransAPI:
                 self.logger.error(f"保存文件失败: {str(e)}")
                 raise HTTPException(status_code=500, detail="文件保存失败")
             
-            # 在调用VideoTransPipe之前添加日志
-            self.logger.info(f"正在调用VideoTransPipe处理任务: {task_id}")
-            try:
-                # 直接将任务创建参数传递给pipeline
-                self.pipeline.remote(
-                    task_id=task_id,
-                    video_path=str(video_path),
-                    target_language=target_language,
-                    generate_subtitle=generate_subtitle
-                )
-                self.logger.info(f"成功触发VideoTransPipe处理: {task_id}")
-            except Exception as e:
-                self.logger.error(f"调用VideoTransPipe失败: {str(e)}", exc_info=True)
-            
-            return JSONResponse(content={
-                'status': 'processing',
+            # 准备任务数据
+            task_data = {
                 'task_id': task_id,
-                'message': '视频上传成功，开始翻译'
+                'status': 'uploaded',
+                'original_video_path': str(video_path),
+            }
+            
+            # 只有当target_language被提供时才加入
+            if target_language is not None:
+                task_data['target_language'] = target_language
+                
+            # 只有当generate_subtitle被提供时才加入
+            if generate_subtitle is not None:
+                task_data['generate_subtitle'] = generate_subtitle
+                
+            # 记录上传任务到数据库，不启动预处理
+            await self.supabase_client.store_task(task_data)
+
+            return JSONResponse(content={
+                'status': 'uploaded',
+                'task_id': task_id,
+                'message': '视频上传成功'
             })
         except HTTPException as e:
             raise e
         except Exception as e:
             self.logger.error(f"上传处理失败: {str(e)}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/preprocess/{task_id}")
+    async def preprocess_video(
+        self,
+        task_id: str,
+        target_language: str = Form("zh"),
+        generate_subtitle: bool = Form(False),
+    ):
+        """
+        触发预处理流水线接口
+        """
+        # 从数据库获取原始视频路径
+        existing = await self.supabase_client.get_task(task_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="任务不存在")
+            
+        # 确保任务状态为'uploaded'
+        if existing.get('status') != 'uploaded':
+            raise HTTPException(status_code=400, detail=f"任务当前状态为 {existing.get('status')}，不能开始预处理")
+            
+        video_path = existing.get('original_video_path')
+        if not video_path:
+            raise HTTPException(status_code=400, detail="原始视频路径不存在")
+        try:
+            # 先更新任务，设置target_language和generate_subtitle
+            await self.supabase_client.update_task(task_id, {
+                'target_language': target_language,
+                'generate_subtitle': generate_subtitle
+            })
+            
+            # 异步调用预处理管道
+            self.preprocessing_handle.remote(
+                task_id=task_id,
+                video_path=str(video_path),
+                target_language=target_language,
+                generate_subtitle=generate_subtitle
+            )
+            # 更新任务状态
+            await self.supabase_client.update_task(task_id, {'status': 'preprocessing'})
+            return JSONResponse(content={
+                'status': 'preprocessing',
+                'task_id': task_id,
+                'message': '预处理已开始'
+            })
+        except Exception as e:
+            self.logger.error(f"调用PreprocessingPipe失败: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail="启动预处理失败")
 
     @app.get("/task/{task_id}")
     async def get_task_status(self, task_id: str):
@@ -157,10 +210,11 @@ class VideoTransAPI:
             progress = 0
             status = task.get('status', 'unknown')
             
+            # 两阶段流程进度映射
             if status == 'preprocessing':
                 progress = 10
             elif status == 'preprocessed':
-                progress = 30
+                progress = 40
             elif status == 'translating':
                 progress = 50
             elif status == 'mixing':
@@ -262,6 +316,36 @@ class VideoTransAPI:
             filename=f"final_{task_id}.mp4",
         )
 
+    @app.post("/translate/{task_id}")
+    async def translate_video(self, task_id: str):
+        """触发翻译与合成流水线"""
+        try:
+            # 获取任务信息，确保预处理已完成
+            task = await self.supabase_client.get_task(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="任务不存在。")
+            current_status = task.get('status')
+            if current_status != 'preprocessed':
+                raise HTTPException(status_code=400, detail=f"任务状态为 '{current_status}'。仅当状态为 'preprocessed' 时才能开始翻译。")
+
+            # 异步触发翻译流水线
+            self.translation_handle.translate_task.remote(task_id)
+            self.logger.info(f"成功触发TranslationPipe处理: {task_id}")
+
+            # 更新状态
+            await self.supabase_client.update_task(task_id, {'status': 'translating'})
+
+            return JSONResponse(content={
+                'status': 'translating',
+                'task_id': task_id,
+                'message': '翻译与合成已开始'
+            })
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            self.logger.error(f"调用TranslationPipe失败: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"无法开始翻译: {e}")
+
 # 静态文件挂载
 app.mount("/playlists", 
     StaticFiles(directory=str(config.PUBLIC_DIR / "playlists"), 
@@ -282,18 +366,22 @@ def setup_server():
         ray.init(address="auto", namespace="videotrans", ignore_reinit_error=True)
         logger.info("已连接到Ray集群")
 
-    # 检查核心服务 PipelineEngine 是否已部署
+    # 检查预处理和翻译应用是否已部署
     try:
-        # 只需要检查 PipelineEngine 应用是否存在即可
-        serve.get_app_handle("PipelineEngine")
-        logger.info("成功连接到已部署的 PipelineEngine 应用")
+        serve.get_app_handle("PreprocessingEngine")
+        logger.info("成功连接到已部署的 PreprocessingEngine 应用")
     except Exception as e:
-        logger.error(f"连接 PipelineEngine 应用失败，请确保 pipeline_scheduler 已经成功启动并部署了 PipelineEngine: {e}")
-        # 如果核心管道不存在，API无法工作，直接退出
-        raise RuntimeError(f"无法连接到核心 PipelineEngine 应用: {e}")
+        logger.error(f"连接 PreprocessingEngine 应用失败，请确保 pipeline_scheduler 已经成功启动并部署了 PreprocessingEngine: {e}")
+        raise RuntimeError(f"无法连接到核心 PreprocessingEngine 应用: {e}")
+    try:
+        serve.get_app_handle("TranslationEngine")
+        logger.info("成功连接到已部署的 TranslationEngine 应用")
+    except Exception as e:
+        logger.error(f"连接 TranslationEngine 应用失败，请确保 pipeline_scheduler 已经成功启动并部署了 TranslationEngine: {e}")
+        raise RuntimeError(f"无法连接到核心 TranslationEngine 应用: {e}")
 
-    # 直接部署API服务
-    # 注意：这里的 VideoTransAPI 初始化会尝试获取 PipelineEngine 内的句柄
+    # 直接部署 API 服务
+    # 提示：VideoTransAPI 初始化时会获取 PreprocessingEngine 和 TranslationEngine 两个核心应用的句柄
     video_api = VideoTransAPI.bind()
     serve.run(video_api, name="VideoAPI", route_prefix="/", blocking=True)
 

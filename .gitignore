@@ -52,3 +52,4 @@ temp/
 *.tmp
 .ipynb_checkpoints/
 测试结果/
+.cursor/rules/two_pipeline_refactor.mdc

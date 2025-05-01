@@ -34,6 +34,7 @@ class Sentence:
     adjusted_start: float = field(default=0.0)
     adjusted_duration: float = field(default=0.0)
     task_id: str = field(default="")
+    ending_silence: float = field(default=0.0)
 
 def tokens_timestamp_sentence(tokens: List[Token], timestamps: List[Timestamp], speaker_segments: List[SpeakerSegment], tokenizer, config: Config) -> List[Tuple[List[Token], List[Timestamp], int]]:
     sentences = []
@@ -140,7 +141,8 @@ def merge_sentences(raw_sentences: List[Tuple[List[Token], List[Timestamp], int]
             current_tokens_count = len(tokens)
 
     if current:
-        current.target_duration = input_duration - current.start
+        current.target_duration = current.end - current.start
+        current.ending_silence = input_duration - current.end
         merged_sentences.append(current)
 
     if merged_sentences:

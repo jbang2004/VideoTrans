@@ -108,7 +108,8 @@ class SupabaseClient:
                     'target_duration_ms': target_duration_ms,
                     'audio_prompt_path': getattr(s, 'audio', None),
                     'is_first': getattr(s, 'is_first', False),
-                    'is_last': getattr(s, 'is_last', False)
+                    'is_last': getattr(s, 'is_last', False),
+                    'ending_silence_ms': getattr(s, 'ending_silence', 0.0)
                 }
                 
                 # 处理特殊类型数据
@@ -162,7 +163,9 @@ class SupabaseClient:
                     trans_text=data.get('trans_text', '') or "",
                     is_first=data.get('is_first', False),
                     is_last=data.get('is_last', False),
+                    ending_silence=data.get('ending_silence_ms', 0.0)
                 )
+                
                 sentences.append(sentence)
                 
             logger.info(f"成功将 {len(sentences)} 个句子转换为对象 (任务 {task_id})")
