@@ -12,7 +12,7 @@ from utils.audio_utils import apply_fade_effect, mix_with_background, normalize_
 from utils.video_utils import add_video_segment 
 from config import Config
 from core.sentence_tools import Sentence
-from utils.task_state import TaskState
+from utils.task_storage import TaskPaths
 
 # 使用全局日志配置，直接获取 logger
 logger = logging.getLogger(__name__)
@@ -37,71 +37,74 @@ class MediaMixer:
     async def mix_media(
         self,
         sentences_batch: List[Sentence],
-        task_state: TaskState,
+        media_files: dict,
+        task_paths: TaskPaths,
+        generate_subtitle: bool,
+        batch_counter: int,
+        task_id: str,
+        target_language: str
     ) -> Optional[str]:
         """处理一批句子并返回处理后的视频片段路径"""
         
         try:
             if not sentences_batch:
-                logger.warning("[MediaMixerActor] mix_media: 收到空的句子列表")
+                logger.warning(f"[{task_id}] mix_media: 收到空的句子列表")
                 return None
             
-            batch_counter = task_state.batch_counter
-            logger.info(f"[MediaMixerActor] 开始处理批次 {batch_counter}, 句子数 {len(sentences_batch)}")
+            logger.info(f"[{task_id}] 开始处理批次 {batch_counter}, 句子数 {len(sentences_batch)}")
             
-            # 生成输出路径
-            output_path = task_state.task_paths.segments_dir / f"segment_{batch_counter}.mp4"
+            output_path = task_paths.segments_dir / f"segment_{batch_counter}.mp4"
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # 初始化参数
             max_val = 1.0
             
-            # 处理音视频，使用Actor中保存的full_audio_buffer
             success, updated_buffer = await create_mixed_segment(
                 sentences=sentences_batch,
-                task_state=task_state,
+                media_files=media_files,
+                task_paths=task_paths,
                 output_path=str(output_path),
-                generate_subtitle=task_state.generate_subtitle,
+                generate_subtitle=generate_subtitle,
                 config=self.config,
                 sample_rate=self.sample_rate,
                 max_val=max_val,
-                full_audio_buffer=self.full_audio_buffer
+                full_audio_buffer=self.full_audio_buffer,
+                task_id=task_id,
+                target_language=target_language
             )
             
             if not success:
-                logger.error(f"[MediaMixerActor] 批次 {batch_counter} 处理失败, TaskID={task_state.task_id}")
+                logger.error(f"[{task_id}] 批次 {batch_counter} 处理失败")
                 return None
             
-            # 更新Actor中的音频缓冲区，但限制大小以节省内存
-            # 只保留最后5秒的音频用于下一批次的平滑过渡
             if len(updated_buffer) > self.sample_rate * 5:
                 preserve_samples = min(len(updated_buffer), int(self.sample_rate * 5))
                 self.full_audio_buffer = updated_buffer[-preserve_samples:]
             else:
                 self.full_audio_buffer = updated_buffer
                 
-            logger.info(f"[MediaMixerActor] 更新音频缓冲区, 批次 {batch_counter}, 句子数 {len(sentences_batch)}")
+            logger.info(f"[{task_id}] 更新音频缓冲区, 批次 {batch_counter}, 句子数 {len(sentences_batch)}")
             
-            # 返回处理后的视频片段路径
             return str(output_path)
                 
         except Exception as e:
-            logger.exception(f"[MediaMixerActor] mix_media 执行出错: {str(e)}")
+            logger.exception(f"[{task_id}] mix_media 执行出错: {str(e)}")
             return None
         finally:
-            # 清理不再需要的变量
             if 'updated_buffer' in locals() and 'success' in locals() and success and updated_buffer is not self.full_audio_buffer:
                 del updated_buffer
 
 async def create_mixed_segment(
     sentences: List[Sentence],
-    task_state: TaskState,
+    media_files: dict,
+    task_paths: TaskPaths,
     output_path: str,
     generate_subtitle: bool,
     config: Config,
     sample_rate: int,
     max_val: float,
-    full_audio_buffer: np.ndarray
+    full_audio_buffer: np.ndarray,
+    task_id: str,
+    target_language: str
 ) -> Tuple[bool, np.ndarray]:
     """
     将一批句子的合成音频与原视频片段混合，并可生成带字幕的视频。
@@ -113,27 +116,22 @@ async def create_mixed_segment(
     
     try:
         if not sentences:
-            logger.warning("[MediaMixer] create_mixed_segment: 收到空的句子列表")
+            logger.warning(f"[{task_id}] create_mixed_segment: 收到空的句子列表")
             return False, full_audio_buffer
 
-        # 1. 拼接所有句子的合成音频 - 直接用asyncio.to_thread包装
         full_audio = await asyncio.to_thread(_concat_audio_segments, sentences, full_audio_buffer, config.AUDIO_OVERLAP)
         if len(full_audio) == 0:
-            logger.error("[MediaMixer] create_mixed_segment: 没有有效的合成音频数据")
+            logger.error(f"[{task_id}] create_mixed_segment: 没有有效的合成音频数据")
             return False, full_audio_buffer
 
-        # 2. 计算时间参数 - 直接用asyncio.to_thread包装
         start_time_param, duration = await asyncio.to_thread(_calculate_time_params, sentences)
 
-        # 3. 背景音乐混合
-        media_files = task_state.media_files
         if not media_files:
-            logger.error(f"[MediaMixer] 找不到媒体文件信息")
+            logger.error(f"[{task_id}] create_mixed_segment: 找不到媒体文件信息")
             return False, full_audio_buffer
 
-        background_audio_path = media_files.get('background')
+        background_audio_path = media_files.get('background_audio_path')
         if background_audio_path:
-            # 调用异步函数 _process_background_audio
             audio_data = await _process_background_audio(
                 background_audio_path, 
                 start_time_param, 
@@ -144,21 +142,17 @@ async def create_mixed_segment(
                 config.BACKGROUND_VOLUME, 
                 max_val
             )
-            # 更新音频数据
             if audio_data is not None:
                 full_audio = audio_data
-                # 显式删除不再需要的引用
                 del audio_data
                 audio_data = None
 
-        # 4. 更新全局音频缓冲区 - 保留用于音频平滑过渡
-        updated_audio_buffer = np.concatenate((full_audio_buffer, full_audio))
-
-        # 5. 处理视频
-        video_path = media_files.get('video')
+        video_path = media_files.get('silent_video_path')
         if not video_path:
-            logger.warning("[MediaMixer] create_mixed_segment: 本片段无video_path可用")
+            logger.warning(f"[{task_id}] create_mixed_segment: 本片段无video_path可用")
             return False, full_audio_buffer
+            
+        updated_audio_buffer = np.concatenate((full_audio_buffer, full_audio))
 
         await add_video_segment(
             video_path=video_path,
@@ -168,26 +162,22 @@ async def create_mixed_segment(
             output_path=output_path,
             sentences=sentences,
             generate_subtitle=generate_subtitle,
-            task_state=task_state,
+            target_language=target_language,
             sample_rate=sample_rate
         )
         
-        # 优化：仅保留最后N秒的音频用于下一批次的过渡，而不是整个缓冲区
-        if len(updated_audio_buffer) > sample_rate * 5:  # 例如仅保留最后5秒
+        if len(updated_audio_buffer) > sample_rate * 5:
             preserve_samples = min(len(updated_audio_buffer), int(sample_rate * 5))
             updated_audio_buffer = updated_audio_buffer[-preserve_samples:]
         
         return True, updated_audio_buffer
         
     except Exception as e:
-        logger.exception(f"[MediaMixer] create_mixed_segment 执行出错，错误: {e}")
+        logger.exception(f"[{task_id}] create_mixed_segment 执行出错，错误: {e}")
         return False, full_audio_buffer
     finally:
-        # 现有的清理逻辑很好
         if 'full_audio' in locals() and full_audio is not None and full_audio is not updated_audio_buffer: 
             del full_audio
-        if 'audio_data' in locals() and audio_data is not None:
-            del audio_data
 
 def _concat_audio_segments(sentences: List[Sentence], full_audio_buffer: np.ndarray, overlap: float) -> np.ndarray:
     """拼接所有句子的合成音频"""
@@ -195,7 +185,6 @@ def _concat_audio_segments(sentences: List[Sentence], full_audio_buffer: np.ndar
     for sentence in sentences:
         if sentence.generated_audio is not None and len(sentence.generated_audio) > 0:
             audio_data = np.asarray(sentence.generated_audio, dtype=np.float32)
-            # 关键部分: 应用音频淡入淡出效果以实现平滑过渡
             if len(full_audio) > 0:
                 audio_data = apply_fade_effect(audio_data, full_audio_buffer, overlap)
             full_audio = np.concatenate((full_audio, audio_data))
@@ -222,7 +211,6 @@ async def _process_background_audio(
 ) -> np.ndarray:
     """处理背景音频 - 异步版本"""
     try:
-        # 调用异步函数 mix_with_background
         mixed_audio = await mix_with_background(
             bg_path=bg_path,
             start_time=start_time,
@@ -234,6 +222,5 @@ async def _process_background_audio(
         )
         return normalize_audio(mixed_audio, max_val)
     finally:
-        # 显式释放大型中间变量
         if 'mixed_audio' in locals():
             del mixed_audio

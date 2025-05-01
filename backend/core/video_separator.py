@@ -139,17 +139,17 @@ class VideoSeparator:
             if full_audio_path.exists():
                 await asyncio.to_thread(full_audio_path.unlink, missing_ok=True)
 
-            temp_files = {
-                'video': silent_video,
-                'vocals': vocals_audio,
-                'background': background_audio,
-                'duration': segment_duration
+            # 使用与 Supabase tasks 表列名一致的键名
+            media_files = {
+                'silent_video_path': silent_video,
+                'vocals_audio_path': vocals_audio,
+                'background_audio_path': background_audio
             }
 
-            # 返回临时文件路径
+            # 返回包含文件路径的字典
             elapsed = time.time() - start_time
             self.logger.debug(f"separate_video 完成，耗时 {elapsed:.2f}s")
-            return temp_files
+            return media_files
             
         except Exception as e:
             elapsed = time.time() - start_time

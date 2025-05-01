@@ -18,6 +18,8 @@ import os
 import time
 
 from config import Config, init_logging
+from core.supabase_client import SupabaseClient
+
 config = Config()
 config.init_directories()
 
@@ -50,14 +52,17 @@ class VideoTransAPI:
     """视频翻译API服务"""
     def __init__(self):
         """初始化API服务，从 PipelineEngine 应用获取 handles"""
+        self.logger = logger
         try:
-            # 所有核心服务现在都在 PipelineEngine 应用下
-            self.state_manager = serve.get_deployment_handle("StateManager", app_name="PipelineEngine")
+            # 获取主流水线句柄
             self.pipeline = serve.get_deployment_handle("VideoTransPipe", app_name="PipelineEngine")
-            self.logger = logger
-            self.logger.info("VideoTransAPI 初始化成功，已连接到 PipelineEngine 中的服务")
+            
+            # 初始化Supabase客户端
+            self.supabase_client = SupabaseClient(config=config)
+            
+            self.logger.info("VideoTransAPI 初始化成功，已连接到 PipelineEngine 服务")
         except Exception as e:
-            self.logger.error(f"VideoTransAPI 初始化失败，无法连接到 PipelineEngine 中的服务: {e}", exc_info=True)
+            self.logger.error(f"VideoTransAPI 初始化失败: {e}", exc_info=True)
             # 在初始化失败时抛出异常，阻止服务启动
             raise RuntimeError(f"VideoTransAPI 无法连接到必要的服务: {e}")
 
@@ -136,14 +141,59 @@ class VideoTransAPI:
     @app.get("/task/{task_id}")
     async def get_task_status(self, task_id: str):
         """获取任务状态"""
-        result = await self.state_manager.get_task_status.remote(task_id)
-        if not result:
+        try:
+            # 使用Supabase客户端获取任务状态
+            task = await self.supabase_client._ensure_client()
+            task = await self.supabase_client.get_task(task_id)
+            
+            if not task:
+                return JSONResponse(content={
+                    "status": "error",
+                    "message": "任务不存在",
+                    "progress": 0
+                })
+            
+            # 根据任务状态计算进度
+            progress = 0
+            status = task.get('status', 'unknown')
+            
+            if status == 'preprocessing':
+                progress = 10
+            elif status == 'preprocessed':
+                progress = 30
+            elif status == 'translating':
+                progress = 50
+            elif status == 'mixing':
+                progress = 85
+            elif status == 'success':
+                progress = 100
+            
+            response_data = {
+                "status": status,
+                "message": task.get('error_message', '处理中') if status == 'error' else '处理中',
+                "progress": progress,
+                "hls_ready": False
+            }
+            
+            # 只要 hls_playlist_url 存在，就认为 HLS 已就绪
+            if task.get('hls_playlist_url'):
+                response_data["hls_url"] = task.get('hls_playlist_url')
+                response_data["hls_ready"] = True
+            
+            # 如果状态为成功，更新消息并添加下载链接
+            if status == 'success':
+                response_data["message"] = "处理完成"
+                response_data["download_url"] = f"/download/{task_id}"
+            
+            return JSONResponse(content=response_data)
+            
+        except Exception as e:
+            self.logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
             return JSONResponse(content={
                 "status": "error",
-                "message": "任务不存在",
+                "message": f"获取状态失败: {str(e)}",
                 "progress": 0
             })
-        return JSONResponse(content=result)
 
     @app.get("/playlists/{task_id}/{filename}")
     async def serve_playlist(self, task_id: str, filename: str):

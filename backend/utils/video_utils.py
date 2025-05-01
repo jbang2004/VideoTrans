@@ -24,7 +24,7 @@ async def add_video_segment(
     output_path: str,
     sentences: List[Any],
     generate_subtitle: bool,
-    task_state: Any,
+    target_language: str,
     sample_rate: int
 ):
     """
@@ -40,7 +40,7 @@ async def add_video_segment(
         output_path: 输出文件路径
         sentences: 句子列表
         generate_subtitle: 是否生成字幕
-        task_state: 任务状态对象
+        target_language: 目标语言
         sample_rate: 采样率
     """
     if not os.path.exists(video_path):
@@ -76,7 +76,7 @@ async def add_video_segment(
                 sentences,
                 start_time * 1000,   # 开始时间（毫秒）
                 temp_ass.name,
-                task_state.target_language
+                target_language
             )
 
             # 生成带字幕的视频

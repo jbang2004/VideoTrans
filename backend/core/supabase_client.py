@@ -1,10 +1,9 @@
 import os
 import numpy as np
 from supabase._async.client import AsyncClient, create_client
-from supabase.lib.client_options import AsyncClientOptions as ClientOptions
 from config import Config
 import logging
-import json
+from core.sentence_tools import Sentence
 
 logger = logging.getLogger(__name__)
 def sanitize_for_json(value):
@@ -26,21 +25,19 @@ class SupabaseClient:
     def __init__(self, config=None):
         self.config = config or Config()
         self.client = None
-        # 只初始化配置，实际客户端会在第一次使用时创建
-        logger.info("SupabaseClient instance initialized with config, client will be created on first use.")
+        logger.info("SupabaseClient初始化完成")
 
     async def _ensure_client(self):
         """确保客户端已初始化"""
         if self.client is None:
             try:
-                # 使用异步方式创建客户端
                 self.client = await create_client(
                     self.config.SUPABASE_URL,
                     self.config.SUPABASE_KEY
                 )
-                logger.info("Supabase async client created successfully.")
+                logger.info("Supabase客户端创建成功")
             except Exception as e:
-                logger.error(f"Failed to create Supabase client: {e}", exc_info=True)
+                logger.error(f"创建Supabase客户端失败: {e}", exc_info=True)
                 raise
         return self.client
 
@@ -48,36 +45,22 @@ class SupabaseClient:
         """存储任务信息"""
         try:
             client = await self._ensure_client()
-            # 确保数据类型正确
-            for key, value in task_data.items():
-                if isinstance(value, (list, dict)):
-                    task_data[key] = json.dumps(value)
-            
             response = await client.table('tasks').insert(task_data).execute()
-            logger.info(f"Stored task {task_data.get('task_id')}. Response count: {len(response.data) if response.data else 0}")
+            logger.info(f"存储任务 {task_data.get('task_id')} 成功，响应数量: {len(response.data) if response.data else 0}")
             return response
         except Exception as e:
-            logger.error(f"Error storing task {task_data.get('task_id')}: {e}", exc_info=True)
+            logger.error(f"存储任务 {task_data.get('task_id')} 失败: {e}", exc_info=True)
             return None
 
     async def update_task(self, task_id, update_data):
         """更新任务信息"""
         try:
             client = await self._ensure_client()
-            # 确保 updated_at 字段总是被更新
-            if 'updated_at' not in update_data:
-                update_data['updated_at'] = 'now()'
-            
-            # 确保数据类型正确
-            for key, value in update_data.items():
-                if isinstance(value, (list, dict)):
-                    update_data[key] = json.dumps(value)
-            
             response = await client.table('tasks').update(update_data).eq('task_id', task_id).execute()
-            logger.info(f"Updated task {task_id}. Response count: {len(response.data) if response.data else 0}")
+            logger.info(f"更新任务 {task_id} 成功，响应数量: {len(response.data) if response.data else 0}")
             return response
         except Exception as e:
-            logger.error(f"Error updating task {task_id}: {e}", exc_info=True)
+            logger.error(f"更新任务 {task_id} 失败: {e}", exc_info=True)
             return None
 
     async def get_task(self, task_id):
@@ -85,40 +68,37 @@ class SupabaseClient:
         try:
             client = await self._ensure_client()
             response = await client.table('tasks').select('*').eq('task_id', task_id).execute()
-            logger.info(f"Fetched task {task_id}. Found: {len(response.data) > 0}")
+            logger.info(f"获取任务 {task_id}，找到: {len(response.data) > 0}")
             if response.data and len(response.data) > 0:
                 return response.data[0]
             return None
         except Exception as e:
-            logger.error(f"Error fetching task {task_id}: {e}", exc_info=True)
+            logger.error(f"获取任务 {task_id} 失败: {e}", exc_info=True)
             return None
 
     async def store_sentences(self, sentences, task_id):
-        """批量存储句子信息，并在内部处理数据转换"""
+        """批量存储句子信息"""
         if not sentences:
-            logger.warning(f"No sentences data to store for task {task_id}.")
+            logger.warning(f"任务 {task_id} 没有句子数据需要存储")
             return None
             
         try:
             client = await self._ensure_client()
-
-            json_sentences = [] # 直接构建最终用于插入的列表
+            json_sentences = []
+            
             for idx, s in enumerate(sentences):
-                # 1. 从原始对象提取数据并构建基础字典
+                # 从原始对象提取数据
                 speaker_id = getattr(s, 'speaker_id', -1)
                 start_ms = getattr(s, 'start', 0)
                 end_ms = getattr(s, 'end', 0)
                 
-                # 优先使用 s.target_duration，否则回退到 end - start
+                # 计算目标持续时间
                 target_duration = getattr(s, 'target_duration', None)
                 target_duration_ms = target_duration if target_duration is not None else (end_ms - start_ms)
-                # 确保时长不为负
                 target_duration_ms = max(0, target_duration_ms)
 
-                # 获取 audio_prompt_path (可能为 None)
-                audio_prompt_path = getattr(s, 'audio', None)
-
-                raw_sentence_data = {
+                # 构建句子数据
+                sentence_data = {
                     'task_id': task_id,
                     'sentence_index': idx,
                     'raw_text': getattr(s, 'raw_text', ''),
@@ -126,56 +106,68 @@ class SupabaseClient:
                     'end_ms': end_ms,
                     'speaker_id': speaker_id,
                     'target_duration_ms': target_duration_ms,
-                    'audio_prompt_path': audio_prompt_path  # 添加此字段
+                    'audio_prompt_path': getattr(s, 'audio', None),
+                    'is_first': getattr(s, 'is_first', False),
+                    'is_last': getattr(s, 'is_last', False)
                 }
                 
-                # 2. 处理特殊类型（如 NumPy），得到可以直接插入的数据字典
-                #    sanitize_for_json 会递归处理嵌套结构中的 NumPy 类型
-                #    假设数据库驱动能处理 Python dict/list 到 JSON/JSONB 列
-                sanitized_data = sanitize_for_json(raw_sentence_data)
+                # 处理特殊类型数据
+                json_sentences.append(sanitize_for_json(sentence_data))
 
-                # 3. 直接添加处理后的字典 (移除了内部循环和 json.dumps)
-                json_sentences.append(sanitized_data)
-
-            # 4. 执行数据库插入
-            if not json_sentences:
-                 logger.warning(f"Task {task_id}: No sentences were processed successfully for storage.")
-                 return None
-                 
-            response = await client.table('sentences').insert(json_sentences).execute()
-            logger.info(f"Stored {len(json_sentences)} sentences for task {task_id}. Response count: {len(response.data) if response.data else 0}")
-            return response
+            # 执行数据库插入
+            if json_sentences:
+                response = await client.table('sentences').insert(json_sentences).execute()
+                logger.info(f"存储 {len(json_sentences)} 个句子到任务 {task_id}，响应数量: {len(response.data) if response.data else 0}")
+                return response
+            else:
+                logger.warning(f"任务 {task_id}: 没有有效的句子数据可存储")
+                return None
+                
         except AttributeError as ae:
-             logger.error(f"Error processing sentence attributes for task {task_id}. Ensure sentence objects have expected attributes (raw_text, start, end, optionally speaker_id). Error: {ae}", exc_info=True)
-             return None
+            logger.error(f"处理句子属性时出错 (任务 {task_id}): {ae}", exc_info=True)
+            return None
         except Exception as e:
-            # Log the first raw sentence data for debugging if error occurs
-            first_raw_data = {} 
-            if sentences:
-                try:
-                    s = sentences[0]
-                    first_raw_data = {
-                        'task_id': task_id, 
-                        'sentence_index': 0,
-                        'raw_text': getattr(s, 'raw_text', ''),
-                        'start_ms': getattr(s, 'start', 0),
-                        'end_ms': getattr(s, 'end', 0),
-                        'speaker_id': getattr(s, 'speaker_id', -1),
-                        'target_duration_ms': getattr(s, 'end', 0) - getattr(s, 'start', 0)
-                    }
-                except Exception as inner_e:
-                    logger.error(f"Error extracting data from first sentence for logging: {inner_e}")
-
-            logger.error(f"Error storing sentences for task {task_id}. First raw sentence data: {first_raw_data}. Error: {e}", exc_info=True)
+            logger.error(f"存储句子失败 (任务 {task_id}): {e}", exc_info=True)
             return None
 
-    async def get_sentences(self, task_id):
-        """获取任务的所有句子，按索引排序"""
+    async def get_sentences(self, task_id, as_objects=False):
+        """
+        获取任务的所有句子，按索引排序
+        
+        Args:
+            task_id: 任务ID
+            as_objects: 是否将结果转换为Sentence对象列表
+        """
         try:
             client = await self._ensure_client()
             response = await client.table('sentences').select('*').eq('task_id', task_id).order('sentence_index').execute()
-            logger.info(f"Fetched sentences for task {task_id}. Count: {len(response.data)}")
-            return response.data
+            logger.info(f"获取任务 {task_id} 的句子，数量: {len(response.data)}")
+            
+            # 如果不需要转换为对象，直接返回原始数据
+            if not as_objects:
+                return response.data
+                
+            # 将原始数据转换为Sentence对象
+            sentences = []
+            for data in response.data:
+                sentence = Sentence(
+                    task_id=task_id,
+                    sentence_id=data.get('sentence_index', -1),
+                    raw_text=data.get('raw_text', ''),
+                    start=data.get('start_ms', 0.0),
+                    end=data.get('end_ms', 0.0),
+                    speaker_id=data.get('speaker_id', -1),
+                    target_duration=data.get('target_duration_ms'),
+                    audio=data.get('audio_prompt_path', ""),
+                    trans_text=data.get('trans_text', '') or "",
+                    is_first=data.get('is_first', False),
+                    is_last=data.get('is_last', False),
+                )
+                sentences.append(sentence)
+                
+            logger.info(f"成功将 {len(sentences)} 个句子转换为对象 (任务 {task_id})")
+            return sentences
+            
         except Exception as e:
-            logger.error(f"Error fetching sentences for task {task_id}: {e}", exc_info=True)
+            logger.error(f"获取句子失败 (任务 {task_id}): {e}", exc_info=True)
             return [] 

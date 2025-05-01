@@ -16,7 +16,7 @@ if index_tts_dir not in sys.path:
 import aiofiles
 import torch
 import gc
-from typing import List, Optional, Dict, Any, AsyncGenerator
+from typing import List, Optional, Dict, Any, Tuple
 from pathlib import Path
 
 # Ray 和 Serve
@@ -26,7 +26,6 @@ from ray.serve.handle import DeploymentHandle
 
 # 项目模块
 from config import Config, init_logging
-from core.state_manager import StateManager
 from core.hls_manager import HLSManager
 from core.video_separator import VideoSeparator
 from core.asr_model import ASRModel
@@ -35,9 +34,10 @@ from core.my_index_tts import MyIndexTTSDeployment
 from core.timeadjust.duration_aligner import DurationAligner
 from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.media_mixer import MediaMixer
-from utils.task_state import TaskState
+from utils.task_storage import TaskPaths
 from utils.ffmpeg_utils import concat_videos, get_duration
 from core.supabase_client import SupabaseClient
+from core.sentence_tools import Sentence # 添加 Sentence 导入
 
 # 初始化全局日志配置
 init_logging()
@@ -63,7 +63,6 @@ except Exception as e:
 # --- Ray Serve 部署句柄创建 ---
 # 统一 handle 命名，确保后续可读性和一致性
 try:
-    state_manager_handle = StateManager.options(name="StateManager", num_replicas=1, ray_actor_options={"num_cpus": 0.25}).bind(global_config)
     hls_manager_handle = HLSManager.options(name="hls_manager", num_replicas=1, ray_actor_options={"num_cpus": 0.5}).bind()
     video_separator_handle = VideoSeparator.options(name="video_separator", num_replicas=1, max_ongoing_requests=1, ray_actor_options={"num_cpus": 1, "num_gpus": 0.2}).bind()
     asr_handle = ASRModel.options(name="asr_model", num_replicas=1, max_ongoing_requests=1, ray_actor_options={"num_cpus": 1, "num_gpus": 0.3}).bind()
@@ -87,7 +86,7 @@ except Exception as e:
     logging_config={"log_level": "INFO"} # 控制 Serve 日志级别
 )
 class VideoTransPipe:
-    """视频翻译流水线主协调器 (重构版)"""
+    """视频翻译流水线主协调器 (重构版, 无StateManager)"""
     def __init__(self, **handles: DeploymentHandle):
         """初始化视频翻译流水线协调器"""
         self.config = global_config
@@ -101,10 +100,9 @@ class VideoTransPipe:
             self.logger.error(f"Failed to initialize SupabaseClient in VideoTransPipe: {e}", exc_info=True)
             self.supabase_client = None
         
-        # 获取所有必要的服务句柄
+        # 获取所有必要的服务句柄 (移除 StateManager)
         handle_mapping = {
-            "StateManager_handle": "state_manager",
-            "hls_manager_handle": "hls_manager", 
+            "hls_manager_handle": "hls_manager",
             "video_separator_handle": "video_separator",
             "asr_model_handle": "asr",
             "translator_handle": "translator",
@@ -131,213 +129,414 @@ class VideoTransPipe:
 
     async def __call__(self, task_id: str, video_path: str = None, target_language: str = None, generate_subtitle: bool = False) -> Dict[str, Any]:
         """处理单个视频翻译任务"""
-        task_state: Optional[TaskState] = None
+        media_files: Optional[Dict] = None
+        merged_segments: List[str] = []
         start_pipeline_time = time.time()
         self.logger.info(f"[{task_id}] 开始处理视频任务。语言: {target_language}, 字幕: {generate_subtitle}")
         
         try:
-            # 初始化任务状态和HLS
-            task_state = await self._init_task_state(task_id, video_path, target_language, generate_subtitle)
-            if not task_state:
+            # 1. 初始化任务状态和路径 (数据库)
+            init_success = await self._init_task_state(task_id, video_path, target_language, generate_subtitle)
+            if not init_success:
                 return {"status": "error", "message": "任务状态初始化失败"}
-                
-            if not await self._init_hls(task_id, task_state):
+
+            # 2. 初始化HLS管理器
+            if not await self._init_hls(task_id):
                 return {"status": "error", "message": "HLS管理器初始化失败"}
-                
-            # 处理视频并合并结果
-            await self._run_sep_asr(task_id, task_state)
-            return await self._merge_segments(task_id, task_state)
-            
+
+            # 3. 运行视频分离和ASR
+            media_files = await self._run_sep_asr(task_id, video_path)
+            if media_files is None:
+                # 查询最终状态为返回值
+                final_status = await self.supabase_client.get_task(task_id) if self.supabase_client else None
+                status_msg = final_status.get('status', 'error') if final_status else 'error'
+                error_msg = final_status.get('error_message', '视频分离或ASR失败') if final_status else '视频分离或ASR失败'
+                return {"status": status_msg, "message": error_msg}
+
+            # 4. 运行翻译 -> HLS 流水线
+            merged_segments = await self._run_translation_pipeline(task_id=task_id)
+
+            # 5. 合并最终视频
+            return await self._merge_segments(task_id, merged_segments)
+
         except Exception as e:
-            self.logger.exception(f"[{task_id}] 任务处理失败: {e}")
-            if task_id and task_state:
-                await self.state_manager.complete_task.remote(task_id, False, f"处理失败: {e}")
+            self.logger.exception(f"[{task_id}] 任务处理主流程失败: {e}")
+            if task_id and self.supabase_client:
+                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"主流程失败: {e}"})
             return {"status": "error", "message": f"处理失败: {e}"}
-            
+
         finally:
-            # 清理并记录总耗时
             pipeline_end_time = time.time()
             self.logger.info(f"[{task_id}] 任务处理总耗时: {pipeline_end_time - start_pipeline_time:.2f}s")
-            
-            if task_state:
-                if hasattr(task_state, 'media_files'): task_state.media_files = {}
-                if hasattr(task_state, 'merged_segments'): task_state.merged_segments.clear()
-            
             self._clean_memory()
 
-    async def _init_task_state(self, task_id, video_path, target_language, generate_subtitle):
-        """初始化或获取任务状态，并创建 Supabase 任务记录"""
-        task_state = None
+    async def _init_task_state(self, task_id, video_path, target_language, generate_subtitle) -> bool:
+        """初始化任务路径，并在 Supabase 中创建或更新任务记录，返回是否成功"""
         try:
-            if video_path and target_language:
-                # 创建新任务状态 (StateManager)
-                task_data_sm = await self.state_manager.create_task.remote(task_id, video_path, target_language, generate_subtitle)
-                task_state = task_data_sm.get("task_state") if isinstance(task_data_sm, dict) else None
-                
-                # 在 Supabase 中创建初始任务记录
-                if task_state and self.supabase_client:
-                    initial_task_data = {
-                        'task_id': task_id,
-                        'status': 'uploading', # 初始状态
-                        'target_language': target_language,
-                        'generate_subtitle': generate_subtitle,
-                        'original_video_path': str(video_path),
-                    }
-                    await self.supabase_client.store_task(initial_task_data)
-            else:
-                # 获取已有任务状态 (StateManager)
-                task_state = await self.state_manager.get_task_state.remote(task_id)
-                
-            if not task_state:
-                raise ValueError("无法获取或创建任务状态")
-                
-            return task_state
-            
-        except Exception as e:
-            self.logger.error(f"[{task_id}] 任务状态初始化失败: {e}")
-            if task_id:
-                await self.state_manager.complete_task.remote(task_id, False, f"任务状态初始化失败: {e}")
-                if self.supabase_client:
-                    await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"任务状态初始化失败: {e}"})
-            return None
+            if not video_path or not target_language:
+                 raise ValueError("缺少 video_path 或 target_language")
 
-    async def _init_hls(self, task_id, task_state):
+            # 1. 创建任务路径对象和目录 (内部使用)
+            task_paths = TaskPaths(self.config, task_id)
+            await asyncio.to_thread(task_paths.create_directories)
+            self.logger.info(f"[{task_id}] 任务目录已创建: {task_paths.task_dir}")
+
+            # 2. 检查并创建/更新 Supabase 任务记录
+            if self.supabase_client:
+                # 检查是否已存在
+                existing_task = await self.supabase_client.get_task(task_id)
+                
+                task_data = {
+                    'task_id': task_id,
+                    'status': 'preprocessing',
+                    'target_language': target_language,
+                    'generate_subtitle': generate_subtitle,
+                    'original_video_path': str(video_path),
+                }
+                
+                if existing_task:
+                    self.logger.info(f"[{task_id}] 更新已存在的任务记录，状态: {task_data['status']}")
+                    await self.supabase_client.update_task(task_id, task_data)
+                else:
+                    self.logger.info(f"[{task_id}] 创建新任务记录，状态: {task_data['status']}")
+                    response = await self.supabase_client.store_task(task_data)
+                    if not response or not response.data:
+                        raise Exception("存储初始任务到 Supabase 失败")
+            else:
+                 raise ConnectionError("Supabase client 未初始化")
+
+            return True  # 返回成功
+
+        except Exception as e:
+            self.logger.error(f"[{task_id}] 任务初始化失败: {e}")
+            if task_id and self.supabase_client:
+                try:
+                    await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"任务初始化失败: {e}"})
+                except Exception as update_e:
+                    self.logger.error(f"[{task_id}] 更新 Supabase 状态失败: {update_e}")
+            return False  # 返回失败
+
+    async def _init_hls(self, task_id: str) -> bool:
         """初始化HLS管理器"""
         try:
-            result = await self.hls_manager.create_manager.remote(task_id, task_state.task_paths)
+            # 在内部创建 task_paths
+            task_paths = TaskPaths(self.config, task_id)
+            
+            result = await self.hls_manager.create_manager.remote(task_id, task_paths)
             if isinstance(result, dict) and result.get("status") == "error":
                 raise RuntimeError(f"HLS管理器创建失败: {result.get('message')}")
+            self.logger.info(f"[{task_id}] HLS管理器初始化成功")
             return True
         except Exception as e:
             self.logger.error(f"[{task_id}] HLS管理器初始化失败: {e}")
-            await self.state_manager.complete_task.remote(task_id, False, f"HLS管理器初始化失败: {e}")
+            if self.supabase_client:
+                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"HLS初始化失败: {e}"})
             return False
 
-    async def _run_sep_asr(self, task_id, task_state):
+    async def _run_sep_asr(self, task_id: str, video_path: str) -> Optional[Dict]:
         """分离视频并执行语音识别，并将结果存入Supabase"""
         seg_start_time = time.time()
         self.logger.info(f"[{task_id}] 开始处理视频")
-        
         media_files = None
-        sentences = []
 
         try:
-            # 1. 获取视频时长和分离音视频
-            duration = await get_duration(task_state.video_path)
+            # 在内部创建 task_paths
+            task_paths = TaskPaths(self.config, task_id)
+            
+            # 检查任务当前状态，跳过已完成的处理
+            if self.supabase_client:
+                current_task = await self.supabase_client.get_task(task_id)
+                if current_task and current_task.get('status') == 'preprocessed':
+                    self.logger.info(f"[{task_id}] 任务已预处理完成，跳过分离和ASR")
+                    return {
+                        'silent_video_path': current_task.get('silent_video_path'),
+                        'vocals_audio_path': current_task.get('vocals_audio_path'),
+                        'background_audio_path': current_task.get('background_audio_path')
+                    }
+
+            # 1. 获取视频时长和执行分离
+            duration = await get_duration(video_path)
             self.logger.info(f"[{task_id}] 处理视频，时长={duration:.2f}s")
             
-            # 更新 StateManager 中的任务状态 (只使用 task_id 和 batch_counter 参数)
-            await self.state_manager.update_task_progress.remote(task_id, batch_counter=0)
-            
-            # 单独更新 Supabase 中的状态
-            if self.supabase_client:
-                try:
-                    await self.supabase_client.update_task(task_id, {'status': 'preprocessing'})
-                except Exception as e:
-                    self.logger.error(f"Error updating task {task_id}: {e}")
-
             media_files = await self.video_separator.separate_video.remote(
-                task_state.video_path,
-                str(task_state.task_paths.media_dir),
+                video_path,
+                str(task_paths.media_dir),
                 self.config.TARGET_SR
             )
-            
-            if not media_files or "vocals" not in media_files or not Path(media_files["vocals"]).exists():
-                self.logger.warning(f"[{task_id}] 视频分离失败或无有效人声，跳过处理")
-                await self.state_manager.complete_task.remote(task_id, False, "视频分离失败或无人声")
-                return
-                
-            # 记录分离结果
-            task_state.media_files = media_files
-            # 更新 Supabase 中的 task 表 (分离完成)
+
+            if not media_files or "vocals_audio_path" not in media_files or not Path(media_files["vocals_audio_path"]).exists():
+                self.logger.warning(f"[{task_id}] 视频分离失败或无有效人声")
+                if self.supabase_client:
+                    await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': '视频分离失败或无人声'})
+                return None
+
+            # 2. 更新分离文件路径
             if self.supabase_client:
-                await self.supabase_client.update_task(task_id, {
-                    'status': 'preprocessing', # 保持预处理状态
-                    'silent_video_path': str(media_files.get('video')),
-                    'vocals_audio_path': str(media_files.get('vocals')),
-                    'background_audio_path': str(media_files.get('background'))
-                })
-            
-            # 2. 执行ASR识别
+                update_data = {**media_files, 'status': 'preprocessing'}
+                await self.supabase_client.update_task(task_id, update_data)
+                
+            self.logger.info(f"[{task_id}] 视频分离完成")
+
+            # 3. 执行ASR识别
             sentences = await self.asr.generate.remote(
-                input=media_files["vocals"],
+                input=media_files["vocals_audio_path"],
                 cache={},
                 language="auto",
                 use_itn=True,
                 batch_size_s=60,
                 merge_vad=False,
                 task_id=task_id,
-                task_paths=task_state.task_paths
+                task_paths=task_paths
             )
-            
-            if not sentences:
-                self.logger.info(f"[{task_id}] ASR未检测到语音，跳过后续处理")
-                # 更新 Supabase 中的 task 表 (即使无语音也要更新状态)
-                if self.supabase_client:
-                    await self.supabase_client.update_task(task_id, {'status': 'preprocessed', 'error_message': 'ASR未检测到语音'}) 
-                await self.state_manager.complete_task.remote(task_id, False, "ASR未检测到语音")
-                return
-                
-            # 3. 更新句子计数
-            self.logger.info(f"[{task_id}] ASR完成: {len(sentences)}个句子")
 
-            # 准备并将 sentences 保存到 Supabase
+            # 4. 处理ASR结果
+            if not sentences:
+                self.logger.info(f"[{task_id}] ASR未检测到语音")
+                if self.supabase_client:
+                    await self.supabase_client.update_task(task_id, {'status': 'preprocessed', 'error_message': 'ASR未检测到语音'})
+                return media_files  # 返回media_files允许继续处理，但翻译阶段会因为无句子而停止
+
+            # 5. 保存句子到Supabase
             if self.supabase_client:
-                # 调用新的 store_sentences 方法，传入原始 sentences 列表和 task_id
-                await self.supabase_client.store_sentences(sentences, task_id)
-                # 更新 Supabase 中的 task 表 (预处理完成)
-                await self.supabase_client.update_task(task_id, {'status': 'preprocessed'}) # 标记预处理完成
-            
-            # 4. 运行翻译和TTS流水线
-            pipeline_info = await self._run_translation_pipeline(sentences, task_state)
-            self.logger.info(f"[{task_id}] 子流水线处理完成: {pipeline_info}")
-            
+                self.logger.info(f"[{task_id}] ASR完成: {len(sentences)}个句子")
+                response = await self.supabase_client.store_sentences(sentences, task_id)
+                if not response or not response.data:
+                     raise Exception("存储句子到 Supabase 失败")
+                await self.supabase_client.update_task(task_id, {'status': 'preprocessed'})
+                self.logger.info(f"[{task_id}] 预处理完成")
+
+            return media_files
+
         except Exception as e:
-            self.logger.exception(f"[{task_id}] 处理视频时发生错误: {e}")
-            # 更新 Supabase 中的 task 表 (错误状态)
+            self.logger.exception(f"[{task_id}] 处理视频分离或ASR时发生错误: {e}")
             if self.supabase_client:
-                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': str(e)})
-            # 更新 StateManager 中的状态
-            await self.state_manager.complete_task.remote(task_id, False, f"处理视频错误: {e}")
-            
+                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"分离/ASR错误: {e}"})
+            return None
+
         finally:
             self._clean_memory()
-            self.logger.info(f"[{task_id}] 视频处理耗时: {time.time() - seg_start_time:.2f}s")
+            self.logger.info(f"[{task_id}] 视频分离和ASR处理耗时: {time.time() - seg_start_time:.2f}s")
 
-    async def _merge_segments(self, task_id, task_state):
+    async def _run_translation_pipeline(self, task_id: str) -> List[str]:
+        """运行从翻译到媒体混合的子流水线 (从数据库获取依赖信息)"""
+        processed_tts_batches = 0
+        added_hls_segments = 0
+        start_time = time.time()
+        current_time = 0.0
+        merged_segments_paths = []
+        batch_counter = 0
+
+        # --- 从数据库获取所需信息 ---
+        if not self.supabase_client:
+            self.logger.error(f"[{task_id}] Supabase客户端未初始化，无法进行翻译处理")
+            return []
+
+        try:
+            task_data = await self.supabase_client.get_task(task_id)
+            if not task_data:
+                self.logger.error(f"[{task_id}] 无法从数据库获取任务信息")
+                return []
+
+            target_language = task_data.get('target_language')
+            generate_subtitle = task_data.get('generate_subtitle', False) # 提供默认值
+            silent_video_path = task_data.get('silent_video_path')
+            vocals_audio_path = task_data.get('vocals_audio_path')
+            background_audio_path = task_data.get('background_audio_path')
+
+            if not all([target_language, silent_video_path, vocals_audio_path]): # 背景音是可选的
+                self.logger.error(f"[{task_id}] 数据库中缺少必要的任务信息 (语言、无声视频路径、人声路径)")
+                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': '数据库信息不完整'})
+                return []
+
+            # 重建 media_files 字典
+            media_files = {
+                'silent_video_path': silent_video_path,
+                'vocals_audio_path': vocals_audio_path,
+                'background_audio_path': background_audio_path # 可能为 None
+            }
+            # 重建 task_paths 对象
+            task_paths = TaskPaths(self.config, task_id)
+
+        except Exception as e:
+            self.logger.error(f"[{task_id}] 获取或重建任务依赖信息失败: {e}", exc_info=True)
+            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f'获取任务依赖失败: {e}'})
+            return []
+        # --- 信息获取结束 ---
+
+
+        # 1. 检查前置条件 (已在上面检查 supabase_client)
+        # if not self.supabase_client:
+        #     self.logger.error(f"[{task_id}] Supabase客户端未初始化，无法进行翻译处理")
+        #     return []
+
+        # 2. 获取句子 (这部分逻辑不变)
+        try:
+            sentences = await self.supabase_client.get_sentences(task_id, as_objects=True)
+            if not sentences:
+                self.logger.warning(f"[{task_id}] 数据库中没有检索到句子")
+                # 如果没有句子，也认为翻译流程"完成"了，只是没有生成片段
+                # 后续的 _merge_segments 会处理空列表
+                return []
+            self.logger.info(f"[{task_id}] 获取到{len(sentences)}个句子，开始翻译流程")
+        except Exception as e:
+            self.logger.error(f"[{task_id}] 获取句子失败: {e}")
+            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"获取句子失败: {e}"})
+            return []
+
+        # 3. 主要处理流程 (后续逻辑使用上面获取或重建的变量)
+        try:
+            # 更新状态为翻译中
+            await self.supabase_client.update_task(task_id, {'status': 'translating'})
+
+            # 翻译流程 (按批次进行)
+            async for translated_batch in self.translator.translate_sentences.remote(
+                sentences,
+                batch_size=int(self.config.TRANSLATION_BATCH_SIZE),
+                target_language=target_language # <--- 使用获取到的 target_language
+            ):
+                if not translated_batch:
+                    continue
+
+                # TTS生成语音
+                async for tts_batch in self.my_index_tts.generate_audio_stream.remote(translated_batch):
+                    if not tts_batch:
+                        continue
+
+                    processed_tts_batches += 1
+                    
+                    # 时长对齐和调整
+                    aligned_batch = await self.duration_aligner.remote(tts_batch, max_speed=1.5)
+                    if not aligned_batch:
+                        continue
+
+                    adjusted_batch = await self.timestamp_adjuster.remote(
+                        aligned_batch,
+                        self.config.TARGET_SR,
+                        current_time
+                    )
+                    if not adjusted_batch:
+                        continue
+
+                    # 更新时间戳位置和处理状态
+                    current_time = adjusted_batch[-1].adjusted_start + adjusted_batch[-1].adjusted_duration
+                    
+                    # 第一个批次完成后，更新状态为 mixing
+                    status_update = 'mixing' if processed_tts_batches == 1 else None
+                    if status_update:
+                        await self.supabase_client.update_task(task_id, {'status': status_update})
+
+                    # 媒体混合 (使用重建的 media_files 和 task_paths)
+                    output_path = await self.media_mixer.mix_media.remote(
+                         adjusted_batch,
+                         media_files=media_files, # <--- 使用重建的 media_files
+                         task_paths=task_paths,   # <--- 使用重建的 task_paths
+                         generate_subtitle=generate_subtitle, # <--- 使用获取到的 generate_subtitle
+                         batch_counter=batch_counter,
+                         task_id=task_id,
+                         target_language=target_language
+                     )
+                    if not output_path:
+                        self.logger.warning(f"[{task_id}] 媒体混合失败，跳过此批次")
+                        continue
+
+                    # HLS处理
+                    hls_result = await self.hls_manager.add_segment.remote(
+                        task_id,
+                        output_path,
+                        batch_counter + 1
+                    )
+
+                    if hls_result and hls_result.get("status") == "success":
+                        added_hls_segments += 1
+                        merged_segments_paths.append(output_path)
+                        batch_counter += 1
+                        self.logger.info(f"[{task_id}] HLS片段 {batch_counter} 添加成功")
+
+                        # --- 新增：首次添加成功时，更新 hls_playlist_url ---
+                        if added_hls_segments == 1 and self.supabase_client:
+                            hls_relative_path = f"playlists/{task_id}/{task_paths.playlist_path.name}"
+                            try:
+                                await self.supabase_client.update_task(task_id, {
+                                    'hls_playlist_url': hls_relative_path,
+                                    # 'status': 'generating_hls' # 移除此行
+                                })
+                                self.logger.info(f"[{task_id}] HLS播放列表URL已更新到数据库: {hls_relative_path}")
+                            except Exception as update_e:
+                                self.logger.error(f"[{task_id}] 更新HLS播放列表URL到数据库失败: {update_e}")
+                        # --- 新增结束 ---
+
+                    else:
+                        error_msg = hls_result.get('message') if hls_result else '未知错误'
+                        self.logger.error(f"[{task_id}] 添加HLS片段失败: {error_msg}")
+
+                    # 清理内存
+                    self._clean_memory()
+
+            self.logger.info(f"[{task_id}] 翻译流程完成，耗时: {time.time() - start_time:.2f}s, "
+                            f"TTS批次: {processed_tts_batches}, HLS段: {added_hls_segments}")
+            return merged_segments_paths
+
+        except Exception as e:
+            self.logger.exception(f"[{task_id}] 翻译流程异常: {e}")
+            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"翻译流程错误: {e}"})
+            return []
+
+    async def _merge_segments(self, task_id: str, merged_segments: List[str]) -> Dict:
         """合并处理好的视频片段"""
-        self.logger.info(f"[{task_id}] 开始合并 {len(task_state.merged_segments)} 个视频片段")
+        self.logger.info(f"[{task_id}] 开始合并 {len(merged_segments)} 个视频片段")
+
+        # 在内部创建 task_paths
+        task_paths = TaskPaths(self.config, task_id)
         
-        # 检查是否有可合并的片段
-        if not task_state.merged_segments:
+        # 处理无片段情况
+        if not merged_segments:
             msg = "没有处理成功的视频片段可以合并"
-            await self.state_manager.complete_task.remote(task_id, False, msg)
+            if self.supabase_client:
+                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
             return {"status": "error", "message": msg}
-        
-        # 准备合并列表文件
-        list_txt_path = task_state.task_paths.processing_dir / "concat_list.txt"
-        async with aiofiles.open(list_txt_path, "w", encoding='utf-8') as f:
-            for seg_mp4 in task_state.merged_segments:
-                formatted_path = str(Path(seg_mp4).resolve()).replace("\\", "/")
-                await f.write(f"file '{formatted_path}'\n")
-        
-        # 执行视频合并
-        final_output_path = task_state.task_paths.output_dir / f"final_{task_id}.mp4"
-        merge_start_time = time.time()
-        final_video_path = await concat_videos(str(list_txt_path), str(final_output_path))
-        
-        # 检查合并结果
-        if final_video_path and final_video_path.exists():
+
+        try:
+            # 1. 创建合并列表文件
+            list_txt_path = task_paths.processing_dir / "concat_list.txt"
+            async with aiofiles.open(list_txt_path, "w", encoding='utf-8') as f:
+                for seg_mp4 in merged_segments:
+                    formatted_path = str(Path(seg_mp4).resolve()).replace("\\", "/")
+                    await f.write(f"file '{formatted_path}'\n")
+
+            # 2. 执行视频合并
+            final_output_path = task_paths.output_dir / f"final_{task_id}.mp4"
+            merge_start_time = time.time()
+            final_video_path = await concat_videos(str(list_txt_path), str(final_output_path))
+
+            # 3. 处理合并结果
+            if not final_video_path or not final_video_path.exists():
+                msg = "视频合并失败，最终文件未生成"
+                self.logger.error(f"[{task_id}] {msg}")
+                if self.supabase_client:
+                    await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
+                return {"status": "error", "message": msg}
+
+            # 4. 完成流程并更新状态
             final_video_path_str = str(final_video_path)
-            # 完成HLS列表和任务状态更新
-            await self.hls_manager.finalize_playlist.remote(task_id)
-            await self.state_manager.complete_task.remote(task_id, True, "视频处理成功", final_video_path_str)
+            merge_duration = time.time() - merge_start_time
             
-            self.logger.info(f"[{task_id}] 视频合并成功，耗时: {time.time() - merge_start_time:.2f}s")
+            # 完成HLS列表
+            await self.hls_manager.finalize_playlist.remote(task_id)
+            
+            if self.supabase_client:
+                await self.supabase_client.update_task(task_id, {
+                    'status': 'success',
+                    'download_video_path': final_video_path_str,
+                })
+            
+            self.logger.info(f"[{task_id}] 视频合并成功，耗时: {merge_duration:.2f}s")
             return {"status": "success", "message": "视频处理成功", "output_path": final_video_path_str}
-        else:
-            msg = "视频合并失败，最终文件未生成"
-            await self.state_manager.complete_task.remote(task_id, False, msg)
+            
+        except Exception as e:
+            msg = f"视频合并过程中出错: {e}"
+            self.logger.error(f"[{task_id}] {msg}")
+            if self.supabase_client:
+                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
             return {"status": "error", "message": msg}
 
     def _clean_memory(self) -> None:
@@ -345,91 +544,6 @@ class VideoTransPipe:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-    async def _run_translation_pipeline(self, sentences: List, task_state: TaskState) -> Dict:
-        """运行从翻译到媒体混合的子流水线"""
-        task_id = task_state.task_id
-        processed_tts_batches = 0
-        added_hls_segments = 0
-        start_time = time.time()
-
-        try:
-            # 1. 翻译 (流式)
-            async for translated_batch in self.translator.translate_sentences.remote(
-                sentences, 
-                batch_size=int(self.config.TRANSLATION_BATCH_SIZE),
-                target_language=task_state.target_language 
-            ):
-                if not translated_batch: 
-                    continue
-                    
-                # 2. TTS (流式)
-                async for tts_batch in self.my_index_tts.generate_audio_stream.remote(translated_batch):
-                    if not tts_batch: 
-                        continue
-                        
-                    processed_tts_batches += 1
-                    
-                    # 3. 时长对齐
-                    aligned_batch = await self.duration_aligner.remote(tts_batch, max_speed=1.5)
-                    if not aligned_batch: 
-                        continue
-
-                    # 4. 时间戳调整
-                    adjusted_batch = await self.timestamp_adjuster.remote(
-                        aligned_batch, 
-                        self.config.TARGET_SR, 
-                        task_state.current_time
-                    )
-                    if not adjusted_batch: 
-                        continue
-                        
-                    # 更新当前时间戳
-                    task_state.current_time = adjusted_batch[-1].adjusted_start + adjusted_batch[-1].adjusted_duration
-
-                    # 5. 媒体混合
-                    output_path = await self.media_mixer.mix_media.remote(adjusted_batch, task_state)
-                    if not output_path:
-                        self.logger.warning(f"[{task_id}] 媒体混合失败，跳过此批次")
-                        continue
-
-                    # 6. HLS处理
-                    hls_result = await self.hls_manager.add_segment.remote(
-                        task_id, 
-                        output_path, 
-                        task_state.batch_counter + 1
-                    )
-                    
-                    if hls_result["status"] == "success":
-                        added_hls_segments += 1
-                        task_state.merged_segments.append(output_path)
-                        task_state.batch_counter += 1
-                        
-                        # 处理HLS就绪状态
-                        if not task_state.hls_ready:
-                            task_state.hls_ready = True
-                            await self.state_manager.update_task_progress.remote(
-                                task_id, 
-                                batch_counter=task_state.batch_counter, 
-                                hls_ready=True
-                            )
-                            self.logger.info(f"[{task_id}] HLS播放就绪")
-                        else:
-                            await self.state_manager.update_task_progress.remote(
-                                task_id, 
-                                batch_counter=task_state.batch_counter
-                            )
-                    else:
-                        self.logger.error(f"[{task_id}] 添加HLS片段失败: {hls_result.get('message')}")
-                    
-                    # 清理每次循环的变量
-                    self._clean_memory()
-
-        except Exception as e:
-            self.logger.exception(f"[{task_id}] 子流水线异常: {e}")
-
-        self.logger.info(f"[{task_id}] 子流水线完成，耗时: {time.time() - start_time:.2f}s, TTS批次: {processed_tts_batches}, HLS段: {added_hls_segments}")
-        return {"processed_tts_batches": processed_tts_batches, "added_hls_segments": added_hls_segments}
 
 # --- Ray 和 Serve 初始化与服务部署 ---
 def init_ray(address="auto", namespace="videotrans", log_to_driver=True):
@@ -483,9 +597,8 @@ def setup_pipeline_services():
 
         logger.info("准备部署流水线应用...")
         
-        # 收集所有服务句柄
+        # 收集所有服务句柄 (移除 StateManager)
         handles_to_deploy = {
-            "StateManager": state_manager_handle,
             "hls_manager": hls_manager_handle,
             "video_separator": video_separator_handle,
             "asr_model": asr_handle,
@@ -498,6 +611,7 @@ def setup_pipeline_services():
         }
 
         # 部署主管道应用 (会自动部署依赖项)
+        # 确保传递的句柄名称与 __init__ 中期望的一致
         pipeline_app = VideoTransPipe.bind(**{name + "_handle": handle for name, handle in handles_to_deploy.items()})
         serve.run(pipeline_app, name="PipelineEngine", route_prefix=None)
         
