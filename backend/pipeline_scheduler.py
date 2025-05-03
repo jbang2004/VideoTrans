@@ -276,7 +276,7 @@ class TranslationPipe:
 
     async def _run_translation_pipeline(self, task_id: str) -> List[str]:
         """运行从翻译到媒体混合的子流水线 (从数据库获取依赖信息)"""
-        processed_tts_batches = 0
+        tts_batches = 0
         added_hls_segments = 0
         start_time = time.time()
         current_time = 0.0
@@ -359,10 +359,10 @@ class TranslationPipe:
                     if not tts_batch:
                         continue
 
-                    processed_tts_batches += 1
+                    tts_batches += 1
                     
                     # 时长对齐和调整
-                    aligned_batch = await self.duration_aligner.remote(tts_batch, max_speed=1.5)
+                    aligned_batch = await self.duration_aligner.remote(tts_batch, max_speed=1.2)
                     if not aligned_batch:
                         continue
 
@@ -378,7 +378,7 @@ class TranslationPipe:
                     current_time = adjusted_batch[-1].adjusted_start + adjusted_batch[-1].adjusted_duration
                     
                     # 第一个批次完成后，更新状态为 mixing
-                    status_update = 'mixing' if processed_tts_batches == 1 else None
+                    status_update = 'mixing' if tts_batches == 1 else None
                     if status_update:
                         await self.supabase_client.update_task(task_id, {'status': status_update})
 
@@ -430,7 +430,7 @@ class TranslationPipe:
                     self._clean_memory()
 
             self.logger.info(f"[{task_id}] 翻译流程完成，耗时: {time.time() - start_time:.2f}s, "
-                            f"TTS批次: {processed_tts_batches}, HLS段: {added_hls_segments}")
+                            f"TTS批次: {tts_batches}, HLS段: {added_hls_segments}")
             return merged_segments_paths
 
         except Exception as e:

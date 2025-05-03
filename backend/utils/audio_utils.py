@@ -1,26 +1,52 @@
 import numpy as np
 import soundfile as sf
 import logging
-from typing import Optional
+from typing import Optional, Union
 import asyncio
 
 logger = logging.getLogger(__name__)
 
-def apply_fade_effect(audio_data: np.ndarray, full_audio_buffer: np.ndarray, overlap: int) -> np.ndarray:
+def apply_fade_effect(audio_data: np.ndarray, full_audio_buffer: Optional[np.ndarray] = None, 
+                     overlap: int = 0, fade_mode: str = "overlap", position: str = "start") -> np.ndarray:
     """
-    在语音片段衔接处做 overlap 长度的淡入淡出衔接。
+    在语音片段衔接处做淡入淡出衔接，支持音频片段间过渡和静音边界过渡。
     
     Args:
         audio_data: 当前音频数据
-        full_audio_buffer: 已累积的音频缓冲区
+        full_audio_buffer: 已累积的音频缓冲区（仅用于overlap模式）
         overlap: 重叠区域长度（采样点数）
+        fade_mode: 渐变模式，"overlap"表示两段音频重叠过渡，"silence"表示静音边界过渡
+        position: 在silence模式中，指定"start"(淡入)或"end"(淡出)
         
     Returns:
         处理后的音频数据
     """
     if audio_data is None or len(audio_data) == 0:
         return np.array([], dtype=np.float32)
-
+    
+    # 静音边界过渡模式
+    if fade_mode == "silence":
+        fade_length = overlap
+        if fade_length <= 0 or fade_length >= len(audio_data):
+            return audio_data
+            
+        audio_data = audio_data.copy()
+        
+        if position == "start":
+            # 静音→语音过渡（淡入）
+            fade_in = np.sqrt(np.linspace(0.0, 1.0, fade_length, dtype=np.float32))
+            audio_data[:fade_length] *= fade_in
+        else:
+            # 语音→静音过渡（淡出）
+            fade_out = np.sqrt(np.linspace(1.0, 0.0, fade_length, dtype=np.float32))
+            audio_data[-fade_length:] *= fade_out
+            
+        return audio_data
+    
+    # 原有的音频重叠过渡逻辑
+    if full_audio_buffer is None:
+        return audio_data
+        
     cross_len = min(overlap, len(full_audio_buffer), len(audio_data))
     if cross_len <= 0:
         return audio_data

@@ -79,7 +79,7 @@ def tokens_timestamp_sentence(tokens: List[Token], timestamps: List[Timestamp], 
                     current_timestamps.clear()
                 continue
 
-            if (token in config.STRONG_END_TOKENS or len(current_tokens) > config.MAX_TOKENS_PER_SENTENCE):
+            if (token in config.SENTENCE_END_TOKENS or len(current_tokens) > config.MAX_TOKENS_PER_SENTENCE):
                 sentences.append((current_tokens[:], current_timestamps[:], speaker_id))
                 current_tokens.clear()
                 current_timestamps.clear()

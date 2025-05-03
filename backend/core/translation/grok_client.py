@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from openai import OpenAI
-from json import loads
+from json_repair import loads
 from typing import Dict
 
 logger = logging.getLogger(__name__)

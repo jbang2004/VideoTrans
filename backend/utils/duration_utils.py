@@ -4,7 +4,9 @@ import librosa
 from typing import List
 from core.sentence_tools import Sentence
 from utils.ffmpeg_utils import change_speed_ffmpeg
+from utils.audio_utils import apply_fade_effect
 import asyncio
+from config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,10 @@ async def apply_speed_and_silence(sentences: List[Sentence], sample_rate: int = 
     
     task_id = sentences[0].task_id if sentences else "unknown"
     
+    # 计算淡变长度：从配置获取毫秒值，转换为采样点
+    config = Config()
+    fade_length = int(config.SILENCE_FADE_MS * sample_rate / 1000)
+    
     for i, sentence in enumerate(sentences):
         try:
             if sentence.generated_audio is None or len(sentence.generated_audio) == 0:
@@ -34,8 +40,20 @@ async def apply_speed_and_silence(sentences: List[Sentence], sample_rate: int = 
                 silence_samples = int(sentence.start * sample_rate / 1000)
                 if silence_samples > 0:
                     logger.info(f"[{task_id}] 句子 {sentence.sentence_id}: 在开头添加 {sentence.start:.2f}毫秒静音 ({silence_samples} 个采样点)")
+                    
+                    # 对音频开头添加淡入效果
+                    fade_len = min(fade_length, len(sentence.generated_audio) // 4)
+                    audio_with_fade = apply_fade_effect(
+                        sentence.generated_audio,
+                        overlap=fade_len,
+                        fade_mode="silence",
+                        position="start"
+                    )
+                    
+                    # 创建静音数据并拼接
                     leading_silence = np.zeros(silence_samples, dtype=np.float32)
-                    sentence.generated_audio = np.concatenate([leading_silence, sentence.generated_audio])
+                    sentence.generated_audio = np.concatenate([leading_silence, audio_with_fade])
+                    
                     # 记录操作结果
                     current_duration = (len(sentence.generated_audio) / sample_rate) * 1000
                     logger.warning(f"[{task_id}] 句子 {sentence.sentence_id}: 开头静音已添加，原始时长: {original_duration:.2f}毫秒，新时长: {current_duration:.2f}毫秒")
@@ -68,9 +86,18 @@ async def apply_speed_and_silence(sentences: List[Sentence], sample_rate: int = 
                     silence_samples = int(sentence.silence_duration * sample_rate / 1000)
                     logger.info(f"[{task_id}] 句子 {sentence.sentence_id}: 在结尾添加 {sentence.silence_duration:.2f}毫秒静音 ({silence_samples} 个采样点)")
                     
+                    # 对音频结尾添加淡出效果
+                    fade_len = min(fade_length, len(sentence.generated_audio) // 4)
+                    audio_with_fade = apply_fade_effect(
+                        sentence.generated_audio,
+                        overlap=fade_len,
+                        fade_mode="silence",
+                        position="end"
+                    )
+                    
                     # 创建静音数据并拼接到音频末尾
                     silence = np.zeros(silence_samples, dtype=np.float32)
-                    sentence.generated_audio = np.concatenate([sentence.generated_audio, silence])
+                    sentence.generated_audio = np.concatenate([audio_with_fade, silence])
                     
                     # 记录操作结果
                     new_duration = (len(sentence.generated_audio) / sample_rate) * 1000
@@ -85,9 +112,18 @@ async def apply_speed_and_silence(sentences: List[Sentence], sample_rate: int = 
                     ending_silence_samples = int(sentence.ending_silence * sample_rate / 1000)
                     logger.info(f"[{task_id}] 句子 {sentence.sentence_id}: 为视频结尾添加 {sentence.ending_silence:.2f}毫秒静音 ({ending_silence_samples} 个采样点)")
                     
+                    # 对音频结尾添加淡出效果
+                    fade_len = min(fade_length, len(sentence.generated_audio) // 4)
+                    audio_with_fade = apply_fade_effect(
+                        sentence.generated_audio,
+                        overlap=fade_len,
+                        fade_mode="silence",
+                        position="end"
+                    )
+                    
                     # 创建静音数据并拼接到音频末尾
                     ending_silence = np.zeros(ending_silence_samples, dtype=np.float32)
-                    sentence.generated_audio = np.concatenate([sentence.generated_audio, ending_silence])
+                    sentence.generated_audio = np.concatenate([audio_with_fade, ending_silence])
                     
                     # 记录操作结果
                     new_duration = (len(sentence.generated_audio) / sample_rate) * 1000

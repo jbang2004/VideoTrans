@@ -29,6 +29,7 @@ class Config:
     VOCALS_VOLUME = 0.7
     BACKGROUND_VOLUME = 0.3
     AUDIO_OVERLAP = 1024
+    SILENCE_FADE_MS = 25  # 静音边界淡变长度（毫秒）
     NORMALIZATION_THRESHOLD = 0.9
     
     # 目标采样率，统一设置为24000
@@ -42,6 +43,7 @@ class Config:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
     XAI_API_KEY = os.getenv("XAI_API_KEY", "")
+    GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 
     SYSTEM_PATHS = [
         str(current_dir / 'models' / 'CosyVoice'),

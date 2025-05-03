@@ -13,7 +13,8 @@ from .prompt import (
 )
 from .deepseek_client import DeepSeekClient
 from .gemini_client import GeminiClient
-from .grok_client import GrokClient
+from .grok_client import GrokClient as XaiGrokClient
+from .groq_client import GroqClient as GroqSDKClient
 from config import Config
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,9 @@ class Translator:
         elif translation_model == "gemini":
             self.client = GeminiClient(api_key=self.config.GEMINI_API_KEY)
         elif translation_model == "grok":
-            self.client = GrokClient(api_key=self.config.XAI_API_KEY)
+            self.client = XaiGrokClient(api_key=self.config.XAI_API_KEY)
+        elif translation_model == "groq":
+            self.client = GroqSDKClient(api_key=self.config.GROQ_API_KEY)
         else:
             raise ValueError(f"不支持的翻译模型：{translation_model}")
         self.logger.info(f"初始化翻译Actor，使用模型: {translation_model}")
