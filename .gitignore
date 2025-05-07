@@ -17,7 +17,11 @@ dist/
 build/
 
 # 模型文件
-backend/models/
+backend/models/ClearerVoice_Minimal/checkpoints/
+backend/models/IndexTTS/checkpoints/
+backend/models/IndexTTS/README.md
+
+
 *.pt
 *.pth
 *.onnx
