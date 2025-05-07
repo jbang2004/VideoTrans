@@ -170,7 +170,6 @@ class PreprocessingPipe:
             media_files = await self.video_separator.separate_video.remote(
                 video_path,
                 str(task_paths.media_dir),
-                self.config.TARGET_SR
             )
             if not media_files or "vocals_audio_path" not in media_files or not Path(media_files["vocals_audio_path"]).exists():
                 self.logger.warning(f"[{task_id}] 视频分离失败或无人声检测失败")

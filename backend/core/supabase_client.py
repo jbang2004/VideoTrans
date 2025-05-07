@@ -1,6 +1,7 @@
 import os
 import numpy as np
 from supabase._async.client import AsyncClient, create_client
+from supabase.lib.client_options import ClientOptions
 from config import Config
 import logging
 from core.sentence_tools import Sentence
@@ -31,11 +32,16 @@ class SupabaseClient:
         """确保客户端已初始化"""
         if self.client is None:
             try:
+                # 设置 postgrest 超时和重试选项
+                options = ClientOptions(
+                    postgrest_client_timeout=30.0,  # 设置 postgrest 客户端超时时间为30秒
+                )
                 self.client = await create_client(
                     self.config.SUPABASE_URL,
-                    self.config.SUPABASE_KEY
+                    self.config.SUPABASE_KEY,
+                    options=options
                 )
-                logger.info("Supabase客户端创建成功")
+                logger.info("Supabase客户端创建成功 (postgrest_timeout=30s)")
             except Exception as e:
                 logger.error(f"创建Supabase客户端失败: {e}", exc_info=True)
                 raise
