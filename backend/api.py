@@ -21,7 +21,7 @@ from config import Config, init_logging
 from core.supabase_client import SupabaseClient
 
 config = Config()
-config.init_directories()
+# config.init_directories() # Removed: Launcher will handle this
 
 # 初始化全局日志配置
 init_logging()
@@ -371,17 +371,16 @@ def setup_server():
         serve.get_app_handle("PreprocessingEngine")
         logger.info("成功连接到已部署的 PreprocessingEngine 应用")
     except Exception as e:
-        logger.error(f"连接 PreprocessingEngine 应用失败，请确保 pipeline_scheduler 已经成功启动并部署了 PreprocessingEngine: {e}")
+        logger.error(f"连接 PreprocessingEngine 应用失败，请确保 preprocessing_engine.py 已经成功启动: {e}")
         raise RuntimeError(f"无法连接到核心 PreprocessingEngine 应用: {e}")
     try:
         serve.get_app_handle("TranslationEngine")
         logger.info("成功连接到已部署的 TranslationEngine 应用")
     except Exception as e:
-        logger.error(f"连接 TranslationEngine 应用失败，请确保 pipeline_scheduler 已经成功启动并部署了 TranslationEngine: {e}")
+        logger.error(f"连接 TranslationEngine 应用失败，请确保 translation_engine.py 已经成功启动: {e}")
         raise RuntimeError(f"无法连接到核心 TranslationEngine 应用: {e}")
 
     # 直接部署 API 服务
-    # 提示：VideoTransAPI 初始化时会获取 PreprocessingEngine 和 TranslationEngine 两个核心应用的句柄
     video_api = VideoTransAPI.bind()
     serve.run(video_api, name="VideoAPI", route_prefix="/", blocking=True)
 

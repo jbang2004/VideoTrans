@@ -1,22 +1,12 @@
-# pipeline_scheduler.py (精简版)
 import logging
 import asyncio
 import time
 import sys
 import os
-backend_dir = os.path.dirname(os.path.abspath(__file__))
-# IndexTTS 包所在的目录是 backend/models/IndexTTS
-index_tts_dir = os.path.join(backend_dir, 'models', 'IndexTTS')
-
-# 将包含 indextts 包的目录添加到 sys.path
-if index_tts_dir not in sys.path:
-    sys.path.insert(0, index_tts_dir) # 插入到最前面，优先搜索
-
-
-import aiofiles
-import torch
 import gc
-from typing import List, Optional, Dict, Any, Tuple
+import torch
+import aiofiles
+from typing import List, Optional, Dict, Any
 from pathlib import Path
 
 # Ray 和 Serve
@@ -27,15 +17,13 @@ from ray.serve.handle import DeploymentHandle
 # 项目模块
 from config import Config, init_logging
 from core.hls_manager import HLSManager
-from core.video_separator import VideoSeparator
-from core.asr_model import ASRModel
 from core.translation.translator import Translator
 from core.my_index_tts import MyIndexTTSDeployment
 from core.timeadjust.duration_aligner import DurationAligner
 from core.timeadjust.timestamp_adjuster import TimestampAdjuster
 from core.media_mixer import MediaMixer
 from utils.task_storage import TaskPaths
-from utils.ffmpeg_utils import concat_videos, get_duration
+from utils.ffmpeg_utils import concat_videos
 from core.supabase_client import SupabaseClient
 
 # 初始化全局日志配置
@@ -44,27 +32,12 @@ init_logging()
 logger = logging.getLogger(__name__)
 
 # --- 全局配置 ---
-# 确保 Config 类被正确导入并实例化
-try:
-    global_config = Config()
-    global_config.init_directories() # 初始化存储目录
+global_config = Config()
+# global_config.init_directories() # Removed: Launcher will handle this
 
-except ImportError:
-    logger.critical("无法导入 Config 类或初始化目录，请确保 config.py 文件存在且正确。")
-    sys.exit(1)
-except Exception as e:
-    logger.critical(f"初始化 Config 或目录时出错: {e}", exc_info=True)
-    sys.exit(1)
-
-
-# --- Ray Serve 部署句柄创建 ---
-# 确保为每个部署提供唯一的 name
-# --- Ray Serve 部署句柄创建 ---
-# 统一 handle 命名，确保后续可读性和一致性
+# --- Ray Serve 翻译相关部署句柄创建 ---
 try:
     hls_manager_handle = HLSManager.options(name="hls_manager", num_replicas=1, ray_actor_options={"num_cpus": 0.5}).bind()
-    video_separator_handle = VideoSeparator.options(name="video_separator", num_replicas=1, max_ongoing_requests=1, ray_actor_options={"num_cpus": 1, "num_gpus": 0.2}).bind()
-    asr_handle = ASRModel.options(name="asr_model", num_replicas=1, max_ongoing_requests=1, ray_actor_options={"num_cpus": 1, "num_gpus": 0.3}).bind()
     translator_handle = Translator.options(name="translator", num_replicas=1, max_ongoing_requests=3, ray_actor_options={"num_cpus": 0.5}).bind()
     simplifier_handle = Translator.options(name="simplifier", num_replicas=1, ray_actor_options={"num_cpus": 0.5}).bind()
     my_index_tts_handle = MyIndexTTSDeployment.options(name="my_index_tts", num_replicas=1, max_ongoing_requests=2, ray_actor_options={"num_cpus": 1, "num_gpus": 0.5}).bind(global_config)
@@ -73,147 +46,8 @@ try:
     timestamp_adjuster_handle = TimestampAdjuster.options(name="timestamp_adjuster", num_replicas=1, ray_actor_options={"num_cpus": 0.5}).bind()
     media_mixer_handle = MediaMixer.options(name="media_mixer", num_replicas=1, ray_actor_options={"num_cpus": 0.5}).bind()
 except Exception as e:
-    logger.critical(f"创建 Ray Serve 部署句柄时出错: {e}", exc_info=True)
+    logger.critical(f"创建翻译相关 Ray Serve 部署句柄时出错: {e}", exc_info=True)
     sys.exit(1)
-
-# --- 分阶段流水线部署 ---
-@serve.deployment(
-    name="PreprocessingPipe",
-    num_replicas=1,
-    max_ongoing_requests=global_config.MAX_PARALLEL_SEGMENTS,
-    ray_actor_options={"num_cpus": 0.5},
-    logging_config={"log_level": "INFO"}
-)
-class PreprocessingPipe:
-    """分阶段流水线：预处理阶段，负责视频分离和ASR"""
-    def __init__(self, video_separator_handle: DeploymentHandle, asr_model_handle: DeploymentHandle):
-        self.logger = logger
-        self.supabase_client = SupabaseClient(config=global_config)
-        self.video_separator = video_separator_handle
-        self.asr = asr_model_handle
-        self.config = global_config
-
-    async def __call__(self, task_id: str, video_path: str, target_language: str, generate_subtitle: bool):
-        self.logger.info(f"[{task_id}] Starting preprocessing stage.")
-        # 初始化任务状态
-        init_success = await self._init_task_state(task_id, video_path, target_language, generate_subtitle)
-        if not init_success:
-            self.logger.error(f"[{task_id}] Task state initialization failed.")
-            return {"status": "error", "message": "Task state initialization failed."}
-
-        # 视频分离与ASR
-        media_files = await self._run_sep_asr(task_id, video_path)
-        if media_files is None:
-            final_task = await self.supabase_client.get_task(task_id) if self.supabase_client else {}
-            status_msg = final_task.get('status', 'error')
-            error_msg = final_task.get('error_message', 'Preprocessing failed')
-            return {"status": status_msg, "message": error_msg}
-
-        self.logger.info(f"[{task_id}] Preprocessing completed.")
-        return {"status": "preprocessed", "message": "Preprocessing finished"}
-
-    async def _init_task_state(self, task_id, video_path, target_language, generate_subtitle) -> bool:
-        try:
-            if not video_path or not target_language:
-                raise ValueError("缺少 video_path 或 target_language")
-
-            # 1. 创建任务路径对象和目录
-            task_paths = TaskPaths(self.config, task_id)
-            await asyncio.to_thread(task_paths.create_directories)
-            self.logger.info(f"[{task_id}] 任务目录已创建: {task_paths.task_dir}")
-
-            # 2. 在 Supabase 中创建或更新任务记录
-            existing_task = await self.supabase_client.get_task(task_id)
-            task_data = {
-                'task_id': task_id,
-                'status': 'preprocessing',
-                'target_language': target_language,
-                'generate_subtitle': generate_subtitle,
-                'original_video_path': str(video_path),
-            }
-            if existing_task:
-                await self.supabase_client.update_task(task_id, task_data)
-                self.logger.info(f"[{task_id}] 更新已存在的任务记录，状态: {task_data['status']}")
-            else:
-                response = await self.supabase_client.store_task(task_data)
-                if not response or not response.data:
-                    raise Exception("存储初始任务到 Supabase 失败")
-                self.logger.info(f"[{task_id}] 创建新任务记录，状态: {task_data['status']}")
-
-            return True
-        except Exception as e:
-            self.logger.error(f"[{task_id}] 任务初始化失败: {e}")
-            if task_id and self.supabase_client:
-                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"任务初始化失败: {e}"})
-            return False
-
-    async def _run_sep_asr(self, task_id: str, video_path: str) -> Optional[Dict]:
-        seg_start_time = time.time()
-        self.logger.info(f"[{task_id}] 开始处理视频")
-        try:
-            # 创建任务路径对象
-            task_paths = TaskPaths(self.config, task_id)
-            # 跳过已预处理任务
-            current_task = await self.supabase_client.get_task(task_id)
-            if current_task and current_task.get('status') == 'preprocessed':
-                self.logger.info(f"[{task_id}] 已预处理完成，跳过分离和ASR")
-                return {
-                    'silent_video_path': current_task.get('silent_video_path'),
-                    'vocals_audio_path': current_task.get('vocals_audio_path'),
-                    'background_audio_path': current_task.get('background_audio_path')
-                }
-
-            # 1. 视频分离
-            duration = await get_duration(video_path)
-            self.logger.info(f"[{task_id}] 视频时长={duration:.2f}s，开始分离")
-            media_files = await self.video_separator.separate_video.remote(
-                video_path,
-                str(task_paths.media_dir),
-            )
-            if not media_files or "vocals_audio_path" not in media_files or not Path(media_files["vocals_audio_path"]).exists():
-                self.logger.warning(f"[{task_id}] 视频分离失败或无人声检测失败")
-                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': '视频分离失败或无人声'})
-                return None
-            # 更新分离结果路径
-            await self.supabase_client.update_task(task_id, {**media_files, 'status': 'preprocessing'})
-            self.logger.info(f"[{task_id}] 视频分离完成: {media_files}")
-
-            # 2. ASR 识别
-            sentences = await self.asr.generate.remote(
-                input=media_files["vocals_audio_path"],
-                cache={},
-                language="auto",
-                use_itn=True,
-                batch_size_s=60,
-                merge_vad=False,
-                task_id=task_id,
-                task_paths=task_paths
-            )
-            if not sentences:
-                self.logger.info(f"[{task_id}] ASR 未检测到语音")
-                await self.supabase_client.update_task(task_id, {'status': 'preprocessed', 'error_message': 'ASR 未检测到语音'})
-                return media_files
-
-            # 3. 保存句子并更新状态
-            response = await self.supabase_client.store_sentences(sentences, task_id)
-            if not response or not response.data:
-                raise Exception("存储句子到 Supabase 失败")
-            await self.supabase_client.update_task(task_id, {'status': 'preprocessed'})
-            self.logger.info(f"[{task_id}] 预处理完成，共 {len(sentences)} 个句子")
-            return media_files
-        except Exception as e:
-            self.logger.exception(f"[{task_id}] 分离/ASR 发生错误: {e}")
-            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"分离/ASR 错误: {e}"})
-            return None
-        finally:
-            self._clean_memory()
-            self.logger.info(f"[{task_id}] 分离和ASR耗时: {time.time() - seg_start_time:.2f}s")
-
-    def _clean_memory(self) -> None:
-        """清理内存和GPU缓存"""
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
 @serve.deployment(
     name="TranslationPipe",
@@ -399,13 +233,12 @@ class TranslationPipe:
                         batch_counter += 1
                         self.logger.info(f"[{task_id}] HLS片段 {batch_counter} 添加成功")
 
-                        # --- 新增：首次添加成功时，更新 hls_playlist_url ---
+                        # --- 首次添加成功时，更新 hls_playlist_url ---
                         if added_hls_segments == 1 and self.supabase_client:
                             hls_relative_path = f"playlists/{task_id}/{task_paths.playlist_path.name}"
                             try:
                                 await self.supabase_client.update_task(task_id, {
                                     'hls_playlist_url': hls_relative_path,
-                                    # 'status': 'generating_hls' # 移除此行
                                 })
                                 self.logger.info(f"[{task_id}] HLS播放列表URL已更新到数据库: {hls_relative_path}")
                             except Exception as update_e:
@@ -489,84 +322,4 @@ class TranslationPipe:
     def _clean_memory(self):
         gc.collect()
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-# --- Ray 和 Serve 初始化与服务部署 ---
-def init_ray(address="auto", namespace="videotrans", log_to_driver=True):
-    """初始化或连接到Ray集群"""
-    if ray.is_initialized():
-        try:
-            ray.cluster_resources()  # 检查连接是否有效
-            logger.info("已连接到Ray集群")
-            return True
-        except Exception:
-            logger.warning("Ray连接无效，重新初始化")
-            ray.shutdown()
-
-    try:
-        ray.init(
-            address=address, 
-            namespace=namespace, 
-            log_to_driver=log_to_driver, 
-            ignore_reinit_error=True
-        )
-        logger.info(f"Ray初始化成功: {ray.get_runtime_context().gcs_address}")
-        return True
-    except Exception as e:
-        logger.error(f"Ray初始化失败: {e}")
-        return False
-
-def start_serve(detached=False, http_host="0.0.0.0", http_port=8000):
-    """启动Ray Serve服务"""
-    try:
-        serve.start(
-            detached=detached, 
-            http_options={"host": http_host, "port": http_port}
-        )
-        logger.info(f"Ray Serve已启动: http://{http_host}:{http_port}")
-        return True
-    except Exception as e:
-        logger.error(f"Ray Serve启动失败: {e}")
-        return False
-
-def setup_pipeline_services():
-    """设置和部署VideoTrans流水线服务"""
-    try:
-        # 初始化Ray和Serve
-        if not init_ray():
-            logger.critical("无法初始化Ray集群")
-            return None
-            
-        if not start_serve():
-            logger.critical("无法启动Ray Serve")
-            return None
-
-        logger.info("准备部署流水线应用...")
-        
-        # 绑定并部署分阶段流水线服务（预处理和翻译）
-        preprocessing_pipe = PreprocessingPipe.bind(
-            video_separator_handle=video_separator_handle,
-            asr_model_handle=asr_handle
-        )
-        translation_pipe = TranslationPipe.bind(
-            translator_handle=translator_handle,
-            my_index_tts_handle=my_index_tts_handle,
-            duration_aligner_handle=duration_aligner_handle,
-            timestamp_adjuster_handle=timestamp_adjuster_handle,
-            media_mixer_handle=media_mixer_handle,
-            hls_manager_handle=hls_manager_handle
-        )
-        # 单独部署预处理和翻译两个应用
-        serve.run(preprocessing_pipe, name="PreprocessingEngine", route_prefix=None)
-        serve.run(translation_pipe,   name="TranslationEngine",   route_prefix=None)
-        
-        logger.info("流水线服务设置完成")
-        return {"status": "deployed", "application": "PipelineEngine"}
-
-    except Exception as e:
-        logger.critical(f"设置流水线服务失败: {e}", exc_info=True)
-        return None
-
-# --- 脚本入口 ---
-if __name__ == "__main__":
-    setup_pipeline_services()
+            torch.cuda.empty_cache() 
