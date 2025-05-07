@@ -37,7 +37,6 @@ from core.media_mixer import MediaMixer
 from utils.task_storage import TaskPaths
 from utils.ffmpeg_utils import concat_videos, get_duration
 from core.supabase_client import SupabaseClient
-from core.sentence_tools import Sentence # 添加 Sentence 导入
 
 # 初始化全局日志配置
 init_logging()
@@ -318,14 +317,6 @@ class TranslationPipe:
             await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f'获取任务依赖失败: {e}'})
             return []
         # --- 信息获取结束 ---
-
-
-        # 1. 检查前置条件 (已在上面检查 supabase_client)
-        # if not self.supabase_client:
-        #     self.logger.error(f"[{task_id}] Supabase客户端未初始化，无法进行翻译处理")
-        #     return []
-
-        # 2. 获取句子 (这部分逻辑不变)
         try:
             sentences = await self.supabase_client.get_sentences(task_id, as_objects=True)
             if not sentences:
