@@ -19,6 +19,7 @@ import time
 
 from config import Config, init_logging
 from core.supabase_client import SupabaseClient
+from utils.task_initializer import init_task
 
 config = Config()
 # config.init_directories() # Removed: Launcher will handle this
@@ -76,16 +77,12 @@ class VideoTransAPI:
     async def upload_video(
         self,
         video: UploadFile = File(...),
-        target_language: str = Form(None),  # 修改为可选参数
-        generate_subtitle: bool = Form(None),  # 修改为可选参数
     ):
         """
         上传视频接口
         
         Args:
             video: 视频文件
-            target_language: 目标语言（可选）
-            generate_subtitle: 是否生成字幕（可选）
         """
         try:
             if not video:
@@ -93,14 +90,10 @@ class VideoTransAPI:
             
             if not video.content_type.startswith('video/'):
                 raise HTTPException(status_code=400, detail="只支持视频文件")
-                
-            # 当target_language被提供时才检查
-            if target_language is not None and target_language not in ["zh", "en", "ja", "ko"]:
-                raise HTTPException(status_code=400, detail=f"不支持的目标语言: {target_language}")
             
             # 生成任务ID
             task_id = str(uuid.uuid4())
-            self.logger.info(f"新建任务ID: {task_id}, 目标语言: {target_language}, 生成字幕: {generate_subtitle}")
+            self.logger.info(f"新建任务ID: {task_id} 用于视频上传")
             
             # 保存上传的视频文件
             input_dir = config.TASKS_DIR / task_id / "input"
@@ -121,14 +114,6 @@ class VideoTransAPI:
                 'status': 'uploaded',
                 'original_video_path': str(video_path),
             }
-            
-            # 只有当target_language被提供时才加入
-            if target_language is not None:
-                task_data['target_language'] = target_language
-                
-            # 只有当generate_subtitle被提供时才加入
-            if generate_subtitle is not None:
-                task_data['generate_subtitle'] = generate_subtitle
                 
             # 记录上传任务到数据库，不启动预处理
             await self.supabase_client.store_task(task_data)
@@ -167,21 +152,33 @@ class VideoTransAPI:
         if not video_path:
             raise HTTPException(status_code=400, detail="原始视频路径不存在")
         try:
-            # 先更新任务，设置target_language和generate_subtitle
+            # Initialize task directories and confirm/update parameters
+            init_success = await init_task(
+                config=config, 
+                supabase_client=self.supabase_client, 
+                task_id=task_id,
+                video_path=str(video_path),
+                target_language=target_language,
+                generate_subtitle=generate_subtitle
+            )
+            
+            if not init_success:
+                raise HTTPException(status_code=500, detail="任务初始化失败(init_task)，请检查日志")
+
+            # Set status to 'preprocessing' and ensure target_language/generate_subtitle are recorded
             await self.supabase_client.update_task(task_id, {
-                'target_language': target_language,
+                'status': 'preprocessing',
+                'target_language': target_language, 
                 'generate_subtitle': generate_subtitle
             })
             
-            # 异步调用预处理管道
+            # Dispatch to PreprocessingPipe
             self.preprocessing_handle.remote(
                 task_id=task_id,
                 video_path=str(video_path),
                 target_language=target_language,
                 generate_subtitle=generate_subtitle
             )
-            # 更新任务状态
-            await self.supabase_client.update_task(task_id, {'status': 'preprocessing'})
             return JSONResponse(content={
                 'status': 'preprocessing',
                 'task_id': task_id,
@@ -189,6 +186,8 @@ class VideoTransAPI:
             })
         except Exception as e:
             self.logger.error(f"调用PreprocessingPipe失败: {e}", exc_info=True)
+            # Update task status to error if dispatching to PreprocessingPipe fails
+            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"启动预处理失败: {e}"})
             raise HTTPException(status_code=500, detail="启动预处理失败")
 
     @app.get("/task/{task_id}")
