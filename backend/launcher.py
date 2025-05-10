@@ -8,8 +8,8 @@ from ray import serve
 from config import Config, init_logging
 
 # Import necessary components from engine and api files
-from preprocessing_engine import PreprocessingPipe as PreprocessingPipeDef, video_separator_handle, asr_handle
-from translation_engine import TranslationPipe as TranslationPipeDef, translator_handle, my_index_tts_handle, duration_aligner_handle, timestamp_adjuster_handle, media_mixer_handle, hls_manager_handle
+from pre_engine import PreEngine as PreEngineDef, video_separator_handle, asr_handle
+from trans_engine import TransPipe as TransPipeDef, translator_handle, my_index_tts_handle, duration_aligner_handle, timestamp_adjuster_handle, media_mixer_handle, hls_manager_handle
 from api import setup_server as setup_api_server
 
 logger = logging.getLogger(__name__)
@@ -44,19 +44,19 @@ def main():
 
     # 3. Deploy Preprocessing Engine
     try:
-        preprocessing_pipe_app = PreprocessingPipeDef.bind(
+        pre_pipe = PreEngineDef.bind(
             video_separator_handle=video_separator_handle,
             asr_model_handle=asr_handle
         )
-        serve.run(preprocessing_pipe_app, name="PreprocessingEngine", route_prefix=None)
-        logger.info("PreprocessingEngine deployed successfully.")
+        serve.run(pre_pipe, name="PreEngine", route_prefix=None)
+        logger.info("PreEngine deployed successfully.")
     except Exception as e:
-        logger.critical(f"Failed to deploy PreprocessingEngine: {e}", exc_info=True)
+        logger.critical(f"Failed to deploy PreEngine: {e}", exc_info=True)
         return
 
     # 4. Deploy Translation Engine
     try:
-        translation_pipe_app = TranslationPipeDef.bind(
+        trans_pipe = TransPipeDef.bind(
             translator_handle=translator_handle,
             my_index_tts_handle=my_index_tts_handle,
             duration_aligner_handle=duration_aligner_handle,
@@ -64,10 +64,10 @@ def main():
             media_mixer_handle=media_mixer_handle,
             hls_manager_handle=hls_manager_handle
         )
-        serve.run(translation_pipe_app, name="TranslationEngine", route_prefix=None)
-        logger.info("TranslationEngine deployed successfully.")
+        serve.run(trans_pipe, name="TransEngine", route_prefix=None)
+        logger.info("TransEngine deployed successfully.")
     except Exception as e:
-        logger.critical(f"Failed to deploy TranslationEngine: {e}", exc_info=True)
+        logger.critical(f"Failed to deploy TransEngine: {e}", exc_info=True)
         return
 
     # 5. Deploy API Server

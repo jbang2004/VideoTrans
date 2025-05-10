@@ -6,12 +6,14 @@ import shutil
 import time
 import asyncio
 from pathlib import Path
-from typing import Union, Optional, Dict
+from typing import Union, Optional, Dict, List
 from ray import serve
 
-from utils.ffmpeg_utils import hls_segment
+import aiofiles
+from utils.ffmpeg_utils import hls_segment, concat_videos
 from utils.task_storage import TaskPaths
 from config import Config
+from core.supabase_client import SupabaseClient
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,7 @@ class HLSManager:
     """HLS流媒体管理器 - 支持多任务管理"""
     def __init__(self):
         self.config = Config()
+        self.supabase_client = SupabaseClient(config=self.config)
         self.logger = logging.getLogger(__name__)
         
         # 存储每个任务的HLS管理信息
@@ -82,7 +85,15 @@ class HLSManager:
                 self.logger.info(f"已为任务 {task_id} 创建HLS管理器")
                 return {"status": "success", "message": "HLS管理器创建成功"}
             except Exception as e:
-                self.logger.error(f"为任务 {task_id} 创建HLS管理器失败: {e}")
+                error_message = f"为任务 {task_id} 创建HLS管理器失败: {e}"
+                self.logger.error(error_message)
+                # Update Supabase task status to error
+                if self.supabase_client:
+                    try:
+                        await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"HLS管理器初始化失败: {e}"})
+                    except Exception as db_update_e:
+                        self.logger.error(f"任务 {task_id}: 更新数据库状态失败 (HLS创建失败时): {db_update_e}")
+
                 # 清理已创建的部分资源
                 if task_id in self.task_managers:
                     del self.task_managers[task_id]
@@ -158,6 +169,8 @@ class HLSManager:
                 segment_time = manager["segment_time"]
                 task_paths = manager["task_paths"]
                 
+                was_first_segment = not manager["has_segments"]
+
                 self.logger.info(f"开始处理HLS片段 {part_index}, 任务ID={task_id}")
                 segments_dir.mkdir(parents=True, exist_ok=True)
 
@@ -192,6 +205,18 @@ class HLSManager:
                 playlist.is_endlist = False
                 
                 await self._save_playlist(task_id)
+
+                # --- If this was the first segment batch, update hls_playlist_url in Supabase ---
+                if was_first_segment and manager["has_segments"] and self.supabase_client:
+                    hls_relative_path = f"playlists/{task_id}/{task_paths.playlist_path.name}"
+                    try:
+                        await self.supabase_client.update_task(task_id, {
+                            'hls_playlist_url': hls_relative_path,
+                        })
+                        self.logger.info(f"[{task_id}] HLS播放列表URL已由HLSManager更新到数据库: {hls_relative_path}")
+                    except Exception as update_e:
+                        self.logger.error(f"[{task_id}] HLSManager更新HLS播放列表URL到数据库失败: {update_e}")
+                # --- End of new logic ---
                 
                 # 删除临时播放列表
                 if temp_playlist_path.exists():
@@ -286,4 +311,85 @@ class HLSManager:
                 del self.locks[task_id]
         
         self.logger.info(f"已清理 {cleaned_count} 个过期任务的HLS资源")
-        return {"status": "success", "cleaned_count": cleaned_count} 
+        return {"status": "success", "cleaned_count": cleaned_count}
+
+    async def finalize_merge(self, task_id: str, all_processed_segment_paths: List[str], task_paths: TaskPaths) -> Dict:
+        """最终化任务处理：结束播放列表，合并片段，并更新数据库状态"""
+        self.logger.info(f"[{task_id}] HLSManager: 开始最终化任务处理，包含 {len(all_processed_segment_paths)} 个片段。")
+
+        # 1. 结束HLS播放列表
+        await self.finalize_playlist(task_id)
+        self.logger.info(f"[{task_id}] HLSManager: 播放列表已标记为结束。")
+
+        # 2. 合并处理好的视频片段
+        self.logger.info(f"[{task_id}] HLSManager: 开始合并 {len(all_processed_segment_paths)} 个视频片段。")
+        
+        # 处理无片段情况
+        if not all_processed_segment_paths:
+            msg = "HLSManager: 没有处理成功的视频片段可以合并。"
+            self.logger.error(f"[{task_id}] {msg}")
+            if self.supabase_client:
+                try:
+                    await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
+                except Exception as db_update_e:
+                    self.logger.error(f"[{task_id}] HLSManager: 更新数据库状态(无片段)失败: {db_update_e}")
+            return {"status": "error", "message": msg}
+
+        try:
+            # 创建合并列表文件
+            list_txt_path = task_paths.processing_dir / "concat_list.txt"
+            async with aiofiles.open(list_txt_path, "w", encoding='utf-8') as f:
+                for seg_mp4 in all_processed_segment_paths:
+                    # 确保路径是绝对的并且格式正确
+                    formatted_path = str(Path(seg_mp4).resolve()).replace("\\", "/")
+                    await f.write(f"file '{formatted_path}'\n")
+            self.logger.info(f"[{task_id}] HLSManager: 合并列表文件已创建: {list_txt_path}")
+
+            # 执行视频合并
+            final_output_path = task_paths.output_dir / f"final_{task_id}.mp4"
+            merge_start_time = time.time()
+            self.logger.info(f"[{task_id}] HLSManager: 开始调用 concat_videos, 输出到 {final_output_path}")
+            
+            # concat_videos 应该是异步的，如果不是，需要用 asyncio.to_thread 包装
+            # 假设 concat_videos 是异步的
+            final_video_path_obj = await concat_videos(str(list_txt_path), str(final_output_path))
+
+            # 处理合并结果
+            if not final_video_path_obj or not final_video_path_obj.exists():
+                msg = "HLSManager: 视频合并失败，最终文件未生成。"
+                self.logger.error(f"[{task_id}] {msg}")
+                if self.supabase_client:
+                    try:
+                        await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
+                    except Exception as db_update_e:
+                         self.logger.error(f"[{task_id}] HLSManager: 更新数据库状态(合并失败)失败: {db_update_e}")
+                return {"status": "error", "message": msg}
+
+            # 完成流程并更新状态
+            final_video_path_str = str(final_video_path_obj)
+            merge_duration = time.time() - merge_start_time
+            
+            if self.supabase_client:
+                try:
+                    await self.supabase_client.update_task(task_id, {
+                        'status': 'success',
+                        'download_video_path': final_video_path_str,
+                    })
+                    self.logger.info(f"[{task_id}] HLSManager: 任务状态成功，下载路径已更新到数据库。")
+                except Exception as db_update_e:
+                    self.logger.error(f"[{task_id}] HLSManager: 更新数据库状态(成功)失败: {db_update_e}")
+                    # 即使数据库更新失败，合并本身是成功的，所以仍然返回成功
+                    return {"status": "success", "message": "视频处理成功，但数据库更新失败", "output_path": final_video_path_str}
+
+            self.logger.info(f"[{task_id}] HLSManager: 视频合并成功，耗时: {merge_duration:.2f}s")
+            return {"status": "success", "message": "视频处理成功", "output_path": final_video_path_str}
+            
+        except Exception as e:
+            msg = f"HLSManager: 视频合并过程中出错: {e}"
+            self.logger.exception(f"[{task_id}] {msg}") # Log with stack trace
+            if self.supabase_client:
+                try:
+                    await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
+                except Exception as db_update_e:
+                    self.logger.error(f"[{task_id}] HLSManager: 更新数据库状态(合并异常)失败: {db_update_e}")
+            return {"status": "error", "message": msg} 

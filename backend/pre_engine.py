@@ -1,15 +1,11 @@
 import logging
-import asyncio
 import time
 import sys
-import os
 import gc
 import torch
-from typing import List, Optional, Dict, Any
 from pathlib import Path
 
 # Ray 和 Serve
-import ray
 from ray import serve
 
 # 项目模块
@@ -18,8 +14,6 @@ from core.video_separator import VideoSeparator
 from core.asr_model import ASRModel
 from utils.task_storage import TaskPaths
 from utils.ffmpeg_utils import get_duration
-from core.supabase_client import SupabaseClient
-
 # 初始化全局日志配置
 init_logging()
 
@@ -27,7 +21,6 @@ logger = logging.getLogger(__name__)
 
 # --- 全局配置 ---
 global_config = Config()
-# global_config.init_directories() # Removed: Launcher will handle this
 
 # --- Ray Serve 预处理相关部署句柄创建 ---
 try:
@@ -38,17 +31,16 @@ except Exception as e:
     sys.exit(1)
 
 @serve.deployment(
-    name="PreprocessingPipe",
+    name="PreEngine",
     num_replicas=1,
     max_ongoing_requests=global_config.MAX_PARALLEL_SEGMENTS,
     ray_actor_options={"num_cpus": 0.5},
     logging_config={"log_level": "INFO"}
 )
-class PreprocessingPipe:
+class PreEngine:
     """分阶段流水线：预处理阶段，负责视频分离和ASR"""
     def __init__(self, video_separator_handle, asr_model_handle):
         self.logger = logger
-        self.supabase_client = SupabaseClient(config=global_config)
         self.video_separator = video_separator_handle
         self.asr = asr_model_handle
         self.config = global_config
@@ -71,12 +63,6 @@ class PreprocessingPipe:
         seg_start_time = time.time()
         try:
             task_paths = TaskPaths(self.config, task_id)
-            
-            # 1. 检查任务是否已经预处理完成
-            current_task = await self.supabase_client.get_task(task_id)
-            if current_task and current_task.get('status') == 'preprocessed':
-                self.logger.info(f"[{task_id}] Preprocessing already completed according to DB.")
-                return {"status": "preprocessed", "message": "Preprocessing was already finished"}
 
             # 2. 获取视频时长
             duration = await get_duration(video_path)
@@ -118,11 +104,6 @@ class PreprocessingPipe:
 
         except Exception as e:
             self.logger.exception(f"[{task_id}] Error during preprocessing (separation/ASR): {e}")
-            # 只在预处理流程层面出错时更新错误状态
-            await self.supabase_client.update_task(task_id, {
-                'status': 'error', 
-                'error_message': f"Preprocessing (sep/ASR) error: {e}"
-            })
             return {"status": "error", "message": f"Error during preprocessing: {e}"}
         finally:
             self._clean_memory()
@@ -133,7 +114,3 @@ class PreprocessingPipe:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
-# --- 脚本入口 --- (REMOVING THIS SECTION)
-# if __name__ == "__main__":
-#     setup_preprocessing_service() 

@@ -56,13 +56,13 @@ class VideoTransAPI:
         self.logger = logger
         try:
             # 获取预处理和翻译流水线句柄
-            self.preprocessing_handle = serve.get_deployment_handle("PreprocessingPipe", app_name="PreprocessingEngine")
-            self.translation_handle = serve.get_deployment_handle("TranslationPipe", app_name="TranslationEngine")
+            self.pre_handle = serve.get_deployment_handle("PreEngine", app_name="PreEngine")
+            self.trans_handle = serve.get_deployment_handle("TransEngine", app_name="TransEngine")
             
             # 初始化Supabase客户端
             self.supabase_client = SupabaseClient(config=config)
             
-            self.logger.info("VideoTransAPI 初始化成功，已连接到 PreprocessingEngine 和 TranslationEngine 服务")
+            self.logger.info("VideoTransAPI 初始化成功，已连接到 PreEngine 和 TransEngine 服务")
         except Exception as e:
             self.logger.error(f"VideoTransAPI 初始化失败: {e}", exc_info=True)
             # 在初始化失败时抛出异常，阻止服务启动
@@ -173,7 +173,7 @@ class VideoTransAPI:
             })
             
             # Dispatch to PreprocessingPipe
-            self.preprocessing_handle.remote(
+            self.pre_handle.remote(
                 task_id=task_id,
                 video_path=str(video_path),
                 target_language=target_language,
@@ -185,7 +185,7 @@ class VideoTransAPI:
                 'message': '预处理已开始'
             })
         except Exception as e:
-            self.logger.error(f"调用PreprocessingPipe失败: {e}", exc_info=True)
+            self.logger.error(f"调用PreEngine失败: {e}", exc_info=True)
             # Update task status to error if dispatching to PreprocessingPipe fails
             await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"启动预处理失败: {e}"})
             raise HTTPException(status_code=500, detail="启动预处理失败")
@@ -328,8 +328,8 @@ class VideoTransAPI:
                 raise HTTPException(status_code=400, detail=f"任务状态为 '{current_status}'。仅当状态为 'preprocessed' 时才能开始翻译。")
 
             # 异步触发翻译流水线
-            self.translation_handle.translate_task.remote(task_id)
-            self.logger.info(f"成功触发TranslationPipe处理: {task_id}")
+            self.trans_handle.translate_task.remote(task_id)
+            self.logger.info(f"成功触发TransEngine处理: {task_id}")
 
             # 更新状态
             await self.supabase_client.update_task(task_id, {'status': 'translating'})
@@ -342,7 +342,7 @@ class VideoTransAPI:
         except HTTPException as e:
             raise e
         except Exception as e:
-            self.logger.error(f"调用TranslationPipe失败: {str(e)}", exc_info=True)
+            self.logger.error(f"调用TransEngine失败: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"无法开始翻译: {e}")
 
 # 静态文件挂载
@@ -367,17 +367,17 @@ def setup_server():
 
     # 检查预处理和翻译应用是否已部署
     try:
-        serve.get_app_handle("PreprocessingEngine")
-        logger.info("成功连接到已部署的 PreprocessingEngine 应用")
+        serve.get_app_handle("PreEngine")
+        logger.info("成功连接到已部署的 PreEngine 应用")
     except Exception as e:
-        logger.error(f"连接 PreprocessingEngine 应用失败，请确保 preprocessing_engine.py 已经成功启动: {e}")
-        raise RuntimeError(f"无法连接到核心 PreprocessingEngine 应用: {e}")
+        logger.error(f"连接 PreEngine 应用失败，请确保 pre_engine.py 已经成功启动: {e}")
+        raise RuntimeError(f"无法连接到核心 PreEngine 应用: {e}")
     try:
-        serve.get_app_handle("TranslationEngine")
-        logger.info("成功连接到已部署的 TranslationEngine 应用")
+        serve.get_app_handle("TransEngine")
+        logger.info("成功连接到已部署的 TransEngine 应用")
     except Exception as e:
-        logger.error(f"连接 TranslationEngine 应用失败，请确保 translation_engine.py 已经成功启动: {e}")
-        raise RuntimeError(f"无法连接到核心 TranslationEngine 应用: {e}")
+        logger.error(f"连接 TransEngine 应用失败，请确保 trans_engine.py 已经成功启动: {e}")
+        raise RuntimeError(f"无法连接到核心 TransEngine 应用: {e}")
 
     # 直接部署 API 服务
     video_api = VideoTransAPI.bind()

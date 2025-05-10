@@ -46,6 +46,14 @@ class MediaMixer:
         """处理一批句子并返回处理后的视频片段路径"""
         
         try:
+            # If this is the first batch processed by the mixer for this task, update status to 'mixing'
+            if batch_counter == 0 and self.supabase_client:
+                try:
+                    self.logger.info(f"[{task_id}] MediaMixer: First batch (batch_counter=0), updating status to 'mixing'.")
+                    await self.supabase_client.update_task(task_id, {'status': 'mixing'})
+                except Exception as e_update_status:
+                    self.logger.error(f"[{task_id}] MediaMixer: Failed to update status to 'mixing': {e_update_status}")
+
             if not sentences_batch:
                 logger.warning(f"[{task_id}] mix_media: 收到空的句子列表")
                 return None

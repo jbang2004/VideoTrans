@@ -50,17 +50,16 @@ except Exception as e:
     sys.exit(1)
 
 @serve.deployment(
-    name="TranslationPipe",
+    name="TransEngine",
     num_replicas=1,
     max_ongoing_requests=global_config.MAX_PARALLEL_SEGMENTS,
     ray_actor_options={"num_cpus": 0.5},
     logging_config={"log_level": "INFO"}
 )
-class TranslationPipe:
+class TransPipe:
     """分阶段流水线：翻译与合成阶段"""
     def __init__(self, translator_handle: DeploymentHandle, my_index_tts_handle: DeploymentHandle, duration_aligner_handle: DeploymentHandle, timestamp_adjuster_handle: DeploymentHandle, media_mixer_handle: DeploymentHandle, hls_manager_handle: DeploymentHandle):
         self.logger = logger
-        self.supabase_client = SupabaseClient(config=global_config)
         self.config = global_config
         self.translator = translator_handle.options(stream=True)
         self.my_index_tts = my_index_tts_handle.options(stream=True)
@@ -87,7 +86,6 @@ class TranslationPipe:
             return result
         except Exception as e:
             self.logger.exception(f"[{task_id}] Translation stage failed: {e}")
-            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"Translation failed: {e}"})
             return {"status": "error", "message": f"Translation failed: {e}"}
         finally:
             self._clean_memory()
@@ -102,34 +100,15 @@ class TranslationPipe:
             return True
         except Exception as e:
             self.logger.error(f"[{task_id}] HLS管理器初始化失败: {e}")
-            if self.supabase_client:
-                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"HLS初始化失败: {e}"})
             return False
 
     async def _run_translation_pipeline(self, task_id: str, task_paths: TaskPaths) -> List[str]:
         """运行从翻译到媒体混合的子流水线 (从数据库获取依赖信息)"""
-        tts_batches = 0
         added_hls_segments = 0
         start_time = time.time()
         current_time = 0.0
         merged_segments_paths = []
         batch_counter = 0
-
-        # --- 从数据库获取所需信息 ---
-        if not self.supabase_client:
-            self.logger.error(f"[{task_id}] Supabase客户端未初始化，无法进行翻译处理")
-            return []
-
-        try:
-            task_data = await self.supabase_client.get_task(task_id)
-            if not task_data:
-                self.logger.error(f"[{task_id}] 无法从数据库获取任务信息")
-                return []
-
-        except Exception as e:
-            self.logger.error(f"[{task_id}] 获取或重建任务依赖信息失败: {e}", exc_info=True)
-            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f'获取任务依赖失败: {e}'})
-            return []
 
         # 3. 主要处理流程 (后续逻辑使用上面获取或重建的变量)
         try:
@@ -148,8 +127,6 @@ class TranslationPipe:
                     if not tts_batch:
                         continue
 
-                    tts_batches += 1
-                    
                     # 时长对齐和调整
                     aligned_batch = await self.duration_aligner.remote(tts_batch, max_speed=1.2)
                     if not aligned_batch:
@@ -165,11 +142,6 @@ class TranslationPipe:
 
                     # 更新时间戳位置和处理状态
                     current_time = adjusted_batch[-1].adjusted_start + adjusted_batch[-1].adjusted_duration
-                    
-                    # 第一个批次完成后，更新状态为 mixing
-                    status_update = 'mixing' if tts_batches == 1 else None
-                    if status_update:
-                        await self.supabase_client.update_task(task_id, {'status': status_update})
 
                     # 媒体混合 (使用重建的 media_files 和传入的 task_paths)
                     output_path = await self.media_mixer.mix_media.remote(
@@ -195,18 +167,6 @@ class TranslationPipe:
                         batch_counter += 1
                         self.logger.info(f"[{task_id}] HLS片段 {batch_counter} 添加成功")
 
-                        # --- 首次添加成功时，更新 hls_playlist_url ---
-                        if added_hls_segments == 1 and self.supabase_client:
-                            hls_relative_path = f"playlists/{task_id}/{task_paths.playlist_path.name}"
-                            try:
-                                await self.supabase_client.update_task(task_id, {
-                                    'hls_playlist_url': hls_relative_path,
-                                })
-                                self.logger.info(f"[{task_id}] HLS播放列表URL已更新到数据库: {hls_relative_path}")
-                            except Exception as update_e:
-                                self.logger.error(f"[{task_id}] 更新HLS播放列表URL到数据库失败: {update_e}")
-                        # --- 新增结束 ---
-
                     else:
                         error_msg = hls_result.get('message') if hls_result else '未知错误'
                         self.logger.error(f"[{task_id}] 添加HLS片段失败: {error_msg}")
@@ -215,68 +175,35 @@ class TranslationPipe:
                     self._clean_memory()
 
             self.logger.info(f"[{task_id}] 翻译流程完成，耗时: {time.time() - start_time:.2f}s, "
-                            f"TTS批次: {tts_batches}, HLS段: {added_hls_segments}")
+                            f"HLS段: {added_hls_segments}")
             return merged_segments_paths
 
         except Exception as e:
             self.logger.exception(f"[{task_id}] 翻译流程异常: {e}")
-            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"翻译流程错误: {e}"})
             return []
 
     async def _merge_segments(self, task_id: str, merged_segments: List[str], task_paths: TaskPaths) -> Dict:
-        """合并处理好的视频片段"""
-        self.logger.info(f"[{task_id}] 开始合并 {len(merged_segments)} 个视频片段")
+        """合并处理好的视频片段，现在委托给 HLSManager """
+        self.logger.info(f"[{task_id}] TranslationPipe: 请求 HLSManager 最终化任务处理，包含 {len(merged_segments)} 个片段。")
         
-        # 处理无片段情况
-        if not merged_segments:
-            msg = "没有处理成功的视频片段可以合并"
-            if self.supabase_client:
-                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
-            return {"status": "error", "message": msg}
+        # 调用 HLSManager 的新方法进行合并和状态更新
+        result = await self.hls_manager.finalize_merge.remote(
+            task_id=task_id,
+            all_processed_segment_paths=merged_segments,
+            task_paths=task_paths
+        )
 
-        try:
-            # 1. 创建合并列表文件
-            list_txt_path = task_paths.processing_dir / "concat_list.txt"
-            async with aiofiles.open(list_txt_path, "w", encoding='utf-8') as f:
-                for seg_mp4 in merged_segments:
-                    formatted_path = str(Path(seg_mp4).resolve()).replace("\\", "/")
-                    await f.write(f"file '{formatted_path}'\n")
+        # 根据 HLSManager 返回的结果记录日志
+        if result and result.get("status") == "success":
+            self.logger.info(f"[{task_id}] TranslationPipe: HLSManager 成功完成任务处理。输出: {result.get('output_path', 'N/A')}")
+        elif result:
+            self.logger.error(f"[{task_id}] TranslationPipe: HLSManager 报告任务处理失败。消息: {result.get('message', '未知错误')}")
+        else:
+            self.logger.error(f"[{task_id}] TranslationPipe: HLSManager 返回了无效的响应或未返回响应。")
+            # 提供一个默认的错误返回，以防 HLSManager 崩溃或返回 None
+            return {"status": "error", "message": "HLSManager 未能处理最终化请求或返回无效响应"}
 
-            # 2. 执行视频合并
-            final_output_path = task_paths.output_dir / f"final_{task_id}.mp4"
-            merge_start_time = time.time()
-            final_video_path = await concat_videos(str(list_txt_path), str(final_output_path))
-
-            # 3. 处理合并结果
-            if not final_video_path or not final_video_path.exists():
-                msg = "视频合并失败，最终文件未生成"
-                self.logger.error(f"[{task_id}] {msg}")
-                if self.supabase_client:
-                    await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
-                return {"status": "error", "message": msg}
-
-            # 4. 完成流程并更新状态
-            final_video_path_str = str(final_video_path)
-            merge_duration = time.time() - merge_start_time
-            
-            # 完成HLS列表
-            await self.hls_manager.finalize_playlist.remote(task_id)
-            
-            if self.supabase_client:
-                await self.supabase_client.update_task(task_id, {
-                    'status': 'success',
-                    'download_video_path': final_video_path_str,
-                })
-            
-            self.logger.info(f"[{task_id}] 视频合并成功，耗时: {merge_duration:.2f}s")
-            return {"status": "success", "message": "视频处理成功", "output_path": final_video_path_str}
-            
-        except Exception as e:
-            msg = f"视频合并过程中出错: {e}"
-            self.logger.error(f"[{task_id}] {msg}")
-            if self.supabase_client:
-                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
-            return {"status": "error", "message": msg}
+        return result
 
     def _clean_memory(self):
         gc.collect()
