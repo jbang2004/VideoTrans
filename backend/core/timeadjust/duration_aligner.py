@@ -13,16 +13,24 @@ logger = logging.getLogger(__name__)
 
 @serve.deployment(
     name="duration_aligner",
-    ray_actor_options={"num_cpus": 0.25}
+    ray_actor_options={"num_cpus": 1}
 )
 class DurationAligner:
-    def __init__(self, simplifier_handle: DeploymentHandle, index_tts_handle: DeploymentHandle):
-        # 从 pipeline_scheduler.py 中注入句柄
-        self.simplifier = simplifier_handle.options(stream=True) # 指向 Translator (Simplifier)，启用流式处理
-        self.index_tts = index_tts_handle.options(stream=True)   # 指向 MyIndexTTSDeployment，启用流式处理
+    def __init__(self): # 不再接收外部句柄
         self.config = Config()
         self.sample_rate = getattr(self.config, 'TARGET_SR', 24000)  # 获取采样率，默认24kHz
-        logger.warning("时长对齐器已初始化")
+        
+        # 获取 Translator deployment 的句柄，用于调用 simplify_sentences
+        # "translator" 是 Translator 类 @serve.deployment(name="translator") 中的 name
+        # "TranslatorApp" 是 launcher.py 中 serve.run(translator_app, name="TranslatorApp") 的 app_name
+        self.simplifier = serve.get_deployment_handle("translator", app_name="TranslatorApp").options(stream=True)
+        
+        # 获取 MyIndexTTSDeployment 的句柄
+        # "my_index_tts" 是 MyIndexTTSDeployment 类 @serve.deployment(name="my_index_tts") 中的 name
+        # "TTSApp" 是 launcher.py 中 serve.run(my_index_tts_app, name="TTSApp") 的 app_name
+        self.index_tts = serve.get_deployment_handle("my_index_tts", app_name="TTSApp").options(stream=True)
+        
+        logger.warning("时长对齐器已初始化并自动获取所需句柄")
 
     async def __call__(self, sentences: List[Sentence], max_speed: float = 1.1) -> List[Sentence]:
         """执行句子时长对齐"""

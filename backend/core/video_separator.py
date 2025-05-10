@@ -17,7 +17,7 @@ from core.supabase_client import SupabaseClient
 
 @serve.deployment(
     name="video_separator",
-    ray_actor_options={"num_gpus": 0.3, "num_cpus": 0.5}
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.3}
 )
 class VideoSeparator:
     """

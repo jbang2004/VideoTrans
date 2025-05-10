@@ -22,7 +22,6 @@ from core.supabase_client import SupabaseClient
 from utils.task_initializer import init_task
 
 config = Config()
-# config.init_directories() # Removed: Launcher will handle this
 
 # 初始化全局日志配置
 init_logging()
@@ -52,21 +51,19 @@ templates = Jinja2Templates(directory=str(current_dir / "templates"))
 class VideoTransAPI:
     """视频翻译API服务"""
     def __init__(self):
-        """初始化 API 服务，从 PreprocessingEngine 和 TranslationEngine 应用获取 handles"""
+        """初始化 API 服务，获取 MainOrchestrator 应用句柄"""
         self.logger = logger
         try:
-            # 获取预处理和翻译流水线句柄
-            self.pre_handle = serve.get_deployment_handle("PreEngine", app_name="PreEngine")
-            self.trans_handle = serve.get_deployment_handle("TransEngine", app_name="TransEngine")
+            # 获取主编排器句柄
+            # "MainOrchestratorDeployment" is the @serve.deployment name in orchestrator.py
+            # "MainOrchestratorApp" is the serve.run name in launcher.py
+            self.orchestrator_handle = serve.get_deployment_handle("MainOrchestratorDeployment", app_name="MainOrchestratorApp")
             
-            # 初始化Supabase客户端
             self.supabase_client = SupabaseClient(config=config)
-            
-            self.logger.info("VideoTransAPI 初始化成功，已连接到 PreEngine 和 TransEngine 服务")
+            self.logger.info("VideoTransAPI initialized with MainOrchestrator handle.")
         except Exception as e:
-            self.logger.error(f"VideoTransAPI 初始化失败: {e}", exc_info=True)
-            # 在初始化失败时抛出异常，阻止服务启动
-            raise RuntimeError(f"VideoTransAPI 无法连接到必要的服务: {e}")
+            self.logger.error(f"VideoTransAPI initialization failed: {e}", exc_info=True)
+            raise RuntimeError(f"VideoTransAPI cannot connect to MainOrchestrator: {e}")
 
     @app.get("/")
     async def index(self, request: Request):
@@ -172,8 +169,8 @@ class VideoTransAPI:
                 'generate_subtitle': generate_subtitle
             })
             
-            # Dispatch to PreprocessingPipe
-            self.pre_handle.remote(
+            # Dispatch to MainOrchestrator
+            self.orchestrator_handle.run_preprocessing_pipeline.remote(
                 task_id=task_id,
                 video_path=str(video_path),
                 target_language=target_language,
@@ -185,8 +182,8 @@ class VideoTransAPI:
                 'message': '预处理已开始'
             })
         except Exception as e:
-            self.logger.error(f"调用PreEngine失败: {e}", exc_info=True)
-            # Update task status to error if dispatching to PreprocessingPipe fails
+            self.logger.error(f"调用 MainOrchestrator for preprocessing 失败: {e}", exc_info=True)
+            # Update task status to error if dispatching to MainOrchestrator fails
             await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"启动预处理失败: {e}"})
             raise HTTPException(status_code=500, detail="启动预处理失败")
 
@@ -327,9 +324,9 @@ class VideoTransAPI:
             if current_status != 'preprocessed':
                 raise HTTPException(status_code=400, detail=f"任务状态为 '{current_status}'。仅当状态为 'preprocessed' 时才能开始翻译。")
 
-            # 异步触发翻译流水线
-            self.trans_handle.translate_task.remote(task_id)
-            self.logger.info(f"成功触发TransEngine处理: {task_id}")
+            # Dispatch to MainOrchestrator
+            self.orchestrator_handle.run_translation_pipeline.remote(task_id)
+            self.logger.info(f"成功触发 MainOrchestrator for translation: {task_id}")
 
             # 更新状态
             await self.supabase_client.update_task(task_id, {'status': 'translating'})
@@ -342,7 +339,7 @@ class VideoTransAPI:
         except HTTPException as e:
             raise e
         except Exception as e:
-            self.logger.error(f"调用TransEngine失败: {str(e)}", exc_info=True)
+            self.logger.error(f"调用 MainOrchestrator for translation 失败: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"无法开始翻译: {e}")
 
 # 静态文件挂载
@@ -367,17 +364,11 @@ def setup_server():
 
     # 检查预处理和翻译应用是否已部署
     try:
-        serve.get_app_handle("PreEngine")
-        logger.info("成功连接到已部署的 PreEngine 应用")
+        serve.get_app_handle("MainOrchestratorApp")
+        logger.info("成功连接到已部署的 MainOrchestratorApp 应用")
     except Exception as e:
-        logger.error(f"连接 PreEngine 应用失败，请确保 pre_engine.py 已经成功启动: {e}")
-        raise RuntimeError(f"无法连接到核心 PreEngine 应用: {e}")
-    try:
-        serve.get_app_handle("TransEngine")
-        logger.info("成功连接到已部署的 TransEngine 应用")
-    except Exception as e:
-        logger.error(f"连接 TransEngine 应用失败，请确保 trans_engine.py 已经成功启动: {e}")
-        raise RuntimeError(f"无法连接到核心 TransEngine 应用: {e}")
+        logger.error(f"连接 MainOrchestratorApp 应用失败，请确保 orchestrator.py 已经成功启动并由 launcher.py 部署: {e}")
+        raise RuntimeError(f"无法连接到核心 MainOrchestratorApp 应用: {e}")
 
     # 直接部署 API 服务
     video_api = VideoTransAPI.bind()
