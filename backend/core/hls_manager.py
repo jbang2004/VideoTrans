@@ -7,7 +7,6 @@ import time
 import asyncio
 from pathlib import Path
 from typing import Union, Optional, Dict
-import ray
 from ray import serve
 
 from utils.ffmpeg_utils import hls_segment
@@ -287,45 +286,4 @@ class HLSManager:
                 del self.locks[task_id]
         
         self.logger.info(f"已清理 {cleaned_count} 个过期任务的HLS资源")
-        return {"status": "success", "cleaned_count": cleaned_count}
-
-# 为了保持兼容性，保留旧的Actor类的引用
-@ray.remote(num_cpus=0.2)
-class HLSManagerActor:
-    """
-    旧版HLS管理器Actor - 仅用于向后兼容
-    建议使用新的HLSManager Serve部署
-    """
-    def __init__(self, config, task_id: str, task_paths: TaskPaths):
-        self.logger = logging.getLogger(__name__)
-        self.logger.warning("正在使用已弃用的HLSManagerActor，建议更新代码使用新的HLSManager部署")
-        
-        # 获取HLSManager的部署引用
-        self.hls_manager = serve.get_deployment_handle("hls_manager")
-        self.task_id = task_id
-        self.task_paths = task_paths
-        
-        # 异步初始化HLS管理器
-        # 注意这里在__init__中使用异步是不规范的，但为了保持兼容性
-        import asyncio
-        loop = asyncio.get_event_loop()
-        loop.create_task(self._init_manager())
-    
-    async def _init_manager(self):
-        """初始化HLS管理器"""
-        await self.hls_manager.create_manager.remote(self.task_id, self.task_paths)
-    
-    async def add_segment(self, video_path, part_index):
-        """添加分段到HLS流"""
-        result = await self.hls_manager.add_segment.remote(self.task_id, video_path, part_index)
-        return result.get("status") == "success"
-    
-    async def finalize_playlist(self):
-        """完成播放列表"""
-        result = await self.hls_manager.finalize_playlist.remote(self.task_id)
-        return result.get("status") == "success"
-    
-    async def get_has_segments(self):
-        """获取has_segments值"""
-        result = await self.hls_manager.get_has_segments.remote(self.task_id)
-        return result.get("has_segments", False) 
+        return {"status": "success", "cleaned_count": cleaned_count} 

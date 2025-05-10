@@ -180,3 +180,24 @@ class SupabaseClient:
         except Exception as e:
             logger.error(f"获取句子失败 (任务 {task_id}): {e}", exc_info=True)
             return [] 
+
+    async def update_sentence_translation(self, task_id: str, sentence_index: int, trans_text: str):
+        """更新单个句子的翻译文本"""
+        try:
+            client = await self._ensure_client()
+            # 确保 trans_text 不是 None，如果是 None，可以考虑存储空字符串或按需处理
+            update_data = {'trans_text': trans_text if trans_text is not None else ""}
+            response = await client.table('sentences').update(update_data).eq('task_id', task_id).eq('sentence_index', sentence_index).execute()
+            
+            # 更详细的日志和错误检查
+            if response.data and len(response.data) > 0:
+                # logger.debug(f"更新句子翻译 {task_id}-{sentence_index} 成功.")
+                pass
+            elif response.status_code not in [200, 201, 204]: # 201 for insert, 204 for no content success
+                logger.error(f"更新句子翻译 {task_id}-{sentence_index} 可能失败。状态码: {response.status_code}, 响应: {response.error}")
+            # else: logger.debug(f"更新句子翻译 {task_id}-{sentence_index} 未找到匹配项或无内容更新.")
+
+            return response
+        except Exception as e:
+            logger.error(f"更新句子翻译 {task_id}-{sentence_index} 异常: {e}", exc_info=True)
+            return None 

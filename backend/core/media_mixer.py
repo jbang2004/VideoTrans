@@ -13,6 +13,7 @@ from utils.video_utils import add_video_segment
 from config import Config
 from core.sentence_tools import Sentence
 from utils.task_storage import TaskPaths
+from core.supabase_client import SupabaseClient
 
 # 使用全局日志配置，直接获取 logger
 logger = logging.getLogger(__name__)
@@ -31,18 +32,16 @@ class MediaMixer:
         self.sample_rate = self.config.TARGET_SR
         self.max_val = 0.8  # 音频最大值
         self.logger = logging.getLogger(__name__)
+        self.supabase_client = SupabaseClient(config=self.config)
         self.logger.info(f"MediaMixerActor初始化完成，采样率={self.sample_rate}")
         self.full_audio_buffer = np.array([], dtype=np.float32)  # 保留音频缓冲区，用于平滑过渡
     
     async def mix_media(
         self,
         sentences_batch: List[Sentence],
-        media_files: dict,
         task_paths: TaskPaths,
-        generate_subtitle: bool,
         batch_counter: int,
-        task_id: str,
-        target_language: str
+        task_id: str
     ) -> Optional[str]:
         """处理一批句子并返回处理后的视频片段路径"""
         
@@ -50,8 +49,35 @@ class MediaMixer:
             if not sentences_batch:
                 logger.warning(f"[{task_id}] mix_media: 收到空的句子列表")
                 return None
+
+            # 获取 media_files 和 target_language
+            media_files = {}
+            target_language = None # 初始化
+            generate_subtitle = False # 初始化
+            if self.supabase_client:
+                task_data = await self.supabase_client.get_task(task_id)
+                if task_data:
+                    media_files['silent_video_path'] = task_data.get('silent_video_path')
+                    media_files['vocals_audio_path'] = task_data.get('vocals_audio_path')
+                    media_files['background_audio_path'] = task_data.get('background_audio_path')
+                    target_language = task_data.get('target_language') # <<< 获取 target_language
+                    generate_subtitle = task_data.get('generate_subtitle', False) # <<< 获取 generate_subtitle
+                else:
+                    self.logger.error(f"[{task_id}] MediaMixer: 无法从数据库获取任务信息")
+                    return None
+            else:
+                self.logger.error(f"[{task_id}] MediaMixer: Supabase客户端未初始化")
+                return None
+
+            if not media_files.get('silent_video_path') or not media_files.get('vocals_audio_path'):
+                self.logger.error(f"[{task_id}] MediaMixer: 数据库中缺少 silent_video_path 或 vocals_audio_path")
+                return None
             
-            logger.info(f"[{task_id}] 开始处理批次 {batch_counter}, 句子数 {len(sentences_batch)}")
+            if not target_language:
+                self.logger.error(f"[{task_id}] MediaMixer: 数据库中缺少 target_language")
+                return None
+            
+            logger.info(f"[{task_id}] 开始处理批次 {batch_counter}, 句子数 {len(sentences_batch)}, 目标语言: {target_language}")
             
             output_path = task_paths.segments_dir / f"segment_{batch_counter}.mp4"
             output_path.parent.mkdir(parents=True, exist_ok=True)

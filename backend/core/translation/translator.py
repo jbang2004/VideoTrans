@@ -16,6 +16,7 @@ from .gemini_client import GeminiClient
 from .grok_client import GrokClient as XaiGrokClient
 from .groq_client import GroqClient as GroqSDKClient
 from config import Config
+from core.supabase_client import SupabaseClient
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -40,6 +41,7 @@ class Translator:
     def __init__(self):
         self.logger = logging.getLogger(__name__)
         self.config = Config()
+        self.supabase_client = SupabaseClient(config=self.config)
         translation_model = (self.config.TRANSLATION_MODEL or "deepseek").strip().lower()
         
         if translation_model == "deepseek":
@@ -134,13 +136,36 @@ class Translator:
 
     async def translate_sentences(
         self,
-        sentences: List,
-        batch_size: int = 50,
-        target_language: str = "zh"
+        task_id: str,
+        batch_size: int = 50
     ) -> AsyncGenerator[List, None]:
         """翻译句子，返回异步生成器"""
+        sentences = await self.supabase_client.get_sentences(task_id, as_objects=True)
         if not sentences:
-            self.logger.warning("收到空的句子列表")
+            self.logger.warning(f"[{task_id}] 翻译：数据库中没有检索到句子")
+            return
+        self.logger.info(f"[{task_id}] 翻译：获取到 {len(sentences)} 个句子")
+
+        # 获取 target_language 和更新任务状态
+        try:
+            task_data = await self.supabase_client.get_task(task_id)
+            if not task_data:
+                self.logger.error(f"[{task_id}] 翻译：无法从数据库获取任务信息以确定 target_language")
+                return
+            
+            target_language = task_data.get('target_language')
+            if not target_language:
+                self.logger.error(f"[{task_id}] 翻译：数据库中未设置 target_language")
+                # 可选: 更新任务状态为错误
+                # await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': 'Missing target_language for translation'})
+                return
+            
+            # 更新状态为翻译中
+            await self.supabase_client.update_task(task_id, {'status': 'translating'})
+            self.logger.info(f"[{task_id}] 翻译：任务状态更新为 translating，目标语言: {target_language}")
+
+        except Exception as e:
+            self.logger.error(f"[{task_id}] 翻译：获取 target_language 或更新状态时出错: {e}", exc_info=True)
             return
 
         # 确保 batch_size 是整数
@@ -162,23 +187,33 @@ class Translator:
                 translated = await self.translate(texts, target_language)
                 
                 if "output" not in translated:
-                    self.logger.error("翻译结果中缺少 output 字段")
+                    self.logger.error(f"[{task_id}] 翻译结果中缺少 output 字段")
                     return None
                     
                 translated_texts = translated["output"]
                 if len(translated_texts) == len(texts):
                     for j, sentence in enumerate(batch):
                         sentence.trans_text = translated_texts[str(j)]
+                        await self.supabase_client.update_sentence_translation(
+                            task_id,
+                            sentence.sentence_id,
+                            sentence.trans_text
+                        )
                     return batch
+                self.logger.error(f"[{task_id}] 翻译返回数量与输入不匹配。输入: {len(texts)}, 输出: {len(translated_texts)}")
                 return None
             except Exception as e:
-                self.logger.error(f"处理翻译批次失败: {e}")
+                self.logger.error(f"[{task_id}] 处理翻译批次失败: {e}")
                 raise
 
         def handle_error(batch: List) -> List:
-            # 错误处理：使用原始文本作为翻译
             for sentence in batch:
                 sentence.trans_text = sentence.raw_text
+                asyncio.create_task(self.supabase_client.update_sentence_translation(
+                    task_id, 
+                    sentence.sentence_id, 
+                    sentence.raw_text
+                ))
             return batch
 
         try:
@@ -191,7 +226,7 @@ class Translator:
             ):
                 yield batch_result
         except Exception as e:
-            self.logger.error(f"翻译句子生成器发生错误: {e}")
+            self.logger.error(f"[{task_id}] 翻译句子生成器发生错误: {e}")
             raise
 
     async def simplify_sentences(

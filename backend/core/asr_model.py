@@ -5,6 +5,8 @@ import asyncio
 from config import Config
 from ray import serve
 import torch
+from core.supabase_client import SupabaseClient
+from typing import List, Optional, Dict, Any
 
 @serve.deployment(
     name="asr_model",
@@ -19,6 +21,7 @@ class ASRModel:
         self.logger = logging.getLogger(__name__)
         self.logger.info("初始化ASR模型Actor")
         self.config = Config()
+        self.supabase_client = SupabaseClient(config=self.config)
         
         # 添加系统路径
         for path in self.config.SYSTEM_PATHS:
@@ -48,7 +51,7 @@ class ASRModel:
             self.logger.error(f"ASR模型加载失败: {str(e)}")
             raise
     
-    async def generate(self, input, task_id=None, task_paths=None, **kwargs):
+    async def generate(self, input, task_id=None, task_paths=None, supabase_client=None, **kwargs):
         """
         执行ASR模型生成方法
         
@@ -56,12 +59,14 @@ class ASRModel:
             input: 输入音频文件路径
             task_id: 任务ID
             task_paths: 任务路径对象
+            supabase_client: Supabase客户端，用于更新数据库
             **kwargs: 其他参数
             
         Returns:
             识别结果，句子列表
         """
         result = None
+        
         try:
             self.logger.info(f"开始ASR识别音频: {input if isinstance(input, str) else '(已加载音频)'}")
             
@@ -73,19 +78,47 @@ class ASRModel:
             }
                 
             # 使用asyncio.to_thread包装同步调用，传递合并后的参数字典
-            # 注意：self.model.generate 预期接收一个字典作为其 kwargs
-            # 如果 generate 需要 **kwargs，这种方式是兼容的
             result = await asyncio.to_thread(self.model.generate, input, **call_kwargs)
-            self.logger.info(f"ASR识别完成，获得 {len(result)} 个句子")
+            
+            # 处理ASR结果
+            if not result or len(result) == 0:
+                self.logger.info(f"[{task_id}] ASR没有检测到语音")
+                if task_id:
+                    await self.supabase_client.update_task(task_id, {
+                        'status': 'preprocessed', 
+                        'error_message': 'ASR did not detect speech'
+                    })
+                return []
+                
+            # 存储句子到数据库
+            if task_id:
+                response = await self.supabase_client.store_sentences(result, task_id)
+                if not response or not response.data:
+                    self.logger.error(f"[{task_id}] 存储句子到Supabase失败")
+                    await self.supabase_client.update_task(task_id, {
+                        'status': 'error', 
+                        'error_message': 'Failed to store ASR sentences'
+                    })
+                    return []
+                    
+                # 更新任务状态为预处理完成
+                await self.supabase_client.update_task(task_id, {'status': 'preprocessed'})
+                self.logger.info(f"[{task_id}] ASR识别完成，获得 {len(result)} 个句子并已保存到数据库")
+            else:
+                self.logger.info(f"ASR识别完成，获得 {len(result)} 个句子")
+                
             return result
         except Exception as e:
             self.logger.error(f"ASR识别失败: {str(e)}")
+            if task_id:
+                await self.supabase_client.update_task(task_id, {
+                    'status': 'error', 
+                    'error_message': f"ASR error: {e}"
+                })
             raise
         finally:
             # 已有的GPU清理 - 保持不变
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 self.logger.debug("ASRModel: Cleared GPU cache.")
-            # Optional: Explicitly delete large local variables if needed, though result is returned.
-            # del result # Not strictly necessary here as it's returned or was None/exception
     

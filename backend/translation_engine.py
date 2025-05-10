@@ -72,14 +72,17 @@ class TranslationPipe:
     async def translate_task(self, task_id: str):
         self.logger.info(f"[{task_id}] Starting translation stage.")
         try:
+            # 创建任务路径对象，避免重复创建
+            task_paths = TaskPaths(self.config, task_id)
+            
             # 初始化HLS管理器
-            init_ok = await self._init_hls(task_id)
+            init_ok = await self._init_hls(task_id, task_paths)
             if not init_ok:
                 return {"status": "error", "message": "HLS initialization failed."}
 
             # 运行翻译 -> 合成 -> HLS
-            merged_segments = await self._run_translation_pipeline(task_id)
-            result = await self._merge_segments(task_id, merged_segments)
+            merged_segments = await self._run_translation_pipeline(task_id, task_paths)
+            result = await self._merge_segments(task_id, merged_segments, task_paths)
             self.logger.info(f"[{task_id}] Translation finished with status: {result.get('status')}")
             return result
         except Exception as e:
@@ -89,12 +92,9 @@ class TranslationPipe:
         finally:
             self._clean_memory()
 
-    async def _init_hls(self, task_id: str) -> bool:
+    async def _init_hls(self, task_id: str, task_paths: TaskPaths) -> bool:
         """初始化HLS管理器"""
         try:
-            # 在内部创建 task_paths
-            task_paths = TaskPaths(self.config, task_id)
-            
             result = await self.hls_manager.create_manager.remote(task_id, task_paths)
             if isinstance(result, dict) and result.get("status") == "error":
                 raise RuntimeError(f"HLS管理器创建失败: {result.get('message')}")
@@ -106,7 +106,7 @@ class TranslationPipe:
                 await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"HLS初始化失败: {e}"})
             return False
 
-    async def _run_translation_pipeline(self, task_id: str) -> List[str]:
+    async def _run_translation_pipeline(self, task_id: str, task_paths: TaskPaths) -> List[str]:
         """运行从翻译到媒体混合的子流水线 (从数据库获取依赖信息)"""
         tts_batches = 0
         added_hls_segments = 0
@@ -126,57 +126,22 @@ class TranslationPipe:
                 self.logger.error(f"[{task_id}] 无法从数据库获取任务信息")
                 return []
 
-            target_language = task_data.get('target_language')
-            generate_subtitle = task_data.get('generate_subtitle', False) # 提供默认值
-            silent_video_path = task_data.get('silent_video_path')
-            vocals_audio_path = task_data.get('vocals_audio_path')
-            background_audio_path = task_data.get('background_audio_path')
-
-            if not all([target_language, silent_video_path, vocals_audio_path]): # 背景音是可选的
-                self.logger.error(f"[{task_id}] 数据库中缺少必要的任务信息 (语言、无声视频路径、人声路径)")
-                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': '数据库信息不完整'})
-                return []
-
-            # 重建 media_files 字典
-            media_files = {
-                'silent_video_path': silent_video_path,
-                'vocals_audio_path': vocals_audio_path,
-                'background_audio_path': background_audio_path # 可能为 None
-            }
-            # 重建 task_paths 对象
-            task_paths = TaskPaths(self.config, task_id)
-
         except Exception as e:
             self.logger.error(f"[{task_id}] 获取或重建任务依赖信息失败: {e}", exc_info=True)
             await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f'获取任务依赖失败: {e}'})
             return []
-        # --- 信息获取结束 ---
-        try:
-            sentences = await self.supabase_client.get_sentences(task_id, as_objects=True)
-            if not sentences:
-                self.logger.warning(f"[{task_id}] 数据库中没有检索到句子")
-                # 如果没有句子，也认为翻译流程"完成"了，只是没有生成片段
-                # 后续的 _merge_segments 会处理空列表
-                return []
-            self.logger.info(f"[{task_id}] 获取到{len(sentences)}个句子，开始翻译流程")
-        except Exception as e:
-            self.logger.error(f"[{task_id}] 获取句子失败: {e}")
-            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"获取句子失败: {e}"})
-            return []
 
         # 3. 主要处理流程 (后续逻辑使用上面获取或重建的变量)
         try:
-            # 更新状态为翻译中
-            await self.supabase_client.update_task(task_id, {'status': 'translating'})
-
             # 翻译流程 (按批次进行)
             async for translated_batch in self.translator.translate_sentences.remote(
-                sentences,
-                batch_size=int(self.config.TRANSLATION_BATCH_SIZE),
-                target_language=target_language # <--- 使用获取到的 target_language
+                task_id=task_id,
+                batch_size=int(self.config.TRANSLATION_BATCH_SIZE)
             ):
                 if not translated_batch:
+                    self.logger.warning(f"[{task_id}] Translator 返回了一个空批次，继续处理下一个")
                     continue
+                self.logger.info(f"[{task_id}] 从 Translator 收到 {len(translated_batch)} 个已翻译/处理的句子") # 添加日志
 
                 # TTS生成语音
                 async for tts_batch in self.my_index_tts.generate_audio_stream.remote(translated_batch):
@@ -206,15 +171,12 @@ class TranslationPipe:
                     if status_update:
                         await self.supabase_client.update_task(task_id, {'status': status_update})
 
-                    # 媒体混合 (使用重建的 media_files 和 task_paths)
+                    # 媒体混合 (使用重建的 media_files 和传入的 task_paths)
                     output_path = await self.media_mixer.mix_media.remote(
                          adjusted_batch,
-                         media_files=media_files, # <--- 使用重建的 media_files
-                         task_paths=task_paths,   # <--- 使用重建的 task_paths
-                         generate_subtitle=generate_subtitle, # <--- 使用获取到的 generate_subtitle
+                         task_paths=task_paths,
                          batch_counter=batch_counter,
-                         task_id=task_id,
-                         target_language=target_language
+                         task_id=task_id
                      )
                     if not output_path:
                         self.logger.warning(f"[{task_id}] 媒体混合失败，跳过此批次")
@@ -261,12 +223,9 @@ class TranslationPipe:
             await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"翻译流程错误: {e}"})
             return []
 
-    async def _merge_segments(self, task_id: str, merged_segments: List[str]) -> Dict:
+    async def _merge_segments(self, task_id: str, merged_segments: List[str], task_paths: TaskPaths) -> Dict:
         """合并处理好的视频片段"""
         self.logger.info(f"[{task_id}] 开始合并 {len(merged_segments)} 个视频片段")
-
-        # 在内部创建 task_paths
-        task_paths = TaskPaths(self.config, task_id)
         
         # 处理无片段情况
         if not merged_segments:

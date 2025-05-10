@@ -54,77 +54,75 @@ class PreprocessingPipe:
         self.config = global_config
 
     async def __call__(self, task_id: str, video_path: str, target_language: str, generate_subtitle: bool):
+        """
+        执行预处理流水线：视频分离 + ASR
+        
+        Args:
+            task_id: 任务ID
+            video_path: 视频路径
+            target_language: 目标语言
+            generate_subtitle: 是否生成字幕
+            
+        Returns:
+            Dict: 处理结果
+        """
         self.logger.info(f"[{task_id}] Starting preprocessing stage with video: {video_path}, lang: {target_language}, subtitles: {generate_subtitle}")
         
-        # Logic from _run_sep_asr inlined here
         seg_start_time = time.time()
-        media_files = None # Initialize media_files to ensure it's defined in all paths
         try:
             task_paths = TaskPaths(self.config, task_id)
+            
+            # 1. 检查任务是否已经预处理完成
             current_task = await self.supabase_client.get_task(task_id)
             if current_task and current_task.get('status') == 'preprocessed':
-                self.logger.info(f"[{task_id}] Task already preprocessed, skipping separation and ASR.")
-                # Ensure media_files is populated with paths from the existing task for consistent return
-                media_files = {
-                    'silent_video_path': current_task.get('silent_video_path'),
-                    'vocals_audio_path': current_task.get('vocals_audio_path'),
-                    'background_audio_path': current_task.get('background_audio_path')
-                }
-                # Directly return preprocessed status if already done
                 self.logger.info(f"[{task_id}] Preprocessing already completed according to DB.")
                 return {"status": "preprocessed", "message": "Preprocessing was already finished"}
 
-            # 1. Video Separation
+            # 2. 获取视频时长
             duration = await get_duration(video_path)
             self.logger.info(f"[{task_id}] Video duration={duration:.2f}s. Starting separation.")
             
+            # 3. 视频分离 - 内部会更新数据库
             separated_media = await self.video_separator.separate_video.remote(
                 video_path,
                 str(task_paths.media_dir),
+                task_id,
             )
+            
+            # 检查分离结果
             if not separated_media or "vocals_audio_path" not in separated_media or not Path(separated_media["vocals_audio_path"]).exists():
                 self.logger.warning(f"[{task_id}] Video separation failed or no vocals detected.")
-                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': 'Video separation failed or no vocals detected'})
                 return {"status": "error", "message": "Video separation failed or no vocals detected"}
             
-            media_files = separated_media # Assign to media_files for subsequent use
-            await self.supabase_client.update_task(task_id, {**media_files, 'status': 'preprocessing'}) # status is already preprocessing, but this updates paths
-            self.logger.info(f"[{task_id}] Video separation completed: {media_files}")
+            self.logger.info(f"[{task_id}] Video separation completed successfully.")
 
-            # 2. ASR
+            # 4. ASR处理 - 内部会更新数据库
             sentences = await self.asr.generate.remote(
-                input=media_files["vocals_audio_path"],
+                input=separated_media["vocals_audio_path"],
                 cache={},
-                language="auto", # target_language could be used here if ASR model supports it
+                language="auto",
                 use_itn=True,
                 batch_size_s=60,
                 merge_vad=False,
                 task_id=task_id,
-                task_paths=task_paths
+                task_paths=task_paths,
             )
+            
+            # 检查ASR结果
             if not sentences:
                 self.logger.info(f"[{task_id}] ASR did not detect any speech.")
-                # Still, the task is considered 'preprocessed' as separation worked, but with no speech.
-                await self.supabase_client.update_task(task_id, {'status': 'preprocessed', 'error_message': 'ASR did not detect speech'})
-                # Return media_files from separation, as that part was successful
-                self.logger.info(f"[{task_id}] Preprocessing completed (no speech detected)." )
-                return {"status": "preprocessed", "message": "Preprocessing finished (no speech detected)", "media_files": media_files}
+                return {"status": "preprocessed", "message": "Preprocessing finished (no speech detected)"}
 
-            # 3. Store sentences and update task status
-            response = await self.supabase_client.store_sentences(sentences, task_id)
-            if not response or not response.data:
-                # This is a critical error if storing sentences fails
-                self.logger.error(f"[{task_id}] Failed to store sentences to Supabase.")
-                await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': 'Failed to store ASR sentences'})
-                return {"status": "error", "message": "Failed to store ASR sentences"}
-            
-            await self.supabase_client.update_task(task_id, {'status': 'preprocessed'})
             self.logger.info(f"[{task_id}] Preprocessing completed successfully with {len(sentences)} sentences.")
-            return {"status": "preprocessed", "message": "Preprocessing finished successfully", "media_files": media_files}
+            return {"status": "preprocessed", "message": "Preprocessing finished successfully"}
 
         except Exception as e:
             self.logger.exception(f"[{task_id}] Error during preprocessing (separation/ASR): {e}")
-            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"Preprocessing (sep/ASR) error: {e}"})
+            # 只在预处理流程层面出错时更新错误状态
+            await self.supabase_client.update_task(task_id, {
+                'status': 'error', 
+                'error_message': f"Preprocessing (sep/ASR) error: {e}"
+            })
             return {"status": "error", "message": f"Error during preprocessing: {e}"}
         finally:
             self._clean_memory()

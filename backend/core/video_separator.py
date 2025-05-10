@@ -13,6 +13,7 @@ import soundfile as sf
 
 from utils.ffmpeg_utils import extract_audio, extract_video
 from models.ClearerVoice_Minimal.audio_enhancer import AudioEnhancer
+from core.supabase_client import SupabaseClient
 
 @serve.deployment(
     name="video_separator",
@@ -28,11 +29,13 @@ class VideoSeparator:
         # 初始化音频增强器，并立即加载模型
         self.audio_enhancer = AudioEnhancer(model_name=model_name)
         self.config = Config()
+        self.supabase_client = SupabaseClient(config=self.config)
     
     async def separate_video(
         self,
         video_path: str,
-        output_dir: str
+        output_dir: str,
+        task_id: Optional[str] = None
     ) -> Dict[str, Union[str, float]]:
         """
         提取视频片段，分离人声和背景音乐
@@ -40,6 +43,7 @@ class VideoSeparator:
         Args:
             video_path: 视频文件路径
             output_dir: 输出目录
+            task_id: 任务ID，用于更新数据库状态
             
         Returns:
             Dict[str, Union[str, float]]: 包含分离后文件路径的字典
@@ -95,6 +99,12 @@ class VideoSeparator:
             
             if not success:
                 self.logger.error("音频增强失败")
+                # 更新任务状态
+                if task_id:
+                    await self.supabase_client.update_task(task_id, {
+                        'status': 'error', 
+                        'error_message': 'Video separation failed or no vocals detected'
+                    })
                 return {}
 
             # (2.1) 处理背景音频：直接使用 _normalize_and_resample 方法处理文件
@@ -138,11 +148,22 @@ class VideoSeparator:
                 'background_audio_path': background_audio
             }
 
+            # 更新媒体文件路径到数据库
+            if task_id:
+                await self.supabase_client.update_task(task_id, media_files)
+                self.logger.info(f"[{task_id}] 已更新媒体文件路径到数据库")
+            
             self.logger.debug(f"separate_video 完成，耗时 {time.time() - start_time:.2f}s")
             return media_files
             
         except Exception as e:
             self.logger.error(f"separate_video 执行出错，耗时 {time.time() - start_time:.2f}s, 错误: {e}")
+            # 更新错误状态到数据库
+            if task_id:
+                await self.supabase_client.update_task(task_id, {
+                    'status': 'error', 
+                    'error_message': f"Video separation error: {e}"
+                })
             raise
         finally:
             # 清理 GPU 缓存
