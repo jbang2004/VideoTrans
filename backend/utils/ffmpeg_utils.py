@@ -176,10 +176,7 @@ async def cut_video_with_subtitles_and_audio(
             "-i", input_video_path,
             "-i", input_audio_path,
             "-filter_complex",
-            f"[0:v]scale=1920:-2:flags=lanczos,subtitles='{escaped_path}'[v]",  # 修改点说明：
-            # 1. scale=1920:-2 保持宽高比，-2 保证高度为偶数（兼容编码要求）
-            # 2. flags=lanczos 使用高质量的缩放算法
-            # 3. 滤镜顺序：先缩放视频，再加字幕（确保字幕在缩放后的画面上）
+            f"[0:v]subtitles='{escaped_path}'[v]",
             "-map", "[v]",
             "-map", "1:a",
             "-c:v", "libx264",
@@ -220,6 +217,27 @@ async def get_duration(input_path: str) -> float:
         return float(stdout.decode().strip())
     except (ValueError, RuntimeError) as e:
         logger.error(f"[FFmpegUtils] 获取时长失败: {str(e)}, 输入: {input_path}")
+        raise
+
+async def get_video_resolution(input_path: str) -> Tuple[int, int]:
+    """
+    获取视频的分辨率 (width, height)。
+    """
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=s=x:p=0",
+        input_path
+    ]
+    try:
+        stdout, _ = await run_command(cmd)
+        resolution_str = stdout.decode().strip()
+        width_str, height_str = resolution_str.split('x')
+        return int(width_str), int(height_str)
+    except Exception as e:
+        logger.error(f"[FFmpegUtils] 获取视频分辨率失败: {str(e)}, 输入: {input_path}")
         raise
 
 async def concat_videos(input_list: str, output_path: str) -> Union[Path, None]:

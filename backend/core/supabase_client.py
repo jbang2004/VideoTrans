@@ -112,6 +112,7 @@ class SupabaseClient:
                     'end_ms': end_ms,
                     'speaker_id': speaker_id,
                     'target_duration_ms': target_duration_ms,
+                    'speech_duration_ms': getattr(s, 'speech_duration', 0.0),
                     'audio_prompt_path': getattr(s, 'audio', None),
                     'is_first': getattr(s, 'is_first', False),
                     'is_last': getattr(s, 'is_last', False),
@@ -171,6 +172,8 @@ class SupabaseClient:
                     is_last=data.get('is_last', False),
                     ending_silence=data.get('ending_silence_ms', 0.0)
                 )
+                # 从数据库记录中读取 speech_duration_ms 并赋值
+                sentence.speech_duration = data.get('speech_duration_ms', 0.0)
                 
                 sentences.append(sentence)
                 

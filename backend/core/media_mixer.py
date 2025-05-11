@@ -70,6 +70,14 @@ class MediaMixer:
                     media_files['background_audio_path'] = task_data.get('background_audio_path')
                     target_language = task_data.get('target_language') # <<< 获取 target_language
                     generate_subtitle = task_data.get('generate_subtitle', False) # <<< 获取 generate_subtitle
+                    # 获取视频尺寸
+                    video_width = task_data.get('video_width', -1) # Default to -1 if not found
+                    video_height = task_data.get('video_height', -1) # Default to -1 if not found
+                    media_files['video_width'] = video_width
+                    media_files['video_height'] = video_height
+                    
+                    if video_width == -1 or video_height == -1:
+                        self.logger.warning(f"[{task_id}] MediaMixer: video_width or video_height not found or invalid in task_data. Subtitle scaling might be affected.")
                 else:
                     self.logger.error(f"[{task_id}] MediaMixer: 无法从数据库获取任务信息")
                     return None
@@ -186,6 +194,13 @@ async def create_mixed_segment(
             logger.warning(f"[{task_id}] create_mixed_segment: 本片段无video_path可用")
             return False, full_audio_buffer
             
+        # Extract video_width and video_height from media_files
+        video_width = media_files.get('video_width', -1)
+        video_height = media_files.get('video_height', -1)
+        if video_width == -1 or video_height == -1:
+            logger.warning(f"[{task_id}] create_mixed_segment: video_width or video_height not found or invalid in media_files. Defaulting or skipping scaling.")
+            # Potentially set to a default or handle error, for now, it will pass -1
+
         updated_audio_buffer = np.concatenate((full_audio_buffer, full_audio))
 
         await add_video_segment(
@@ -197,7 +212,9 @@ async def create_mixed_segment(
             sentences=sentences,
             generate_subtitle=generate_subtitle,
             target_language=target_language,
-            sample_rate=sample_rate
+            sample_rate=sample_rate,
+            video_width=video_width,      # Pass video_width
+            video_height=video_height    # Pass video_height
         )
         
         if len(updated_audio_buffer) > sample_rate * 5:

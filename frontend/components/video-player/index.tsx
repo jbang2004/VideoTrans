@@ -169,7 +169,7 @@ export default function VideoPlayer({ initialFile }: VideoPlayerProps) {
         {/* Video元素 */}
         <video
           ref={videoRef}
-          className="absolute inset-0 w-full h-full object-cover"
+          className="absolute inset-0 w-full h-full object-contain"
           playsInline
         />
 

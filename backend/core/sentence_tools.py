@@ -318,65 +318,6 @@ def extract_audio(sentences: List[Sentence], speech: torch.Tensor, sr: int, conf
 
     return sentences
 
-def export_sentences_to_txt(sentences: List[Sentence], output_path: Union[str, Path]):
-    """
-    将句子列表导出为易于阅读的文本文件。
-
-    Args:
-        sentences: Sentence对象的列表。
-        output_path: 输出文本文件的路径。
-    """
-    try:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True) # 确保目录存在
-
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write("--- Sentence Export ---\n\n")
-            for i, s in enumerate(sentences):
-                # 为每个句子生成唯一的ID，如果sentence_id未设置
-                display_id = s.sentence_id if s.sentence_id != -1 else f"auto_{i+1}"
-                f.write(f"--- Sentence {display_id} (Task: {s.task_id}) ---\n")
-                f.write(f"  Original Time : {s.start/1000:.3f}s - {s.end/1000:.3f}s\n")
-                f.write(f"  Adjusted Time : {s.adjusted_start/1000:.3f}s - {(s.adjusted_start + s.adjusted_duration)/1000:.3f}s (Duration: {s.adjusted_duration/1000:.3f}s)\n")
-                f.write(f"  TTS Duration  : {s.duration/1000:.3f}s (Speed: {s.speed:.2f}x)\n")
-                f.write(f"  Speaker ID    : {s.speaker_id}\n")
-                f.write(f"  Raw Text      : {s.raw_text}\n")
-                f.write(f"  Translated    : {s.trans_text}\n")
-                f.write(f"  Audio Path    : {s.audio}\n")
-                f.write("\n") # 每个句子后加空行
-            f.write("--- End of Export ---\n")
-        print(f"句子已成功导出到: {output_path}")
-    except Exception as e:
-        print(f"导出句子到文本文件失败: {e}")
-
-def export_sentences_to_json(sentences: List[Sentence], output_path: Union[str, Path]):
-    """
-    将句子列表导出为JSON文件。
-
-    Args:
-        sentences: Sentence对象的列表。
-        output_path: 输出JSON文件的路径。
-    """
-    try:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True) # 确保目录存在
-
-        # 将Sentence对象列表转换为字典列表，忽略ndarray
-        sentences_dict_list = []
-        for s in sentences:
-            s_dict = asdict(s)
-            # 移除不可序列化的 generated_audio (ndarray)
-            if 'generated_audio' in s_dict:
-                del s_dict['generated_audio']
-            sentences_dict_list.append(s_dict)
-
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(sentences_dict_list, f, ensure_ascii=False, indent=4)
-
-        print(f"句子已成功导出为JSON到: {output_path}")
-    except Exception as e:
-        print(f"导出句子到JSON文件失败: {e}")
-
 def get_sentences(tokens: List[Token],
                   timestamps: List[Timestamp],
                   speech: torch.Tensor,
@@ -412,18 +353,5 @@ def get_sentences(tokens: List[Token],
     merged_sentences = merge_sentences(raw_sentences, tokenizer, input_duration, config)
     sentences_with_audio = extract_audio(merged_sentences, speech, sample_rate, config, 
                                          task_id, task_paths)
-
-    # 在函数末尾，如果提供了任务信息，则导出句子到TXT文件
-    if sentences_with_audio and task_id and task_paths and hasattr(task_paths, 'processing_dir'):
-        try:
-            # 定义导出文件名
-            export_filename = f"sentences_{task_id}.txt"
-            export_path = Path(task_paths.processing_dir) / export_filename
-
-            # 调用导出函数 (直接调用，因为get_sentences在asyncio.to_thread中运行)
-            export_sentences_to_txt(sentences_with_audio, export_path)
-
-        except Exception as export_e:
-            print(f"在get_sentences中导出句子时出错: {export_e}")
 
     return sentences_with_audio

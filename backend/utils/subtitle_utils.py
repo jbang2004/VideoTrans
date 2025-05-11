@@ -8,7 +8,9 @@ def generate_subtitles_for_segment(
     sentences: List[Any],
     start_time_ms: float,
     output_sub_path: str,
-    target_language: str = "en"
+    target_language: str = "en",
+    video_width: int = -1,      # New parameter with default
+    video_height: int = -1     # New parameter with default
 ):
     """
     使用 pysubs2 生成 ASS 字幕文件.
@@ -22,8 +24,34 @@ def generate_subtitles_for_segment(
         start_time_ms: 当前片段的起始时间（毫秒）
         output_sub_path: 存放字幕的 .ass 路径
         target_language: 用来确定拆分逻辑(中文/英文/日文/韩文)
+        video_width: 视频宽度
+        video_height: 视频高度
     """
     subs = pysubs2.SSAFile()
+
+    # --- Define Design Resolution (hardcoded style values are based on this) ---
+    DESIGN_VIDEO_WIDTH = 1280
+    DESIGN_VIDEO_HEIGHT = 720
+
+    # --- Set PlayResX and PlayResY to actual video dimensions ---
+    if video_width > 0 and video_height > 0:
+        subs.info['PlayResX'] = str(video_width)
+        subs.info['PlayResY'] = str(video_height)
+        subs.info['ScaledBorderAndShadow'] = 'yes' # Recommended for consistent scaling
+        logger.info(f"ASS PlayResX set to {video_width}, PlayResY set to {video_height}")
+        
+        # Calculate scaling factors
+        width_scale_factor = video_width / DESIGN_VIDEO_WIDTH
+        height_scale_factor = video_height / DESIGN_VIDEO_HEIGHT
+    else:
+        # Fallback if video dimensions are not provided or invalid
+        # Use design resolution as PlayRes, no scaling needed for style values
+        subs.info['PlayResX'] = str(DESIGN_VIDEO_WIDTH)
+        subs.info['PlayResY'] = str(DESIGN_VIDEO_HEIGHT)
+        subs.info['ScaledBorderAndShadow'] = 'yes'
+        logger.warning("Video dimensions not provided or invalid. Using design resolution for ASS PlayRes. Subtitles might not scale correctly.")
+        width_scale_factor = 1.0
+        height_scale_factor = 1.0
 
     for s in sentences:
         sub_text = (s.trans_text or s.raw_text or "").strip()
@@ -130,29 +158,36 @@ def generate_subtitles_for_segment(
                 subs.events.pop()
 
 
-    # 设置"类YouTube"的默认样式
-    # 若 "Default" 不存在则创建
+    # --- 设置"类YouTube"的默认样式 (original values are for DESIGN_VIDEO_WIDTH x DESIGN_VIDEO_HEIGHT) ---
     style = subs.styles.get("Default", pysubs2.SSAStyle())
 
-    style.fontname = "Arial"             # 常见无衬线
-    style.fontsize = 22
+    # Original style values (designed for DESIGN_VIDEO_WIDTH x DESIGN_VIDEO_HEIGHT)
+    original_fontsize = 60
+    original_marginv = 30
+    original_marginl = 30
+    original_marginr = 30
+    original_spacing = 0.5
+    # Assuming borderstyle = 3 (opaque box), outline and shadow are less critical for direct scaling here
+    # If borderstyle = 1 (outline), then outline thickness would need scaling:
+    # original_outline_thickness = 2 # example
+    # style.outline = max(1, round(original_outline_thickness * height_scale_factor)) 
+
+    style.fontname = "Arial"             
+    style.fontsize = max(1, round(original_fontsize * width_scale_factor))
     style.bold = True
     style.italic = False
     style.underline = False
 
-    # 颜色 (R, G, B, A=0 => 不透明)
-    # 文字: 白色,  描边/背景: 黑色
     style.primarycolor = pysubs2.Color(255, 255, 255, 0)
-    style.outlinecolor = pysubs2.Color(0, 0, 0, 100)  # 半透明黑
-    style.borderstyle = 3  # 3 => 有背景块
-    # style.outline = 4      # 背景矩形厚度
-    style.shadow = 0
+    style.outlinecolor = pysubs2.Color(0, 0, 0, 100)
+    style.borderstyle = 3  
+    style.shadow = 0 # If shadow had a distance, it would be scaled by height_scale_factor
     style.alignment = pysubs2.Alignment.BOTTOM_CENTER
-    style.marginv = 20    # 离底部像素
-    # style.marginl = 30      # 左边距，根据需要调整
-    # style.marginr = 30      # 右边距，根据需要调整
+    style.marginv = max(0, round(original_marginv * height_scale_factor))
+    style.marginl = max(0, round(original_marginl * width_scale_factor))
+    style.marginr = max(0, round(original_marginr * width_scale_factor))
+    style.spacing = original_spacing * width_scale_factor # Spacing can be float
 
-    # 更新回 default
     subs.styles["Default"] = style
 
     # 写入文件
@@ -237,8 +272,8 @@ def split_long_text_to_sub_blocks(
 def chunk_text_by_language(text: str, lang: str, max_chars: int) -> List[str]:
     """
     根据语言做拆分:
-     - 英文: 按单词拆, 避免截断单词
-     - 中/日/韩: 按字符拆, 尝试在标点附近断行
+     - 英文: 优先按标点拆分，其次按空格，避免截断单词
+     - 中/日/韩: 优先按标点拆分，其次按字符二分法拆分
      
     Args:
         text: 要拆分的文本
@@ -248,77 +283,140 @@ def chunk_text_by_language(text: str, lang: str, max_chars: int) -> List[str]:
     Returns:
         拆分后的文本块列表
     """
-    cjk_puncts = set("，,。.!！？?；;：:、…~— ")
-    eng_puncts = set(".,!?;: ")
+    # 关键标点符号：逗号、句号、分号、问号、感叹号
+    priority_puncts = set(",.!?;，。！？；")
+    
+    # 所有可用标点符号
+    cjk_puncts = set("，,。.!！？?；;：:、…~—")
+    eng_puncts = set(".,!?;:")
 
     if lang == "en":
-        return chunk_english_text(text, max_chars, eng_puncts)
+        return chunk_english_text(text, max_chars, priority_puncts, eng_puncts)
     else:
-        return chunk_cjk_text(text, max_chars, cjk_puncts)
+        return chunk_cjk_text(text, max_chars, priority_puncts, cjk_puncts)
 
-def chunk_english_text(text: str, max_chars: int, puncts: set) -> List[str]:
+def chunk_english_text(text: str, max_chars: int, priority_puncts: set, all_puncts: set) -> List[str]:
     """
-    英文文本拆分，按单词边界拆分
+    英文文本拆分，优先按标点符号拆分，其次按单词边界拆分
     
     Args:
         text: 英文文本
         max_chars: 每行最大字符数
-        puncts: 标点符号集合
+        priority_puncts: 优先考虑的标点符号集合
+        all_puncts: 所有标点符号集合
         
     Returns:
         拆分后的文本块列表
     """
-    words = text.split()
+    if len(text) <= max_chars:
+        return [text]
+    
     chunks = []
-    current_line = []
-
-    for w in words:
-        # 计算本行加上下一个单词后长多少
-        line_len = sum(len(x) for x in current_line) + len(current_line)  # 单词总长 + 空格数
-        if line_len + len(w) > max_chars:
-            if current_line:
-                chunks.append(" ".join(current_line))
-                current_line = []
-        current_line.append(w)
-
-    # 收尾
-    if current_line:
-        chunks.append(" ".join(current_line))
-
+    remaining_text = text
+    
+    while len(remaining_text) > 0:
+        if len(remaining_text) <= max_chars:
+            chunks.append(remaining_text)
+            break
+            
+        # 在max_chars范围内寻找优先标点
+        cut_pos = -1
+        for i in range(max_chars, 0, -1):
+            if i >= len(remaining_text):
+                continue
+            if remaining_text[i] in priority_puncts:
+                cut_pos = i + 1  # 包含标点符号
+                break
+        
+        # 如果没找到优先标点，尝试找其他标点
+        if cut_pos == -1:
+            for i in range(max_chars, 0, -1):
+                if i >= len(remaining_text):
+                    continue
+                if remaining_text[i] in all_puncts:
+                    cut_pos = i + 1  # 包含标点符号
+                    break
+        
+        # 如果没找到标点，尝试在空格处分割
+        if cut_pos == -1:
+            for i in range(max_chars, 0, -1):
+                if i >= len(remaining_text):
+                    continue
+                if remaining_text[i] == ' ':
+                    cut_pos = i + 1  # 包含空格
+                    break
+        
+        # 如果依然没找到合适的分割点，但当前位置是单词中间
+        # 向后找到第一个空格，即使超过max_chars
+        if cut_pos == -1:
+            for i in range(max_chars, min(len(remaining_text), max_chars * 2)):
+                if i >= len(remaining_text):
+                    break
+                if remaining_text[i] == ' ':
+                    cut_pos = i + 1  # 包含空格
+                    break
+        
+        # 如果还是找不到，就在max_chars处截断
+        if cut_pos == -1 or cut_pos == 0:
+            cut_pos = max_chars
+        
+        chunks.append(remaining_text[:cut_pos].strip())
+        remaining_text = remaining_text[cut_pos:].strip()
+    
     return chunks
 
-def chunk_cjk_text(text: str, max_chars: int, puncts: set) -> List[str]:
+def chunk_cjk_text(text: str, max_chars: int, priority_puncts: set, all_puncts: set) -> List[str]:
     """
-    中日韩文本拆分，尝试在标点处断行
+    中日韩文本拆分，优先按标点处断行，其次进行二分法拆分
     
     Args:
         text: 中日韩文本
         max_chars: 每行最大字符数
-        puncts: 标点符号集合
+        priority_puncts: 优先考虑的标点符号集合
+        all_puncts: 所有标点符号集合
         
     Returns:
         拆分后的文本块列表
     """
+    if len(text) <= max_chars:
+        return [text]
+    
     chunks = []
-    total_length = len(text)
-    start_idx = 0
-
-    while start_idx < total_length:
-        # 基础结束位置
-        end_idx = start_idx + max_chars
+    remaining_text = text
+    
+    while len(remaining_text) > 0:
+        if len(remaining_text) <= max_chars:
+            chunks.append(remaining_text)
+            break
+            
+        # 在max_chars范围内寻找优先标点
+        cut_pos = -1
+        for i in range(max_chars, 0, -1):
+            if i >= len(remaining_text):
+                continue
+            if remaining_text[i] in priority_puncts:
+                cut_pos = i + 1  # 包含标点符号
+                break
         
-        # 如果下一个字符是标点，则包含到当前块
-        if end_idx < total_length and text[end_idx] in puncts:
-            end_idx += 1  # 包含标点符号
-
-        # 确保不越界
-        end_idx = min(end_idx, total_length)
+        # 如果没找到优先标点，尝试找其他标点
+        if cut_pos == -1:
+            for i in range(max_chars, 0, -1):
+                if i >= len(remaining_text):
+                    continue
+                if remaining_text[i] in all_puncts:
+                    cut_pos = i + 1  # 包含标点符号
+                    break
         
-        # 截取当前块
-        chunk = text[start_idx:end_idx]
-        chunks.append(chunk)
+        # 如果没找到合适标点，进行二分法拆分
+        if cut_pos == -1:
+            # 二分法：取段落长度的一半
+            half_length = min(max_chars, len(remaining_text) // 2)
+            if half_length > 0:
+                cut_pos = half_length
+            else:
+                cut_pos = max_chars
         
-        # 移动起始位置
-        start_idx = end_idx
-
+        chunks.append(remaining_text[:cut_pos].strip())
+        remaining_text = remaining_text[cut_pos:].strip()
+    
     return chunks 

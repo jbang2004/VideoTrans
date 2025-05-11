@@ -260,7 +260,7 @@ class Translator:
                 self.logger.debug(f"简化批次: {len(texts)}条文本")
                 batch_result = await self.simplify(texts)
                 
-                if "thinking" not in batch_result or not any(key in batch_result for key in self.SIMPLIFICATION_LEVELS):
+                if not any(key in batch_result for key in self.SIMPLIFICATION_LEVELS):
                     self.logger.error("简化结果格式不正确，缺少必要字段")
                     return None
                     

@@ -25,7 +25,9 @@ async def add_video_segment(
     sentences: List[Any],
     generate_subtitle: bool,
     target_language: str,
-    sample_rate: int
+    sample_rate: int,
+    video_width: int,
+    video_height: int
 ):
     """
     从原视频里截取 [start_time, start_time + duration] 的视频段(无声)，
@@ -42,6 +44,8 @@ async def add_video_segment(
         generate_subtitle: 是否生成字幕
         target_language: 目标语言
         sample_rate: 采样率
+        video_width: 视频宽度
+        video_height: 视频高度
     """
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"add_video_segment: 视频文件不存在: {video_path}")
@@ -76,7 +80,9 @@ async def add_video_segment(
                 sentences,
                 start_time * 1000,   # 开始时间（毫秒）
                 temp_ass.name,
-                target_language
+                target_language,
+                video_width,
+                video_height
             )
 
             # 生成带字幕的视频
