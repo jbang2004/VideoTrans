@@ -12,9 +12,10 @@ def generate_subtitles_for_segment(
 ):
     """
     使用 pysubs2 生成 ASS 字幕文件.
-    1. 遍历每条 Sentence, 将其文本拆分成若干块(避免过长字幕).
+    1. 遍历每条 Sentence, 计算其精确的语音起止时间.
     2. 向 pysubs2 中写入事件, 并设置"类YouTube"的默认样式.
-    3. 最后保存为 .ass 文件.
+    3. 对字幕事件进行后处理, 调整重叠和间距.
+    4. 最后保存为 .ass 文件.
 
     Args:
         sentences: 本段的句子列表
@@ -25,42 +26,130 @@ def generate_subtitles_for_segment(
     subs = pysubs2.SSAFile()
 
     for s in sentences:
-        # 计算相对时间
-        start_local = s.adjusted_start - start_time_ms
-
         sub_text = (s.trans_text or s.raw_text or "").strip()
         if not sub_text:
+            logger.debug(f"Sentence {(getattr(s, 'sentence_id', 'N/A'))} has no text, skipping subtitle.")
             continue
 
-        # 直接使用adjusted_duration作为duration_ms
-        if s.speed <= 0.0001:  # 使用一个很小的阈值而不是直接判断=0
-            # 如果speed接近0，直接使用adjusted_duration
-            duration_ms = s.adjusted_duration
-            logger.warning(f"检测到speed接近0，直接使用adjusted_duration({s.adjusted_duration}ms): {s.trans_text}")
+        # --- Start time calculation (Point 1) ---
+        actual_speech_start_offset_in_s = 0.0
+        # Check if 's.is_first' and 's.start' (leading silence) attributes are available
+        if hasattr(s, 'is_first') and s.is_first:
+            if hasattr(s, 'start') and isinstance(s.start, (int, float)) and s.start > 0:
+                actual_speech_start_offset_in_s = s.start
+                logger.debug(f"First sentence, applying leading silence offset: {s.start}ms")
+        
+        true_speech_start_global_ms = s.adjusted_start + actual_speech_start_offset_in_s
+        start_ms_for_split = true_speech_start_global_ms - start_time_ms
+
+        # --- Duration calculation (Point 2, part 1) ---
+        true_speech_duration_ms = 0.0
+        if hasattr(s, 'duration') and isinstance(s.duration, (int, float)) and s.duration > 0:
+            if hasattr(s, 'speed') and isinstance(s.speed, (int, float)) and s.speed > 0.0001:
+                true_speech_duration_ms = s.duration / s.speed
+            else:
+                true_speech_duration_ms = s.duration 
+                logger.warning(f"Sentence speed is invalid or zero ({getattr(s, 'speed', 'N/A')}). Using TTS duration ({s.duration}ms) as speech duration. Text: {sub_text[:30]}...")
         else:
-            # 正常情况下使用计算公式
-            duration_ms = s.duration / s.speed
-        if duration_ms <= 0:
+            logger.warning(f"Sentence does not have a valid TTS duration ({getattr(s, 'duration', 'N/A')}). Attempting to estimate. Text: {sub_text[:30]}...")
+            if hasattr(s, 'adjusted_duration') and isinstance(s.adjusted_duration, (int, float)):
+                estimated_duration = s.adjusted_duration
+                estimated_duration -= actual_speech_start_offset_in_s # Subtract leading silence already accounted for
+                
+                if hasattr(s, 'ending_silence') and isinstance(s.ending_silence, (int,float)) and s.ending_silence > 0:
+                     estimated_duration -= s.ending_silence
+                
+                true_speech_duration_ms = max(0, estimated_duration)
+                if true_speech_duration_ms == 0 and s.adjusted_duration > 0:
+                     logger.warning(f"Duration estimation resulted in 0ms. Original adjusted_duration was {s.adjusted_duration}ms.")
+            else:
+                true_speech_duration_ms = 0
+
+        if true_speech_duration_ms <= 0:
+            logger.warning(f"Calculated true_speech_duration_ms <= 0 ({true_speech_duration_ms:.2f}ms) for subtitle. Text: '{sub_text[:30]}...'. Skipping.")
             continue
 
-        # 如果 Sentence 本身带 lang, 就优先使用 s.lang, 否则用 target_language
         lang = target_language or "en"
+        if hasattr(s, 'lang') and s.lang: # If Sentence itself has lang, prioritize it
+            lang = s.lang
 
-        # 拆分长句子 -> 多段 sequential
         blocks = split_long_text_to_sub_blocks(
             text=sub_text,
-            start_ms=start_local,
-            duration_ms=duration_ms,
+            start_ms=start_ms_for_split,
+            duration_ms=true_speech_duration_ms,
             lang=lang
         )
 
         for block in blocks:
+            block_start_for_event = max(0, int(block["start"]))
+            block_end_for_event = max(block_start_for_event + 1, int(block["end"]))
+
             evt = pysubs2.SSAEvent(
-                start=int(block["start"]),
-                end=int(block["end"]),
+                start=block_start_for_event,
+                end=block_end_for_event,
                 text=block["text"]
             )
             subs.append(evt)
+
+    # --- Adjustments for overlaps and gaps (Point 2 & 3) ---
+    if subs.events:
+        subs.sort() 
+        
+        min_event_duration_ms = 100 
+        min_gap_between_events_ms = 40 # Based on "一定的间距" and suggest's comment
+
+        adjusted_events = []
+        for i in range(len(subs.events)):
+            current_event = subs.events[i]
+            
+            # Ensure minimum duration for the current event first
+            if current_event.end < current_event.start + min_event_duration_ms:
+                current_event.end = current_event.start + min_event_duration_ms
+
+            if i > 0:
+                prev_event = adjusted_events[-1] # Get the last *adjusted* previous event
+
+                # Ensure gap between prev_event and current_event
+                # current_event should start at least min_gap after prev_event.end
+                if current_event.start < prev_event.end + min_gap_between_events_ms:
+                    # Shift current_event later
+                    current_event.start = prev_event.end + min_gap_between_events_ms
+                    # Recalculate current_event.end to maintain its duration or min_duration
+                    # Original duration for current_event was current_event.end (before shift) - (original current_event.start)
+                    # For simplicity, just ensure min_duration after shifting start
+                    current_event.end = max(current_event.end, current_event.start + min_event_duration_ms)
+
+                # Ensure prev_event does not overlap with (now possibly shifted) current_event
+                # prev_event.end should be at most current_event.start - min_gap
+                if prev_event.end > current_event.start - min_gap_between_events_ms:
+                    prev_event.end = current_event.start - min_gap_between_events_ms
+                    # Ensure prev_event still has min_duration
+                    if prev_event.end < prev_event.start + min_event_duration_ms:
+                        prev_event.end = prev_event.start + min_event_duration_ms
+                        # If this re-causes overlap, it's a very dense situation.
+                        # The primary rule is prev_event.end <= current_event.start - min_gap
+                        if prev_event.end > current_event.start - min_gap_between_events_ms:
+                           prev_event.end = current_event.start - min_gap_between_events_ms
+
+
+            if current_event.end > current_event.start:
+                adjusted_events.append(current_event)
+            else:
+                logger.warning(f"Subtitle event (text: '{current_event.text[:20]}...') "
+                               f"has invalid duration ({current_event.start}ms - {current_event.end}ms) "
+                               f"after adjustments and will be dropped.")
+        
+        subs.events = adjusted_events
+        
+        # Final check on the last event's duration if any events survived
+        if subs.events:
+            last_event = subs.events[-1]
+            if last_event.end < last_event.start + min_event_duration_ms:
+                last_event.end = last_event.start + min_event_duration_ms
+            if last_event.end <= last_event.start: # If still invalid
+                logger.warning(f"Last subtitle event (text: '{last_event.text[:20]}...') became invalid and was removed.")
+                subs.events.pop()
+
 
     # 设置"类YouTube"的默认样式
     # 若 "Default" 不存在则创建
@@ -88,8 +177,11 @@ def generate_subtitles_for_segment(
     subs.styles["Default"] = style
 
     # 写入文件
-    subs.save(output_sub_path, format="ass")
-    logger.debug(f"generate_subtitles_for_segment: 已写入字幕 => {output_sub_path}")
+    try:
+        subs.save(output_sub_path, format="ass", encoding="utf-8")
+        logger.info(f"generate_subtitles_for_segment: Subtitles successfully written to => {output_sub_path}")
+    except Exception as e:
+        logger.error(f"Failed to save subtitle file to {output_sub_path}: {e}", exc_info=True)
 
 def split_long_text_to_sub_blocks(
     text: str,

@@ -4,13 +4,13 @@ import time
 import sys
 import gc
 import torch
-from typing import List, Dict, Optional
+from typing import List, Dict
 from pathlib import Path
 
 from ray import serve
 from ray.serve.handle import DeploymentHandle # Still useful for type hints if needed
 
-from config import Config, init_logging
+from config import Config
 from utils.task_storage import TaskPaths
 # Note: ffmpeg_utils like get_duration and concat_videos are utility functions,
 # they will be called directly by the orchestrator or by the actors that need them.
