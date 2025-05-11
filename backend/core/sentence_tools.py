@@ -24,6 +24,7 @@ class Sentence:
     audio: str = field(default="")  # 音频文件路径
     target_duration: float = field(default=None)
     duration: float = field(default=0.0)
+    speech_duration: float = field(default=0.0)
     diff: float = field(default=0.0)
     silence_duration: float = field(default=0.0)
     speed: float = field(default=1.0)

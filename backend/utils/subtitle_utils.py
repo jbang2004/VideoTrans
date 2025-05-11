@@ -31,52 +31,31 @@ def generate_subtitles_for_segment(
             logger.debug(f"Sentence {(getattr(s, 'sentence_id', 'N/A'))} has no text, skipping subtitle.")
             continue
 
-        # --- Start time calculation (Point 1) ---
-        actual_speech_start_offset_in_s = 0.0
-        # Check if 's.is_first' and 's.start' (leading silence) attributes are available
-        if hasattr(s, 'is_first') and s.is_first:
-            if hasattr(s, 'start') and isinstance(s.start, (int, float)) and s.start > 0:
-                actual_speech_start_offset_in_s = s.start
-                logger.debug(f"First sentence, applying leading silence offset: {s.start}ms")
-        
-        true_speech_start_global_ms = s.adjusted_start + actual_speech_start_offset_in_s
-        start_ms_for_split = true_speech_start_global_ms - start_time_ms
-
-        # --- Duration calculation (Point 2, part 1) ---
-        true_speech_duration_ms = 0.0
-        if hasattr(s, 'duration') and isinstance(s.duration, (int, float)) and s.duration > 0:
-            if hasattr(s, 'speed') and isinstance(s.speed, (int, float)) and s.speed > 0.0001:
-                true_speech_duration_ms = s.duration / s.speed
-            else:
-                true_speech_duration_ms = s.duration 
-                logger.warning(f"Sentence speed is invalid or zero ({getattr(s, 'speed', 'N/A')}). Using TTS duration ({s.duration}ms) as speech duration. Text: {sub_text[:30]}...")
+        # --- 计算字幕开始时间 ---
+        # 处理首句可能有的开头静音
+        if hasattr(s, 'is_first') and s.is_first and hasattr(s, 'start') and isinstance(s.start, (int, float)) and s.start > 0:
+            subtitle_start_ms = s.start
+            logger.debug(f"首句，应用开头静音偏移: {s.start}ms")
         else:
-            logger.warning(f"Sentence does not have a valid TTS duration ({getattr(s, 'duration', 'N/A')}). Attempting to estimate. Text: {sub_text[:30]}...")
-            if hasattr(s, 'adjusted_duration') and isinstance(s.adjusted_duration, (int, float)):
-                estimated_duration = s.adjusted_duration
-                estimated_duration -= actual_speech_start_offset_in_s # Subtract leading silence already accounted for
-                
-                if hasattr(s, 'ending_silence') and isinstance(s.ending_silence, (int,float)) and s.ending_silence > 0:
-                     estimated_duration -= s.ending_silence
-                
-                true_speech_duration_ms = max(0, estimated_duration)
-                if true_speech_duration_ms == 0 and s.adjusted_duration > 0:
-                     logger.warning(f"Duration estimation resulted in 0ms. Original adjusted_duration was {s.adjusted_duration}ms.")
-            else:
-                true_speech_duration_ms = 0
-
-        if true_speech_duration_ms <= 0:
-            logger.warning(f"Calculated true_speech_duration_ms <= 0 ({true_speech_duration_ms:.2f}ms) for subtitle. Text: '{sub_text[:30]}...'. Skipping.")
+            subtitle_start_ms = s.adjusted_start - start_time_ms
+        
+        # --- 计算字幕显示时长 ---
+        # 直接使用speech_duration (已在duration_utils.py中计算好，包含了速度调整)
+        if not hasattr(s, 'speech_duration') or not isinstance(s.speech_duration, (int, float)) or s.speech_duration <= 0:
+            logger.error(f"句子 {getattr(s, 'sentence_id', 'N/A')} 缺少有效的speech_duration值: {getattr(s, 'speech_duration', 'N/A')}")
             continue
-
+            
+        subtitle_duration_ms = s.speech_duration
+        
+        # --- 分割长文本并创建字幕块 ---
         lang = target_language or "en"
-        if hasattr(s, 'lang') and s.lang: # If Sentence itself has lang, prioritize it
+        if hasattr(s, 'lang') and s.lang:  # 如果句子本身有语言标记，优先使用
             lang = s.lang
 
         blocks = split_long_text_to_sub_blocks(
             text=sub_text,
-            start_ms=start_ms_for_split,
-            duration_ms=true_speech_duration_ms,
+            start_ms=subtitle_start_ms,
+            duration_ms=subtitle_duration_ms,
             lang=lang
         )
 

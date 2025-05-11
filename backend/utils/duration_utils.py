@@ -31,9 +31,12 @@ async def apply_speed_and_silence(sentences: List[Sentence], sample_rate: int = 
         try:
             if sentence.generated_audio is None or len(sentence.generated_audio) == 0:
                 logger.warning(f"[{task_id}] 句子 {sentence.sentence_id}: 没有可调整的音频数据")
+                sentence.speech_duration = 0.0
                 continue
             
             original_duration = (len(sentence.generated_audio) / sample_rate) * 1000  # 原始时长（毫秒）
+            # 初始化speech_duration为原始音频长度
+            speech_duration = original_duration
             
             # --- 1. 为第一个句子在音频前添加静音 ---
             if hasattr(sentence, 'is_first') and sentence.is_first and hasattr(sentence, 'start') and sentence.start > 0:
@@ -75,7 +78,11 @@ async def apply_speed_and_silence(sentences: List[Sentence], sample_rate: int = 
                     
                     # 记录操作结果
                     new_duration = (len(sentence.generated_audio) / sample_rate) * 1000
-                    logger.warning(f"[{task_id}] 句子 {sentence.sentence_id}: 音频速度已调整，原始时长: {original_duration:.2f}毫秒，新时长: {new_duration:.2f}毫秒")
+                    
+                    # 计算speech_duration（语速调整后的纯语音长度）
+                    speech_duration = original_duration / sentence.speed
+                    
+                    logger.warning(f"[{task_id}] 句子 {sentence.sentence_id}: 音频速度已调整，原始时长: {original_duration:.2f}毫秒，新时长: {new_duration:.2f}毫秒，纯语音时长: {speech_duration:.2f}毫秒")
                 
                 except Exception as e:
                     logger.error(f"[{task_id}] 句子 {sentence.sentence_id}: 调整速度失败: {e}")
@@ -132,12 +139,13 @@ async def apply_speed_and_silence(sentences: List[Sentence], sample_rate: int = 
                 except Exception as e:
                     logger.error(f"[{task_id}] 句子 {sentence.sentence_id}: 添加视频结尾静音失败: {e}")
             
-            # --- 5. 更新句子的duration属性以反映最终音频长度 ---
+            # --- 5. 更新句子的各种duration属性 ---
             final_duration = (len(sentence.generated_audio) / sample_rate) * 1000
             sentence.duration = final_duration
             sentence.adjusted_duration = final_duration  # 确保 adjusted_duration 也更新
+            sentence.speech_duration = speech_duration  # 设置speech_duration为语速调整后的纯语音时长
             
-            logger.debug(f"[{task_id}] 句子 {sentence.sentence_id}: 音频调整完成，最终时长: {final_duration:.2f}毫秒")
+            logger.debug(f"[{task_id}] 句子 {sentence.sentence_id}: 音频调整完成，最终时长: {final_duration:.2f}毫秒，语音时长: {speech_duration:.2f}毫秒")
         
         except Exception as e:
             logger.error(f"[{task_id}] 处理句子 {sentence.sentence_id} 时出错: {e}")
