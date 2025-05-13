@@ -12,7 +12,7 @@ class GrokClient:
     使用 OpenAI SDK，向 https://api.x.ai/v1 发送 chat completion，
     并将回复解析为 JSON 返回。
     """
-    def __init__(self, api_key: str, model_name: str = "grok-3-mini-latest"):
+    def __init__(self, api_key: str, model_name: str = "grok-3-mini-fast"):
         if not api_key:
             raise ValueError("必须提供 x.ai (Grok) 的 API Key")
         # 构造 OpenAI client，base_url 指向 x.ai

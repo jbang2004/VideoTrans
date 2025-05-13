@@ -185,13 +185,16 @@ class Translator:
                 texts = {str(j): s.raw_text for j, s in enumerate(batch)}
                 self.logger.debug(f"翻译批次: {len(texts)}条文本")
                 translated = await self.translate(texts, target_language)
-                
+
+                # 继续处理翻译结果
                 if "output" not in translated:
-                    self.logger.error(f"[{task_id}] 翻译结果中缺少 output 字段")
-                    return None
+                    self.logger.error(f"[{task_id}] 翻译结果中缺少 output 字段. 原始响应: {translated}")
+                    # 抛出异常以触发 _process_batch 中的重试逻辑
+                    raise ValueError(f"[{task_id}] 翻译结果中缺少 output 字段")
                     
                 translated_texts = translated["output"]
                 if len(translated_texts) == len(texts):
+                    # 继续更新数据库和句子对象
                     for j, sentence in enumerate(batch):
                         sentence.trans_text = translated_texts[str(j)]
                         await self.supabase_client.update_sentence_translation(
@@ -200,8 +203,9 @@ class Translator:
                             sentence.trans_text
                         )
                     return batch
-                self.logger.error(f"[{task_id}] 翻译返回数量与输入不匹配。输入: {len(texts)}, 输出: {len(translated_texts)}")
-                return None
+                self.logger.error(f"[{task_id}] 翻译返回数量与输入不匹配。输入: {len(texts)}, 输出: {len(translated_texts)}. 原始响应: {translated}")
+                # 抛出异常以触发 _process_batch 中的重试逻辑
+                raise ValueError(f"[{task_id}] 翻译返回数量与输入不匹配。输入: {len(texts)}, 输出: {len(translated_texts)}")
             except Exception as e:
                 self.logger.error(f"[{task_id}] 处理翻译批次失败: {e}")
                 raise
