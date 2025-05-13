@@ -295,31 +295,11 @@ class Translator:
                     
                     # 如果有可接受的候选文本（长度小于等于理想长度），选择最接近理想长度的（最长的可接受文本）
                     if acceptable_candidates:
-                        best_candidate = None
-                        min_diff = float('inf')
-                        
-                        for key, text in acceptable_candidates.items():
-                            diff = abs(len(text) - ideal_length)
-                            if diff < min_diff:
-                                min_diff = diff
-                                best_candidate = (key, text)
-                        
-                        chosen_key, chosen_text = best_candidate
-                        
-                    # 如果没有可接受的候选文本，选择最接近理想长度的不可接受文本
+                        # 在可接受的候选中选择最长的那个（因此最接近 ideal_length）
+                        chosen_key, chosen_text = max(acceptable_candidates.items(), key=lambda item: len(item[1]))
                     elif non_acceptable_candidates:
-                        best_candidate = None
-                        min_diff = float('inf')
-                        
-                        for key, text in non_acceptable_candidates.items():
-                            diff = abs(len(text) - ideal_length)
-                            if diff < min_diff:
-                                min_diff = diff
-                                best_candidate = (key, text)
-                        
-                        chosen_key, chosen_text = best_candidate
-                        
-                    # 如果没有可用的候选文本，保持原文
+                        # 在不可接受的候选中选择最短的那个（因此最接近 ideal_length）
+                        chosen_key, chosen_text = min(non_acceptable_candidates.items(), key=lambda item: len(item[1]))
                     else:
                         chosen_key = "原文"
                         chosen_text = old_text
