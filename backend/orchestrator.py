@@ -12,12 +12,6 @@ from ray.serve.handle import DeploymentHandle # Still useful for type hints if n
 
 from config import Config
 from utils.task_storage import TaskPaths
-# Note: ffmpeg_utils like get_duration and concat_videos are utility functions,
-# they will be called directly by the orchestrator or by the actors that need them.
-# SupabaseClient will also be initialized where needed, or passed if an actor strictly requires it.
-
-# Initialize logging (if not already done by launcher, good practice here too)
-# init_logging() # Launcher usually handles this.
 
 logger = logging.getLogger(__name__)
 
@@ -98,45 +92,21 @@ class MainOrchestrator:
             self.logger.info(f"[{task_id}] Orchestrator: Preprocessing operations took: {time.time() - seg_start_time:.2f}s")
 
     async def run_translation_pipeline(self, task_id: str):
-        """
-        Orchestrates the translation and synthesis steps (formerly TransPipe logic).
-        """
-        self.logger.info(f"[{task_id}] Orchestrator: Starting translation stage.")
         try:
             task_paths = TaskPaths(self.config, task_id)
-            
-            # Initialize HLS Manager for the task (formerly in TransPipe._init_hls)
-            init_ok = await self._init_hls_for_task(task_id, task_paths)
-            if not init_ok:
-                return {"status": "error", "message": "Orchestrator: HLS initialization failed."}
+            hls_init_response = await self.hls_manager_handle.create_manager.remote(task_id, task_paths)
+            if not (isinstance(hls_init_response, dict) and hls_init_response.get("status") == "success"):
+                self.logger.error(f"[{task_id}] HLS manager init failed: {hls_init_response}")
+                return {"status": "error", "message": f"HLS init failed: {hls_init_response}"}
 
-            # Run the core translation -> TTS -> mixing pipeline (formerly TransPipe._run_translation_pipeline)
-            merged_segment_output_paths = await self._execute_tts_mixing_pipeline(task_id, task_paths)
-            
-            # Finalize HLS and merge segments (formerly TransPipe._merge_segments)
-            result = await self._finalize_hls_and_merge(task_id, merged_segment_output_paths, task_paths)
-            
-            self.logger.info(f"[{task_id}] Orchestrator: Translation finished with status: {result.get('status')}")
+            segment_paths = await self._execute_tts_mixing_pipeline(task_id, task_paths)
+            result = await self._finalize_hls_and_merge(task_id, segment_paths, task_paths)
             return result
         except Exception as e:
-            self.logger.exception(f"[{task_id}] Orchestrator: Translation stage failed: {e}")
-            return {"status": "error", "message": f"Orchestrator: Translation failed: {e}"}
+            self.logger.exception(f"[{task_id}] Translation pipeline failed: {e}")
+            return {"status": "error", "message": f"Translation failed: {e}"}
         finally:
             self._clean_memory()
-
-    async def _init_hls_for_task(self, task_id: str, task_paths: TaskPaths) -> bool:
-        """Helper to initialize HLS manager for a task."""
-        try:
-            # HLSManager's create_manager handles its own Supabase updates on failure.
-            result = await self.hls_manager_handle.create_manager.remote(task_id, task_paths)
-            if isinstance(result, dict) and result.get("status") == "error":
-                # Error already logged by HLSManager, and DB status potentially updated.
-                raise RuntimeError(f"HLS manager creation failed: {result.get('message')}")
-            self.logger.info(f"[{task_id}] Orchestrator: HLS manager initialized successfully.")
-            return True
-        except Exception as e:
-            self.logger.error(f"[{task_id}] Orchestrator: HLS manager initialization failed: {e}")
-            return False # Supabase status might have been set to error by HLSManager
 
     async def _execute_tts_mixing_pipeline(self, task_id: str, task_paths: TaskPaths) -> List[str]:
         """Helper for the main TTS and mixing flow."""
