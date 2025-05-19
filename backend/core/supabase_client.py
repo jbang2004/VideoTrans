@@ -5,6 +5,7 @@ from supabase.lib.client_options import ClientOptions
 from config import Config
 import logging
 from core.sentence_tools import Sentence
+import httpx
 
 logger = logging.getLogger(__name__)
 def sanitize_for_json(value):
@@ -48,11 +49,22 @@ class SupabaseClient:
         return self.client
 
     async def store_task(self, task_data):
-        """存储任务信息"""
+        """存储任务信息（遇到连接断开时重试）"""
         try:
             client = await self._ensure_client()
             response = await client.table('tasks').insert(task_data).execute()
-            logger.info(f"存储任务 {task_data.get('task_id')} 成功，响应数量: {len(response.data) if response.data else 0}")
+            # 使用数据库返回的 task_id
+            new_id = response.data[0].get('task_id') if response.data else None
+            logger.info(f"存储任务 {new_id} 成功，响应数量: {len(response.data) if response.data else 0}")
+            return response
+        except httpx.ConnectError as ce:
+            logger.warning(f"存储任务 {task_data.get('task_id')} 时连接断开，重试一次: {ce}")
+            self.client = None
+            client = await self._ensure_client()
+            response = await client.table('tasks').insert(task_data).execute()
+            # 使用数据库返回的 task_id
+            retry_id = response.data[0].get('task_id') if response.data else None
+            logger.info(f"重试存储任务 {retry_id} 成功")
             return response
         except Exception as e:
             logger.error(f"存储任务 {task_data.get('task_id')} 失败: {e}", exc_info=True)
@@ -203,4 +215,23 @@ class SupabaseClient:
             return response
         except Exception as e:
             logger.error(f"更新句子翻译 {task_id}-{sentence_index} 异常: {e}", exc_info=True)
+            return None 
+
+    async def get_video(self, video_id):
+        """通过 video_id 获取 videos 表中的 storage_path、bucket_name、video_width、video_height"""
+        try:
+            client = await self._ensure_client()
+            logger.warning(f"get_video called with video_id: {video_id}")
+            # 直接使用原始 video_id，不进行类型转换
+            response = await client.table('videos')\
+                .select('storage_path', 'bucket_name', 'video_width', 'video_height')\
+                .eq('id', video_id)\
+                .execute()
+            logger.warning(f"get_video response: {response}")
+            if response.data and len(response.data) > 0:
+                return response.data[0]
+            logger.warning(f"get_video: no record found for id={video_id}")
+            return None
+        except Exception as e:
+            logger.error(f"获取视频信息失败: {e}", exc_info=True)
             return None 

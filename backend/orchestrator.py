@@ -37,7 +37,7 @@ class MainOrchestrator:
         
         self.logger.info("MainOrchestrator initialized with all core actor handles.")
 
-    async def run_preprocessing_pipeline(self, task_id: str, video_path: str, target_language: str, generate_subtitle: bool):
+    async def run_preprocessing_pipeline(self, task_id: str, video_path: str, video_width: int, video_height: int, target_language: str, generate_subtitle: bool):
         """
         Orchestrates the preprocessing steps (formerly PreEngine logic).
         """
@@ -52,6 +52,8 @@ class MainOrchestrator:
             separated_media = await self.video_separator_handle.separate_video.remote(
                 video_path,
                 str(task_paths.media_dir),
+                video_width,
+                video_height,
                 task_id,
             )
             

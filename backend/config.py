@@ -20,8 +20,10 @@ class Config:
     PUBLIC_DIR = BASE_DIR / "public"
 
     # ---> 将 Supabase 配置移到这里
-    SUPABASE_URL = os.getenv("SUPABASE_URL", "https://aupsrnasyirsqrjtjvok.supabase.co")
-    SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImF1cHNybmFzeWlyc3FyanRqdm9rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU4OTkzOTQsImV4cCI6MjA2MTQ3NTM5NH0.Jl72pBVdZBr0i7iO0RAURo3Dzsod7iCVqzH-KeF1WN8")
+    SUPABASE_URL = os.getenv("SUPABASE_URL")
+    SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    # 后端优先使用 Service Role Key
+    SUPABASE_KEY = SUPABASE_SERVICE_ROLE_KEY or os.getenv("SUPABASE_KEY")
 
     BATCH_SIZE = 6
     TARGET_SPEAKER_AUDIO_DURATION = 10

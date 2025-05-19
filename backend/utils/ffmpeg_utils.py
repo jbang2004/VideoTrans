@@ -219,27 +219,6 @@ async def get_duration(input_path: str) -> float:
         logger.error(f"[FFmpegUtils] 获取时长失败: {str(e)}, 输入: {input_path}")
         raise
 
-async def get_video_resolution(input_path: str) -> Tuple[int, int]:
-    """
-    获取视频的分辨率 (width, height)。
-    """
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "csv=s=x:p=0",
-        input_path
-    ]
-    try:
-        stdout, _ = await run_command(cmd)
-        resolution_str = stdout.decode().strip()
-        width_str, height_str = resolution_str.split('x')
-        return int(width_str), int(height_str)
-    except Exception as e:
-        logger.error(f"[FFmpegUtils] 获取视频分辨率失败: {str(e)}, 输入: {input_path}")
-        raise
-
 async def concat_videos(input_list: str, output_path: str) -> Union[Path, None]:
     """
     根据合并列表文件合并视频片段。

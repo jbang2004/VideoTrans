@@ -33,7 +33,7 @@ async def init_task(
         task_data_to_update = {
             'target_language': target_language,
             'generate_subtitle': generate_subtitle,
-            'original_video_path': str(video_path),
+            'download_video_path': str(video_path),
         }
         
         existing_task = await supabase_client.get_task(task_id)

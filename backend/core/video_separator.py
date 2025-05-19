@@ -11,7 +11,7 @@ from config import Config
 import os
 import soundfile as sf
 
-from utils.ffmpeg_utils import extract_audio, extract_video, get_video_resolution
+from utils.ffmpeg_utils import extract_audio, extract_video
 from models.ClearerVoice_Minimal.audio_enhancer import AudioEnhancer
 from core.supabase_client import SupabaseClient
 
@@ -35,6 +35,8 @@ class VideoSeparator:
         self,
         video_path: str,
         output_dir: str,
+        video_width: int,
+        video_height: int,
         task_id: Optional[str] = None
     ) -> Dict[str, Union[str, float, int]]:
         """
@@ -43,6 +45,8 @@ class VideoSeparator:
         Args:
             video_path: 视频文件路径
             output_dir: 输出目录
+            video_width: 视频宽度
+            video_height: 视频高度
             task_id: 任务ID，用于更新数据库状态
             
         Returns:
@@ -67,14 +71,8 @@ class VideoSeparator:
             vocals_audio = str(output_dir_path / "vocals.wav")
             background_audio = str(output_dir_path / "background.wav")
 
-            # (0) 获取视频分辨率
-            video_width, video_height = -1, -1 # Default values
-            try:
-                video_width, video_height = await get_video_resolution(video_path)
-                self.logger.info(f"[{task_id if task_id else 'VideoSeparator'}] Original video resolution: {video_width}x{video_height}")
-            except Exception as e:
-                self.logger.warning(f"[{task_id if task_id else 'VideoSeparator'}] Failed to get video resolution: {e}. Proceeding without it.")
-                # Depending on strictness, you might want to raise an error or handle this case.
+            # (0) 使用传入的 video_width 和 video_height
+            self.logger.info(f"[{task_id if task_id else 'VideoSeparator'}] Using provided video resolution: {video_width}x{video_height}")
 
             # (1) 提取音频 & 视频（整段）
             # 获取目标采样率

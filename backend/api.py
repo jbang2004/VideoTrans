@@ -1,12 +1,11 @@
 import sys
 from pathlib import Path
 import logging
-import uuid
 import asyncio
 from typing import Dict, Any, Optional
 
 import uvicorn
-from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Form, Query
+from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,12 +15,13 @@ import ray
 from ray import serve
 import os
 import time
+import httpx
 
 from config import Config, init_logging
 from core.supabase_client import SupabaseClient
-from utils.task_initializer import init_task
 
 config = Config()
+config.init_directories()
 
 # 初始化全局日志配置
 init_logging()
@@ -70,122 +70,64 @@ class VideoTransAPI:
         """首页"""
         return templates.TemplateResponse("index.html", {"request": request})
 
-    @app.post("/upload")
-    async def upload_video(
-        self,
-        video: UploadFile = File(...),
-    ):
+    @app.post("/api/preprovideo")
+    async def preprovideo(self, videoId: str = Body(..., embed=True)):
         """
-        上传视频接口
-        
-        Args:
-            video: 视频文件
+        接收前端 videoId，下载视频并触发预处理流水线
         """
+        video = await self.supabase_client.get_video(videoId)
+        if not video:
+            raise HTTPException(status_code=404, detail="视频记录不存在")
+        storage_path = video.get("storage_path")
+        bucket_name = video.get("bucket_name")
+
+        client = await self.supabase_client._ensure_client()
+        # 下载视频到内存
         try:
-            if not video:
-                raise HTTPException(status_code=400, detail="没有文件上传")
-            
-            if not video.content_type.startswith('video/'):
-                raise HTTPException(status_code=400, detail="只支持视频文件")
-            
-            # 生成任务ID
-            task_id = str(uuid.uuid4())
-            self.logger.info(f"新建任务ID: {task_id} 用于视频上传")
-            
-            # 保存上传的视频文件
-            input_dir = config.TASKS_DIR / task_id / "input"
-            input_dir.mkdir(parents=True, exist_ok=True)
-            
-            video_path = input_dir / f"original_{video.filename}"
-            try:
-                async with aiofiles.open(video_path, "wb") as f:
-                    content = await video.read()
-                    await f.write(content)
-            except Exception as e:
-                self.logger.error(f"保存文件失败: {str(e)}")
-                raise HTTPException(status_code=500, detail="文件保存失败")
-            
-            # 准备任务数据
-            task_data = {
-                'task_id': task_id,
-                'status': 'uploaded',
-                'original_video_path': str(video_path),
-            }
-                
-            # 记录上传任务到数据库，不启动预处理
-            await self.supabase_client.store_task(task_data)
-
-            return JSONResponse(content={
-                'status': 'uploaded',
-                'task_id': task_id,
-                'message': '视频上传成功'
-            })
-        except HTTPException as e:
-            raise e
+            data = await client.storage.from_(bucket_name).download(storage_path)
+        except httpx.ConnectError as ce:
+            logger.warning(f"下载视频时连接错误，重试一次: {ce}")
+            data = await client.storage.from_(bucket_name).download(storage_path)
         except Exception as e:
-            self.logger.error(f"上传处理失败: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail=f"下载视频失败: {e}")
+        if not data:
+            raise HTTPException(status_code=500, detail="下载视频返回空内容")
 
-    @app.post("/preprocess/{task_id}")
-    async def preprocess_video(
-        self,
-        task_id: str,
-        target_language: str = Form("zh"),
-        generate_subtitle: bool = Form(False),
-    ):
-        """
-        触发预处理流水线接口
-        """
-        # 从数据库获取原始视频路径
-        existing = await self.supabase_client.get_task(task_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail="任务不存在")
-            
-        # 确保任务状态为'uploaded'
-        if existing.get('status') != 'uploaded':
-            raise HTTPException(status_code=400, detail=f"任务当前状态为 {existing.get('status')}，不能开始预处理")
-            
-        video_path = existing.get('original_video_path')
-        if not video_path:
-            raise HTTPException(status_code=400, detail="原始视频路径不存在")
+        task_dir = config.TASKS_DIR / videoId
+        task_dir.mkdir(parents=True, exist_ok=True)
+        filename = Path(storage_path).name
+        local_video_path = task_dir / filename
         try:
-            # Initialize task directories and confirm/update parameters
-            init_success = await init_task(
-                config=config, 
-                supabase_client=self.supabase_client, 
-                task_id=task_id,
-                video_path=str(video_path),
-                target_language=target_language,
-                generate_subtitle=generate_subtitle
-            )
-            
-            if not init_success:
-                raise HTTPException(status_code=500, detail="任务初始化失败(init_task)，请检查日志")
-
-            # Set status to 'preprocessing' and ensure target_language/generate_subtitle are recorded
-            await self.supabase_client.update_task(task_id, {
-                'status': 'preprocessing',
-                'target_language': target_language, 
-                'generate_subtitle': generate_subtitle
-            })
-            
-            # Dispatch to MainOrchestrator
-            self.orchestrator_handle.run_preprocessing_pipeline.remote(
-                task_id=task_id,
-                video_path=str(video_path),
-                target_language=target_language,
-                generate_subtitle=generate_subtitle
-            )
-            return JSONResponse(content={
-                'status': 'preprocessing',
-                'task_id': task_id,
-                'message': '预处理已开始'
-            })
+            async with aiofiles.open(local_video_path, "wb") as f:
+                await f.write(data)
         except Exception as e:
-            self.logger.error(f"调用 MainOrchestrator for preprocessing 失败: {e}", exc_info=True)
-            # Update task status to error if dispatching to MainOrchestrator fails
-            await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"启动预处理失败: {e}"})
-            raise HTTPException(status_code=500, detail="启动预处理失败")
+            raise HTTPException(status_code=500, detail=f"保存视频文件失败: {e}")
+
+        task_data = {
+            "video_id": videoId,
+            "video_path_supabase": storage_path,
+            "download_video_path": str(local_video_path),
+            "status": "uploaded"
+        }
+        logger.warning(f"task_data: {task_data}")
+        resp = await self.supabase_client.store_task(task_data)
+        if not resp or not resp.data:
+            raise HTTPException(status_code=500, detail="创建任务失败")
+        new_task_id = resp.data[0].get("id") or resp.data[0].get("task_id")
+
+        self.orchestrator_handle.run_preprocessing_pipeline.remote(
+            task_id=new_task_id,
+            video_path=str(local_video_path),
+            video_width=video.get("video_width", -1),
+            video_height=video.get("video_height", -1),
+            target_language="zh",
+            generate_subtitle=False
+        )
+        return JSONResponse(content={
+            "status": "preprocessing",
+            "task_id": new_task_id,
+            "message": "预处理已开始"
+        })
 
     @app.get("/task/{task_id}")
     async def get_task_status(self, task_id: str):
