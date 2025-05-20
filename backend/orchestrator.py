@@ -12,6 +12,7 @@ from ray.serve.handle import DeploymentHandle # Still useful for type hints if n
 
 from config import Config
 from utils.task_storage import TaskPaths
+from core.supabase_client import SupabaseClient
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ class MainOrchestrator:
     def __init__(self):
         self.logger = logger
         self.config = Config() # Global config
+        self.supabase_client = SupabaseClient(config=self.config)
 
         self.video_separator_handle: DeploymentHandle = serve.get_deployment_handle("video_separator", app_name="VideoSeparatorApp")
         self.asr_handle: DeploymentHandle = serve.get_deployment_handle("asr_model", app_name="ASRApp")
@@ -42,6 +44,7 @@ class MainOrchestrator:
         Orchestrates the preprocessing steps (formerly PreEngine logic).
         """
         self.logger.info(f"[{task_id}] Orchestrator: Starting preprocessing for video: {video_path}, lang: {target_language}, subtitles: {generate_subtitle}")
+        await self.supabase_client.update_task(task_id, {'status': 'preprocessing'})
         seg_start_time = time.time()
         
         try:
@@ -59,8 +62,10 @@ class MainOrchestrator:
             
             if not separated_media or "vocals_audio_path" not in separated_media or not Path(separated_media["vocals_audio_path"]).exists():
                 self.logger.warning(f"[{task_id}] Orchestrator: Video separation failed or no vocals detected.")
-                # Consider how to update task status here if PreEngine used to do it.
-                # For now, returning an error status. The API layer might handle DB update.
+                await self.supabase_client.update_task(task_id, {
+                    'status': 'error',
+                    'error_message': 'Video separation failed or no vocals detected'
+                })
                 return {"status": "error", "message": "Video separation failed or no vocals detected"}
             
             self.logger.info(f"[{task_id}] Orchestrator: Video separation completed.")
@@ -83,11 +88,15 @@ class MainOrchestrator:
                 return {"status": "preprocessed", "message": "Preprocessing finished (no speech detected)"} # Match PreEngine's original success response
 
             self.logger.info(f"[{task_id}] Orchestrator: Preprocessing completed successfully with {len(sentences)} sentences.")
+            await self.supabase_client.update_task(task_id, {'status': 'preprocessed'})
             return {"status": "preprocessed", "message": "Preprocessing finished successfully"} # Match PreEngine
 
         except Exception as e:
             self.logger.exception(f"[{task_id}] Orchestrator: Error during preprocessing: {e}")
-            # Similar to above, consider task status update strategy.
+            await self.supabase_client.update_task(task_id, {
+                'status': 'error',
+                'error_message': f"Error during preprocessing: {e}"
+            })
             return {"status": "error", "message": f"Error during preprocessing: {e}"}
         finally:
             self._clean_memory() # Keep memory cleaning practice

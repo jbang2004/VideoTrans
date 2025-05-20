@@ -43,6 +43,14 @@ app.add_middleware(
 current_dir = Path(__file__).parent
 templates = Jinja2Templates(directory=str(current_dir / "templates"))
 
+# 全局 SupabaseClient 实例
+supabase_client = SupabaseClient(config=config)
+
+@app.on_event("startup")
+async def startup_supabase():
+    """FastAPI 启动时初始化 Supabase 客户端"""
+    await supabase_client.initialize()
+
 @serve.deployment(
     num_replicas=1,
     ray_actor_options={"num_cpus": 0.5}
@@ -59,7 +67,7 @@ class VideoTransAPI:
             # "MainOrchestratorApp" is the serve.run name in launcher.py
             self.orchestrator_handle = serve.get_deployment_handle("MainOrchestratorDeployment", app_name="MainOrchestratorApp")
             
-            self.supabase_client = SupabaseClient(config=config)
+            self.supabase_client = supabase_client
             self.logger.info("VideoTransAPI initialized with MainOrchestrator handle.")
         except Exception as e:
             self.logger.error(f"VideoTransAPI initialization failed: {e}", exc_info=True)
@@ -81,13 +89,12 @@ class VideoTransAPI:
         storage_path = video.get("storage_path")
         bucket_name = video.get("bucket_name")
 
-        client = await self.supabase_client._ensure_client()
         # 下载视频到内存
         try:
-            data = await client.storage.from_(bucket_name).download(storage_path)
+            data = await self.supabase_client.download_file(bucket_name, storage_path)
         except httpx.ConnectError as ce:
             logger.warning(f"下载视频时连接错误，重试一次: {ce}")
-            data = await client.storage.from_(bucket_name).download(storage_path)
+            data = await self.supabase_client.download_file(bucket_name, storage_path)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"下载视频失败: {e}")
         if not data:
@@ -134,7 +141,6 @@ class VideoTransAPI:
         """获取任务状态"""
         try:
             # 使用Supabase客户端获取任务状态
-            task = await self.supabase_client._ensure_client()
             task = await self.supabase_client.get_task(task_id)
             
             if not task:

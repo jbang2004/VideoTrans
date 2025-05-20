@@ -234,4 +234,18 @@ class SupabaseClient:
             return None
         except Exception as e:
             logger.error(f"获取视频信息失败: {e}", exc_info=True)
-            return None 
+            return None
+
+    async def initialize(self):
+        """在应用启动时调用，初始化客户端"""
+        await self._ensure_client()
+
+    async def download_file(self, bucket_name: str, storage_path: str) -> bytes:
+        """从 Supabase 存储下载文件"""
+        client = await self._ensure_client()
+        return await client.storage.from_(bucket_name).download(storage_path)
+
+    async def upload_file(self, bucket_name: str, storage_path: str, file_bytes: bytes):
+        """上传文件到 Supabase 存储"""
+        client = await self._ensure_client()
+        return await client.storage.from_(bucket_name).upload(storage_path, file_bytes) 
