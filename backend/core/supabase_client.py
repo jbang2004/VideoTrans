@@ -6,6 +6,8 @@ from config import Config
 import logging
 from core.sentence_tools import Sentence
 import httpx
+import asyncio
+import functools
 
 logger = logging.getLogger(__name__)
 def sanitize_for_json(value):
@@ -23,6 +25,25 @@ def sanitize_for_json(value):
         else:
             return value
 
+def retry_on(exceptions=(httpx.ConnectError, httpx.ConnectTimeout, httpx.HTTPError), retries=3, backoff_factor=2):
+    """通用重试装饰器，用于处理Supabase连接异常"""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(self, *args, **kwargs):
+            last_exc = None
+            for attempt in range(1, retries + 1):
+                try:
+                    return await func(self, *args, **kwargs)
+                except exceptions as e:
+                    last_exc = e
+                    logger.warning(f"{func.__name__} 第{attempt}次失败: {e}")
+                    self.client = None
+                    await asyncio.sleep(backoff_factor ** (attempt - 1))
+            logger.error(f"{func.__name__} 重试{retries}次后失败: {last_exc}", exc_info=True)
+            raise last_exc
+        return wrapper
+    return decorator
+
 class SupabaseClient:
     def __init__(self, config=None):
         self.config = config or Config()
@@ -33,16 +54,16 @@ class SupabaseClient:
         """确保客户端已初始化"""
         if self.client is None:
             try:
-                # 设置 postgrest 超时和重试选项
+                # 设置 postgrest 超时选项（增加到10秒）
                 options = ClientOptions(
-                    postgrest_client_timeout=30.0,  # 设置 postgrest 客户端超时时间为30秒
+                    postgrest_client_timeout=10.0,  # 设置 postgrest 客户端超时时间为10秒
                 )
                 self.client = await create_client(
                     self.config.SUPABASE_URL,
                     self.config.SUPABASE_KEY,
                     options=options
                 )
-                logger.info("Supabase客户端创建成功 (postgrest_timeout=30s)")
+                logger.info("Supabase客户端创建成功 (postgrest_timeout=10s)")
             except Exception as e:
                 logger.error(f"创建Supabase客户端失败: {e}", exc_info=True)
                 raise
@@ -70,19 +91,15 @@ class SupabaseClient:
             logger.error(f"存储任务 {task_data.get('task_id')} 失败: {e}", exc_info=True)
             return None
 
+    @retry_on()
     async def update_task(self, task_id, update_data):
-        """更新任务信息"""
-        try:
-            client = await self._ensure_client()
-            response = await client.table('tasks').update(update_data).eq('task_id', task_id).execute()
-            logger.info(f"更新任务 {task_id} 成功，响应数量: {len(response.data) if response.data else 0}")
-            return response
-        except Exception as e:
-            logger.error(f"更新任务 {task_id} 失败: {e}", exc_info=True)
-            return None
+        """更新任务信息，最多重试3次"""
+        client = await self._ensure_client()
+        return await client.table('tasks').update(update_data).eq('task_id', task_id).execute()
 
+    @retry_on()
     async def get_task(self, task_id):
-        """获取任务信息"""
+        """获取任务信息，带重试"""
         try:
             client = await self._ensure_client()
             response = await client.table('tasks').select('*').eq('task_id', task_id).execute()
@@ -91,8 +108,8 @@ class SupabaseClient:
                 return response.data[0]
             return None
         except Exception as e:
-            logger.error(f"获取任务 {task_id} 失败: {e}", exc_info=True)
-            return None
+            logger.error(f"获取任务 {task_id} 异常: {e}", exc_info=True)
+            raise
 
     async def store_sentences(self, sentences, task_id):
         """批量存储句子信息"""
@@ -136,7 +153,14 @@ class SupabaseClient:
 
             # 执行数据库插入
             if json_sentences:
-                response = await client.table('sentences').insert(json_sentences).execute()
+                try:
+                    response = await client.table('sentences').insert(json_sentences).execute()
+                except httpx.ConnectError as ce:
+                    logger.warning(f"存储句子 {task_id} 时连接断开，重试一次: {ce}")
+                    self.client = None
+                    client = await self._ensure_client()
+                    response = await client.table('sentences').insert(json_sentences).execute()
+                    logger.info(f"重试存储 {len(json_sentences)} 个句子到任务 {task_id} 成功")
                 logger.info(f"存储 {len(json_sentences)} 个句子到任务 {task_id}，响应数量: {len(response.data) if response.data else 0}")
                 return response
             else:
@@ -150,51 +174,42 @@ class SupabaseClient:
             logger.error(f"存储句子失败 (任务 {task_id}): {e}", exc_info=True)
             return None
 
+    @retry_on()
     async def get_sentences(self, task_id, as_objects=False):
         """
         获取任务的所有句子，按索引排序
-        
         Args:
             task_id: 任务ID
             as_objects: 是否将结果转换为Sentence对象列表
         """
-        try:
-            client = await self._ensure_client()
-            response = await client.table('sentences').select('*').eq('task_id', task_id).order('sentence_index').execute()
-            logger.info(f"获取任务 {task_id} 的句子，数量: {len(response.data)}")
-            
-            # 如果不需要转换为对象，直接返回原始数据
-            if not as_objects:
-                return response.data
-                
-            # 将原始数据转换为Sentence对象
-            sentences = []
-            for data in response.data:
-                sentence = Sentence(
-                    task_id=task_id,
-                    sentence_id=data.get('sentence_index', -1),
-                    raw_text=data.get('raw_text', ''),
-                    start=data.get('start_ms', 0.0),
-                    end=data.get('end_ms', 0.0),
-                    speaker_id=data.get('speaker_id', -1),
-                    target_duration=data.get('target_duration_ms'),
-                    audio=data.get('audio_prompt_path', ""),
-                    trans_text=data.get('trans_text', '') or "",
-                    is_first=data.get('is_first', False),
-                    is_last=data.get('is_last', False),
-                    ending_silence=data.get('ending_silence_ms', 0.0)
-                )
-                # 从数据库记录中读取 speech_duration_ms 并赋值
-                sentence.speech_duration = data.get('speech_duration_ms', 0.0)
-                
-                sentences.append(sentence)
-                
-            logger.info(f"成功将 {len(sentences)} 个句子转换为对象 (任务 {task_id})")
-            return sentences
-            
-        except Exception as e:
-            logger.error(f"获取句子失败 (任务 {task_id}): {e}", exc_info=True)
-            return [] 
+        # 拉取句子数据
+        client = await self._ensure_client()
+        response = await client.table('sentences').select('*').eq('task_id', task_id).order('sentence_index').execute()
+        logger.info(f"get_sentences: 获取任务 {task_id} 的句子，数量: {len(response.data)}")
+        # 如果不需要转换为对象，直接返回原始数据
+        if not as_objects:
+            return response.data
+        # 转换为 Sentence 对象列表
+        sentences = []
+        for data in response.data:
+            sentence = Sentence(
+                task_id=task_id,
+                sentence_id=data.get('sentence_index', -1),
+                raw_text=data.get('raw_text', ''),
+                start=data.get('start_ms', 0.0),
+                end=data.get('end_ms', 0.0),
+                speaker_id=data.get('speaker_id', -1),
+                target_duration=data.get('target_duration_ms'),
+                audio=data.get('audio_prompt_path', ""),
+                trans_text=data.get('trans_text', '') or "",
+                is_first=data.get('is_first', False),
+                is_last=data.get('is_last', False),
+                ending_silence=data.get('ending_silence_ms', 0.0)
+            )
+            sentence.speech_duration = data.get('speech_duration_ms', 0.0)
+            sentences.append(sentence)
+        logger.info(f"get_sentences: 成功转换 {len(sentences)} 个句子 (任务 {task_id})")
+        return sentences
 
     async def update_sentence_translation(self, task_id: str, sentence_index: int, trans_text: str):
         """更新单个句子的翻译文本"""
@@ -217,31 +232,27 @@ class SupabaseClient:
             logger.error(f"更新句子翻译 {task_id}-{sentence_index} 异常: {e}", exc_info=True)
             return None 
 
+    @retry_on()
     async def get_video(self, video_id):
-        """通过 video_id 获取 videos 表中的 storage_path、bucket_name、video_width、video_height"""
-        try:
-            client = await self._ensure_client()
-            logger.warning(f"get_video called with video_id: {video_id}")
-            # 直接使用原始 video_id，不进行类型转换
-            response = await client.table('videos')\
-                .select('storage_path', 'bucket_name', 'video_width', 'video_height')\
-                .eq('id', video_id)\
-                .execute()
-            logger.warning(f"get_video response: {response}")
-            if response.data and len(response.data) > 0:
-                return response.data[0]
-            logger.warning(f"get_video: no record found for id={video_id}")
-            return None
-        except Exception as e:
-            logger.error(f"获取视频信息失败: {e}", exc_info=True)
-            return None
+        """通过 video_id 获取 videos 表中的 storage_path、bucket_name、video_width、video_height，带重试机制"""
+        client = await self._ensure_client()
+        response = await client.table('videos')\
+            .select('storage_path', 'bucket_name', 'video_width', 'video_height')\
+            .eq('id', video_id)\
+            .execute()
+        logger.warning(f"get_video response: {response}")
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+        logger.warning(f"get_video: 未找到 id={video_id} 的记录")
+        return None
 
     async def initialize(self):
         """在应用启动时调用，初始化客户端"""
         await self._ensure_client()
 
+    @retry_on()
     async def download_file(self, bucket_name: str, storage_path: str) -> bytes:
-        """从 Supabase 存储下载文件"""
+        """使用 Supabase 标准 download 方法下载文件，并内置重试逻辑"""
         client = await self._ensure_client()
         return await client.storage.from_(bucket_name).download(storage_path)
 
@@ -249,3 +260,11 @@ class SupabaseClient:
         """上传文件到 Supabase 存储"""
         client = await self._ensure_client()
         return await client.storage.from_(bucket_name).upload(storage_path, file_bytes) 
+
+    @retry_on()
+    async def clear_sentence_translations(self, task_id: str):
+        """清空指定任务所有句子的翻译文本"""
+        client = await self._ensure_client()
+        response = await client.table('sentences').update({'trans_text': ''}).eq('task_id', task_id).execute()
+        logger.info(f"清空任务 {task_id} 中句子翻译，更新数量: {len(response.data) if response.data else 0}")
+        return response 

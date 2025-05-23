@@ -83,20 +83,31 @@ class VideoTransAPI:
         """
         接收前端 videoId，下载视频并触发预处理流水线
         """
-        video = await self.supabase_client.get_video(videoId)
+        try:
+            video = await self.supabase_client.get_video(videoId)
+        except httpx.ConnectError as ce:
+            logger.error(f"获取视频信息时连接错误: {ce}")
+            raise HTTPException(status_code=500, detail="获取视频信息失败，请稍后重试")
         if not video:
             raise HTTPException(status_code=404, detail="视频记录不存在")
         storage_path = video.get("storage_path")
         bucket_name = video.get("bucket_name")
 
-        # 下载视频到内存
-        try:
-            data = await self.supabase_client.download_file(bucket_name, storage_path)
-        except httpx.ConnectError as ce:
-            logger.warning(f"下载视频时连接错误，重试一次: {ce}")
-            data = await self.supabase_client.download_file(bucket_name, storage_path)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"下载视频失败: {e}")
+        # 下载视频到内存（最多重试 3 次）
+        data = None
+        last_exc = None
+        for attempt in range(1, 4):
+            try:
+                data = await self.supabase_client.download_file(bucket_name, storage_path)
+                break
+            except Exception as e:
+                last_exc = e
+                logger.warning(f"第{attempt}次下载视频失败: {e}")
+                # 清空客户端以便重新初始化
+                self.supabase_client.client = None
+                await asyncio.sleep(2 ** (attempt - 1))
+        if data is None:
+            raise HTTPException(status_code=500, detail=f"下载视频失败: {last_exc}")
         if not data:
             raise HTTPException(status_code=500, detail="下载视频返回空内容")
 
@@ -136,62 +147,62 @@ class VideoTransAPI:
             "message": "预处理已开始"
         })
 
-    @app.get("/task/{task_id}")
-    async def get_task_status(self, task_id: str):
-        """获取任务状态"""
-        try:
-            # 使用Supabase客户端获取任务状态
-            task = await self.supabase_client.get_task(task_id)
+    # @app.get("/task/{task_id}")
+    # async def get_task_status(self, task_id: str):
+    #     """获取任务状态"""
+    #     try:
+    #         # 使用Supabase客户端获取任务状态
+    #         task = await self.supabase_client.get_task(task_id)
             
-            if not task:
-                return JSONResponse(content={
-                    "status": "error",
-                    "message": "任务不存在",
-                    "progress": 0
-                })
+    #         if not task:
+    #             return JSONResponse(content={
+    #                 "status": "error",
+    #                 "message": "任务不存在",
+    #                 "progress": 0
+    #             })
             
-            # 根据任务状态计算进度
-            progress = 0
-            status = task.get('status', 'unknown')
+    #         # 根据任务状态计算进度
+    #         progress = 0
+    #         status = task.get('status', 'unknown')
             
-            # 两阶段流程进度映射
-            if status == 'preprocessing':
-                progress = 10
-            elif status == 'preprocessed':
-                progress = 40
-            elif status == 'translating':
-                progress = 50
-            elif status == 'mixing':
-                progress = 85
-            elif status == 'success':
-                progress = 100
+    #         # 两阶段流程进度映射
+    #         if status == 'preprocessing':
+    #             progress = 10
+    #         elif status == 'preprocessed':
+    #             progress = 40
+    #         elif status == 'translating':
+    #             progress = 50
+    #         elif status == 'mixing':
+    #             progress = 85
+    #         elif status == 'success':
+    #             progress = 100
             
-            response_data = {
-                "status": status,
-                "message": task.get('error_message', '处理中') if status == 'error' else '处理中',
-                "progress": progress,
-                "hls_ready": False
-            }
+    #         response_data = {
+    #             "status": status,
+    #             "message": task.get('error_message', '处理中') if status == 'error' else '处理中',
+    #             "progress": progress,
+    #             "hls_ready": False
+    #         }
             
-            # 只要 hls_playlist_url 存在，就认为 HLS 已就绪
-            if task.get('hls_playlist_url'):
-                response_data["hls_url"] = task.get('hls_playlist_url')
-                response_data["hls_ready"] = True
+    #         # 只要 hls_playlist_url 存在，就认为 HLS 已就绪
+    #         if task.get('hls_playlist_url'):
+    #             response_data["hls_url"] = task.get('hls_playlist_url')
+    #             response_data["hls_ready"] = True
             
-            # 如果状态为成功，更新消息并添加下载链接
-            if status == 'success':
-                response_data["message"] = "处理完成"
-                response_data["download_url"] = f"/download/{task_id}"
+    #         # 如果状态为成功，更新消息并添加下载链接
+    #         if status == 'success':
+    #             response_data["message"] = "处理完成"
+    #             response_data["download_url"] = f"/download/{task_id}"
             
-            return JSONResponse(content=response_data)
+    #         return JSONResponse(content=response_data)
             
-        except Exception as e:
-            self.logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
-            return JSONResponse(content={
-                "status": "error",
-                "message": f"获取状态失败: {str(e)}",
-                "progress": 0
-            })
+    #     except Exception as e:
+    #         self.logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
+    #         return JSONResponse(content={
+    #             "status": "error",
+    #             "message": f"获取状态失败: {str(e)}",
+    #             "progress": 0
+    #         })
 
     @app.get("/playlists/{task_id}/{filename}")
     async def serve_playlist(self, task_id: str, filename: str):
@@ -260,35 +271,57 @@ class VideoTransAPI:
             filename=f"final_{task_id}.mp4",
         )
 
-    @app.post("/translate/{task_id}")
-    async def translate_video(self, task_id: str):
-        """触发翻译与合成流水线"""
+    # @app.post("/translate/{task_id}")
+    # async def translate_video(self, task_id: str):
+    #     """触发翻译与合成流水线"""
+    #     try:
+    #         # 获取任务信息，确保预处理已完成
+    #         task = await self.supabase_client.get_task(task_id)
+    #         if not task:
+    #             raise HTTPException(status_code=404, detail="任务不存在。")
+    #         current_status = task.get('status')
+    #         if current_status != 'preprocessed':
+    #             raise HTTPException(status_code=400, detail=f"任务状态为 '{current_status}'。仅当状态为 'preprocessed' 时才能开始翻译。")
+
+    #         # Dispatch to MainOrchestrator
+    #         self.orchestrator_handle.run_translation_pipeline.remote(task_id)
+    #         self.logger.info(f"成功触发 MainOrchestrator for translation: {task_id}")
+
+    #         # 更新状态
+    #         await self.supabase_client.update_task(task_id, {'status': 'translating'})
+
+    #         return JSONResponse(content={
+    #             'status': 'translating',
+    #             'task_id': task_id,
+    #             'message': '翻译与合成已开始'
+    #         })
+    #     except HTTPException as e:
+    #         raise e
+    #     except Exception as e:
+    #         self.logger.error(f"调用 MainOrchestrator for translation 失败: {str(e)}", exc_info=True)
+    #         raise HTTPException(status_code=500, detail=f"无法开始翻译: {e}")
+
+    @app.post("/api/translate_subtitles")
+    async def translate_subtitles(self, task_id: str = Body(...), target_language: str = Body(...)):
+        """触发字幕翻译流程"""
         try:
-            # 获取任务信息，确保预处理已完成
             task = await self.supabase_client.get_task(task_id)
             if not task:
                 raise HTTPException(status_code=404, detail="任务不存在。")
-            current_status = task.get('status')
-            if current_status != 'preprocessed':
-                raise HTTPException(status_code=400, detail=f"任务状态为 '{current_status}'。仅当状态为 'preprocessed' 时才能开始翻译。")
-
-            # Dispatch to MainOrchestrator
-            self.orchestrator_handle.run_translation_pipeline.remote(task_id)
-            self.logger.info(f"成功触发 MainOrchestrator for translation: {task_id}")
-
-            # 更新状态
-            await self.supabase_client.update_task(task_id, {'status': 'translating'})
-
+            # 每次请求都更新状态为 translating、存储目标语言并清空历史翻译
+            asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'translating', 'target_language': target_language}))
+            await self.supabase_client.clear_sentence_translations(task_id)
+            # 调用编排，仅传递 task_id 和目标语言
+            self.orchestrator_handle.run_subtitle_translation_pipeline.remote(task_id, target_language)
+            self.logger.info(f"成功触发字幕翻译 Orchestrator: {task_id}, target_language: {target_language}")
             return JSONResponse(content={
-                'status': 'translating',
-                'task_id': task_id,
-                'message': '翻译与合成已开始'
+                'status': 'translating', 'task_id': task_id, 'message': '字幕翻译已开始'
             })
         except HTTPException as e:
             raise e
         except Exception as e:
-            self.logger.error(f"调用 MainOrchestrator for translation 失败: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"无法开始翻译: {e}")
+            self.logger.error(f"调用字幕翻译 Orchestrator 失败: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"无法开始字幕翻译: {e}")
 
 # 静态文件挂载
 app.mount("/playlists", 

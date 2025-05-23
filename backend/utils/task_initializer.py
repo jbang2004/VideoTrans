@@ -38,8 +38,8 @@ async def init_task(
         
         existing_task = await supabase_client.get_task(task_id)
         if existing_task:
-            await supabase_client.update_task(task_id, task_data_to_update)
-            logger.info(f"[{task_id}] Task parameters updated/confirmed by init_task.")
+            asyncio.create_task(supabase_client.update_task(task_id, task_data_to_update))
+            logger.info(f"[{task_id}] Task parameters异步更新/确认 by init_task.")
         else:
             logger.warning(f"[{task_id}] Task not found during init_task. API layer should have created it.")
             return False
@@ -49,10 +49,10 @@ async def init_task(
         logger.error(f"[{task_id}] init_task failed: {e}", exc_info=True)
         if task_id and supabase_client:
             try:
-                await supabase_client.update_task(task_id, {
+                asyncio.create_task(supabase_client.update_task(task_id, {
                     'status': 'error', 
                     'error_message': f"init_task utility failed: {e}"
-                })
+                }))
             except Exception as su_e:
                 logger.error(f"[{task_id}] Failed to update Supabase with init_task error: {su_e}")
         return False 

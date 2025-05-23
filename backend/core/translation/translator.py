@@ -137,6 +137,7 @@ class Translator:
     async def translate_sentences(
         self,
         task_id: str,
+        target_language: str,
         batch_size: int = 50
     ) -> AsyncGenerator[List, None]:
         """翻译句子，返回异步生成器"""
@@ -146,26 +147,12 @@ class Translator:
             return
         self.logger.info(f"[{task_id}] 翻译：获取到 {len(sentences)} 个句子")
 
-        # 获取 target_language 和更新任务状态
+        # 使用传入的 target_language 并更新任务状态
         try:
-            task_data = await self.supabase_client.get_task(task_id)
-            if not task_data:
-                self.logger.error(f"[{task_id}] 翻译：无法从数据库获取任务信息以确定 target_language")
-                return
-            
-            target_language = task_data.get('target_language')
-            if not target_language:
-                self.logger.error(f"[{task_id}] 翻译：数据库中未设置 target_language")
-                # 可选: 更新任务状态为错误
-                # await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': 'Missing target_language for translation'})
-                return
-            
-            # 更新状态为翻译中
-            await self.supabase_client.update_task(task_id, {'status': 'translating'})
-            self.logger.info(f"[{task_id}] 翻译：任务状态更新为 translating，目标语言: {target_language}")
-
+            asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'translating', 'target_language': target_language}))
+            self.logger.info(f"[{task_id}] 翻译：异步更新任务状态为 translating，目标语言: {target_language}")
         except Exception as e:
-            self.logger.error(f"[{task_id}] 翻译：获取 target_language 或更新状态时出错: {e}", exc_info=True)
+            self.logger.error(f"[{task_id}] 翻译：更新状态或存储 target_language 时出错: {e}", exc_info=True)
             return
 
         # 确保 batch_size 是整数
@@ -256,63 +243,56 @@ class Translator:
         config = BatchConfig(initial_size=batch_size, min_size=1, required_successes=2)
 
         async def process_batch(batch: List) -> Optional[List]:
-            texts = None
-            batch_result = None
+            texts = {str(i): s.trans_text for i, s in enumerate(batch)}
+            self.logger.debug(f"简化批次: {len(texts)}条文本")
+            batch_result = await self.simplify(texts)
             
-            try:
-                texts = {str(i): s.trans_text for i, s in enumerate(batch)}
-                self.logger.debug(f"简化批次: {len(texts)}条文本")
-                batch_result = await self.simplify(texts)
+            if not any(key in batch_result for key in self.SIMPLIFICATION_LEVELS):
+                self.logger.error("简化结果格式不正确，缺少必要字段")
+                return None
                 
-                if not any(key in batch_result for key in self.SIMPLIFICATION_LEVELS):
-                    self.logger.error("简化结果格式不正确，缺少必要字段")
-                    return None
-                    
-                for i, s in enumerate(batch):
-                    old_text = s.trans_text
-                    str_i = str(i)
-                    
-                    if not any(str_i in batch_result.get(key, {}) for key in self.SIMPLIFICATION_LEVELS):
-                        self.logger.error(f"句子 {i} 的简化结果不完整")
-                        continue
+            for i, s in enumerate(batch):
+                old_text = s.trans_text
+                str_i = str(i)
+                
+                if not any(str_i in batch_result.get(key, {}) for key in self.SIMPLIFICATION_LEVELS):
+                    self.logger.error(f"句子 {i} 的简化结果不完整")
+                    continue
 
-                    ideal_length = len(old_text) * (target_speed / s.speed) if s.speed > 0 else len(old_text)
-                    
-                    # 存储所有可接受和不可接受的候选文本
-                    acceptable_candidates = {}
-                    non_acceptable_candidates = {}
-                    
-                    # 按精简程度检查候选文本
-                    for key in self.SIMPLIFICATION_LEVELS:
-                        if key in batch_result and str_i in batch_result[key]:
-                            candidate_text = batch_result[key][str_i]
-                            if candidate_text:
-                                candidate_length = len(candidate_text)
-                                if candidate_length <= ideal_length:
-                                    acceptable_candidates[key] = candidate_text
-                                else:
-                                    non_acceptable_candidates[key] = candidate_text
-                    
-                    # 如果有可接受的候选文本（长度小于等于理想长度），选择最接近理想长度的（最长的可接受文本）
-                    if acceptable_candidates:
-                        # 在可接受的候选中选择最长的那个（因此最接近 ideal_length）
-                        chosen_key, chosen_text = max(acceptable_candidates.items(), key=lambda item: len(item[1]))
-                    elif non_acceptable_candidates:
-                        # 在不可接受的候选中选择最短的那个（因此最接近 ideal_length）
-                        chosen_key, chosen_text = min(non_acceptable_candidates.items(), key=lambda item: len(item[1]))
-                    else:
-                        chosen_key = "原文"
-                        chosen_text = old_text
+                ideal_length = len(old_text) * (target_speed / s.speed) if s.speed > 0 else len(old_text)
+                
+                # 存储所有可接受和不可接受的候选文本
+                acceptable_candidates = {}
+                non_acceptable_candidates = {}
+                
+                # 按精简程度检查候选文本
+                for key in self.SIMPLIFICATION_LEVELS:
+                    if key in batch_result and str_i in batch_result[key]:
+                        candidate_text = batch_result[key][str_i]
+                        if candidate_text:
+                            candidate_length = len(candidate_text)
+                            if candidate_length <= ideal_length:
+                                acceptable_candidates[key] = candidate_text
+                            else:
+                                non_acceptable_candidates[key] = candidate_text
+                
+                # 如果有可接受的候选文本（长度小于等于理想长度），选择最接近理想长度的（最长的可接受文本）
+                if acceptable_candidates:
+                    # 在可接受的候选中选择最长的那个（因此最接近 ideal_length）
+                    chosen_key, chosen_text = max(acceptable_candidates.items(), key=lambda item: len(item[1]))
+                elif non_acceptable_candidates:
+                    # 在不可接受的候选中选择最短的那个（因此最接近 ideal_length）
+                    chosen_key, chosen_text = min(non_acceptable_candidates.items(), key=lambda item: len(item[1]))
+                else:
+                    chosen_key = "原文"
+                    chosen_text = old_text
 
-                    s.trans_text = chosen_text
-                    self.logger.info(
-                        f"精简[{chosen_key}]: {old_text} -> {chosen_text} (理想长度: {ideal_length}, 实际长度: {len(chosen_text)}, s.speed: {s.speed})"
-                    )
-                    
-                return batch
-            except Exception as e:
-                self.logger.error(f"处理简化批次失败: {e}")
-                raise
+                s.trans_text = chosen_text
+                self.logger.info(
+                    f"精简[{chosen_key}]: {old_text} -> {chosen_text} (理想长度: {ideal_length}, 实际长度: {len(chosen_text)}, s.speed: {s.speed})"
+                )
+                
+            return batch
 
         def handle_error(batch: List) -> List:
             return batch

@@ -90,7 +90,7 @@ class HLSManager:
                 # Update Supabase task status to error
                 if self.supabase_client:
                     try:
-                        await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"HLS管理器初始化失败: {e}"})
+                        asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"HLS管理器初始化失败: {e}"}))
                     except Exception as db_update_e:
                         self.logger.error(f"任务 {task_id}: 更新数据库状态失败 (HLS创建失败时): {db_update_e}")
 
@@ -210,9 +210,9 @@ class HLSManager:
                 if was_first_segment and manager["has_segments"] and self.supabase_client:
                     hls_relative_path = f"playlists/{task_id}/{task_paths.playlist_path.name}"
                     try:
-                        await self.supabase_client.update_task(task_id, {
+                        asyncio.create_task(self.supabase_client.update_task(task_id, {
                             'hls_playlist_url': hls_relative_path,
-                        })
+                        }))
                         self.logger.info(f"[{task_id}] HLS播放列表URL已由HLSManager更新到数据库: {hls_relative_path}")
                     except Exception as update_e:
                         self.logger.error(f"[{task_id}] HLSManager更新HLS播放列表URL到数据库失败: {update_e}")
@@ -330,7 +330,7 @@ class HLSManager:
             self.logger.error(f"[{task_id}] {msg}")
             if self.supabase_client:
                 try:
-                    await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
+                    asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg}))
                 except Exception as db_update_e:
                     self.logger.error(f"[{task_id}] HLSManager: 更新数据库状态(无片段)失败: {db_update_e}")
             return {"status": "error", "message": msg}
@@ -360,7 +360,7 @@ class HLSManager:
                 self.logger.error(f"[{task_id}] {msg}")
                 if self.supabase_client:
                     try:
-                        await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
+                        asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg}))
                     except Exception as db_update_e:
                          self.logger.error(f"[{task_id}] HLSManager: 更新数据库状态(合并失败)失败: {db_update_e}")
                 return {"status": "error", "message": msg}
@@ -371,11 +371,11 @@ class HLSManager:
             
             if self.supabase_client:
                 try:
-                    await self.supabase_client.update_task(task_id, {
+                    asyncio.create_task(self.supabase_client.update_task(task_id, {
                         'status': 'success',
                         'download_video_path': final_video_path_str,
-                    })
-                    self.logger.info(f"[{task_id}] HLSManager: 任务状态成功，下载路径已更新到数据库。")
+                    }))
+                    self.logger.info(f"[{task_id}] HLSManager: 任务状态成功，下载路径已异步更新到数据库。")
                 except Exception as db_update_e:
                     self.logger.error(f"[{task_id}] HLSManager: 更新数据库状态(成功)失败: {db_update_e}")
                     # 即使数据库更新失败，合并本身是成功的，所以仍然返回成功
@@ -389,7 +389,7 @@ class HLSManager:
             self.logger.exception(f"[{task_id}] {msg}") # Log with stack trace
             if self.supabase_client:
                 try:
-                    await self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg})
+                    asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': msg}))
                 except Exception as db_update_e:
                     self.logger.error(f"[{task_id}] HLSManager: 更新数据库状态(合并异常)失败: {db_update_e}")
             return {"status": "error", "message": msg} 

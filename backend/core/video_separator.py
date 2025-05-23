@@ -110,10 +110,10 @@ class VideoSeparator:
                 self.logger.error("音频增强失败")
                 # 更新任务状态
                 if task_id:
-                    await self.supabase_client.update_task(task_id, {
+                    asyncio.create_task(self.supabase_client.update_task(task_id, {
                         'status': 'error', 
                         'error_message': 'Video separation failed or no vocals detected'
-                    })
+                    }))
                 return {}
 
             # (2.1) 处理背景音频：直接使用 _normalize_and_resample 方法处理文件
@@ -161,8 +161,11 @@ class VideoSeparator:
 
             # 更新媒体文件路径到数据库
             if task_id:
-                await self.supabase_client.update_task(task_id, media_files)
-                self.logger.info(f"[{task_id}] 已更新媒体文件路径到数据库")
+                try:
+                    asyncio.create_task(self.supabase_client.update_task(task_id, media_files))
+                    self.logger.info(f"[{task_id}] 已异步更新媒体文件路径到数据库")
+                except Exception as e:
+                    self.logger.warning(f"[{task_id}] 更新媒体文件路径到数据库失败: {e}")
             
             self.logger.debug(f"separate_video 完成，耗时 {time.time() - start_time:.2f}s")
             return media_files
@@ -171,10 +174,13 @@ class VideoSeparator:
             self.logger.error(f"separate_video 执行出错，耗时 {time.time() - start_time:.2f}s, 错误: {e}")
             # 更新错误状态到数据库
             if task_id:
-                await self.supabase_client.update_task(task_id, {
-                    'status': 'error', 
-                    'error_message': f"Video separation error: {e}"
-                })
+                try:
+                    asyncio.create_task(self.supabase_client.update_task(task_id, {
+                        'status': 'error', 
+                        'error_message': f"Video separation error: {e}"
+                    }))
+                except Exception as e2:
+                    self.logger.warning(f"[{task_id}] 更新错误状态到数据库失败: {e2}")
             raise
         finally:
             # 清理 GPU 缓存

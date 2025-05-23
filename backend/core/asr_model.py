@@ -82,10 +82,10 @@ class ASRModel:
             if not sentences or len(sentences) == 0:
                 self.logger.info(f"[{task_id}] ASR没有检测到语音")
                 if task_id:
-                    await self.supabase_client.update_task(task_id, {
+                    asyncio.create_task(self.supabase_client.update_task(task_id, {
                         'status': 'preprocessed', 
                         'error_message': 'ASR did not detect speech'
-                    })
+                    }))
                 return []
                 
             # 存储句子到数据库
@@ -93,10 +93,10 @@ class ASRModel:
                 response = await self.supabase_client.store_sentences(sentences, task_id)
                 if not response or not response.data:
                     self.logger.error(f"[{task_id}] 存储句子到Supabase失败")
-                    await self.supabase_client.update_task(task_id, {
+                    asyncio.create_task(self.supabase_client.update_task(task_id, {
                         'status': 'error', 
                         'error_message': 'Failed to store ASR sentences'
-                    })
+                    }))
                     return []
                     
                 # 更新任务状态为预处理完成

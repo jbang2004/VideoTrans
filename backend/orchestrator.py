@@ -44,7 +44,7 @@ class MainOrchestrator:
         Orchestrates the preprocessing steps (formerly PreEngine logic).
         """
         self.logger.info(f"[{task_id}] Orchestrator: Starting preprocessing for video: {video_path}, lang: {target_language}, subtitles: {generate_subtitle}")
-        await self.supabase_client.update_task(task_id, {'status': 'preprocessing'})
+        asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'preprocessing'}))
         seg_start_time = time.time()
         
         try:
@@ -62,10 +62,10 @@ class MainOrchestrator:
             
             if not separated_media or "vocals_audio_path" not in separated_media or not Path(separated_media["vocals_audio_path"]).exists():
                 self.logger.warning(f"[{task_id}] Orchestrator: Video separation failed or no vocals detected.")
-                await self.supabase_client.update_task(task_id, {
+                asyncio.create_task(self.supabase_client.update_task(task_id, {
                     'status': 'error',
                     'error_message': 'Video separation failed or no vocals detected'
-                })
+                }))
                 return {"status": "error", "message": "Video separation failed or no vocals detected"}
             
             self.logger.info(f"[{task_id}] Orchestrator: Video separation completed.")
@@ -88,15 +88,15 @@ class MainOrchestrator:
                 return {"status": "preprocessed", "message": "Preprocessing finished (no speech detected)"} # Match PreEngine's original success response
 
             self.logger.info(f"[{task_id}] Orchestrator: Preprocessing completed successfully with {len(sentences)} sentences.")
-            await self.supabase_client.update_task(task_id, {'status': 'preprocessed'})
+            asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'preprocessed'}))
             return {"status": "preprocessed", "message": "Preprocessing finished successfully"} # Match PreEngine
 
         except Exception as e:
             self.logger.exception(f"[{task_id}] Orchestrator: Error during preprocessing: {e}")
-            await self.supabase_client.update_task(task_id, {
+            asyncio.create_task(self.supabase_client.update_task(task_id, {
                 'status': 'error',
                 'error_message': f"Error during preprocessing: {e}"
-            })
+            }))
             return {"status": "error", "message": f"Error during preprocessing: {e}"}
         finally:
             self._clean_memory() # Keep memory cleaning practice
@@ -105,12 +105,15 @@ class MainOrchestrator:
     async def run_translation_pipeline(self, task_id: str):
         try:
             task_paths = TaskPaths(self.config, task_id)
+            # 获取目标语言
+            task_data = await self.supabase_client.get_task(task_id)
+            target_language = task_data.get('target_language')
             hls_init_response = await self.hls_manager_handle.create_manager.remote(task_id, task_paths)
             if not (isinstance(hls_init_response, dict) and hls_init_response.get("status") == "success"):
                 self.logger.error(f"[{task_id}] HLS manager init failed: {hls_init_response}")
                 return {"status": "error", "message": f"HLS init failed: {hls_init_response}"}
 
-            segment_paths = await self._execute_tts_mixing_pipeline(task_id, task_paths)
+            segment_paths = await self._execute_tts_mixing_pipeline(task_id, task_paths, target_language)
             result = await self._finalize_hls_and_merge(task_id, segment_paths, task_paths)
             return result
         except Exception as e:
@@ -119,7 +122,36 @@ class MainOrchestrator:
         finally:
             self._clean_memory()
 
-    async def _execute_tts_mixing_pipeline(self, task_id: str, task_paths: TaskPaths) -> List[str]:
+    async def run_subtitle_translation_pipeline(self, task_id: str, target_language: str):
+        """
+        Orchestrates subtitle translation only.
+        """
+        start_time = time.time()
+        self.logger.warning(f"[{task_id}] 开始字幕翻译")
+        try:
+            # translate_sentences 会自行更新任务状态为 'translating'
+            async for translated_batch in self.translator_handle.translate_sentences.remote(
+                task_id=task_id,
+                target_language=target_language,
+                batch_size=int(self.config.TRANSLATION_BATCH_SIZE)
+            ):
+                if not translated_batch:
+                    self.logger.warning(f"[{task_id}] Orchestrator: Translator returned an empty batch.")
+                    continue
+                self.logger.info(f"[{task_id}] Orchestrator: Subtitle translation batch completed with {len(translated_batch)} sentences.")
+                self._clean_memory()
+            # 更新任务状态为字幕翻译完成
+            asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'translated'}))
+            self.logger.info(f"[{task_id}] Orchestrator: Subtitle translation completed in {time.time() - start_time:.2f}s.")
+            return {"status": "success", "message": "字幕翻译完成"}
+        except Exception as e:
+            self.logger.exception(f"[{task_id}] Orchestrator: Subtitle translation pipeline error: {e}")
+            asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"Subtitle translation error: {e}"}))
+            return {"status": "error", "message": f"Subtitle translation failed: {e}"}
+        finally:
+            self._clean_memory()
+
+    async def _execute_tts_mixing_pipeline(self, task_id: str, task_paths: TaskPaths, target_language: str) -> List[str]:
         """Helper for the main TTS and mixing flow."""
         added_hls_segments = 0
         start_time = time.time()
@@ -132,6 +164,7 @@ class MainOrchestrator:
             # and individual sentence translations.
             async for translated_batch in self.translator_handle.translate_sentences.remote(
                 task_id=task_id,
+                target_language=target_language,
                 batch_size=int(self.config.TRANSLATION_BATCH_SIZE) # Ensure it's int
             ):
                 if not translated_batch:
