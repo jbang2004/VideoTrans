@@ -69,27 +69,14 @@ class SupabaseClient:
                 raise
         return self.client
 
+    @retry_on()
     async def store_task(self, task_data):
-        """存储任务信息（遇到连接断开时重试）"""
-        try:
-            client = await self._ensure_client()
-            response = await client.table('tasks').insert(task_data).execute()
-            # 使用数据库返回的 task_id
-            new_id = response.data[0].get('task_id') if response.data else None
-            logger.info(f"存储任务 {new_id} 成功，响应数量: {len(response.data) if response.data else 0}")
-            return response
-        except httpx.ConnectError as ce:
-            logger.warning(f"存储任务 {task_data.get('task_id')} 时连接断开，重试一次: {ce}")
-            self.client = None
-            client = await self._ensure_client()
-            response = await client.table('tasks').insert(task_data).execute()
-            # 使用数据库返回的 task_id
-            retry_id = response.data[0].get('task_id') if response.data else None
-            logger.info(f"重试存储任务 {retry_id} 成功")
-            return response
-        except Exception as e:
-            logger.error(f"存储任务 {task_data.get('task_id')} 失败: {e}", exc_info=True)
-            return None
+        """存储任务信息（遇到连接断开或超时重试一次）"""
+        client = await self._ensure_client()
+        response = await client.table('tasks').insert(task_data).execute()
+        new_id = response.data[0].get('task_id') if response.data else None
+        logger.info(f"存储任务 {new_id} 成功，响应数量: {len(response.data) if response.data else 0}")
+        return response
 
     @retry_on()
     async def update_task(self, task_id, update_data):
@@ -111,6 +98,7 @@ class SupabaseClient:
             logger.error(f"获取任务 {task_id} 异常: {e}", exc_info=True)
             raise
 
+    @retry_on()
     async def store_sentences(self, sentences, task_id):
         """批量存储句子信息"""
         if not sentences:
@@ -153,14 +141,7 @@ class SupabaseClient:
 
             # 执行数据库插入
             if json_sentences:
-                try:
-                    response = await client.table('sentences').insert(json_sentences).execute()
-                except httpx.ConnectError as ce:
-                    logger.warning(f"存储句子 {task_id} 时连接断开，重试一次: {ce}")
-                    self.client = None
-                    client = await self._ensure_client()
-                    response = await client.table('sentences').insert(json_sentences).execute()
-                    logger.info(f"重试存储 {len(json_sentences)} 个句子到任务 {task_id} 成功")
+                response = await client.table('sentences').insert(json_sentences).execute()
                 logger.info(f"存储 {len(json_sentences)} 个句子到任务 {task_id}，响应数量: {len(response.data) if response.data else 0}")
                 return response
             else:
@@ -169,10 +150,10 @@ class SupabaseClient:
                 
         except AttributeError as ae:
             logger.error(f"处理句子属性时出错 (任务 {task_id}): {ae}", exc_info=True)
-            return None
+            raise
         except Exception as e:
             logger.error(f"存储句子失败 (任务 {task_id}): {e}", exc_info=True)
-            return None
+            raise
 
     @retry_on()
     async def get_sentences(self, task_id, as_objects=False):
@@ -211,6 +192,7 @@ class SupabaseClient:
         logger.info(f"get_sentences: 成功转换 {len(sentences)} 个句子 (任务 {task_id})")
         return sentences
 
+    @retry_on()
     async def update_sentence_translation(self, task_id: str, sentence_index: int, trans_text: str):
         """更新单个句子的翻译文本"""
         try:
@@ -230,7 +212,8 @@ class SupabaseClient:
             return response
         except Exception as e:
             logger.error(f"更新句子翻译 {task_id}-{sentence_index} 异常: {e}", exc_info=True)
-            return None 
+            # 抛出异常以触发重试逻辑
+            raise
 
     @retry_on()
     async def get_video(self, video_id):
@@ -256,10 +239,11 @@ class SupabaseClient:
         client = await self._ensure_client()
         return await client.storage.from_(bucket_name).download(storage_path)
 
+    @retry_on()
     async def upload_file(self, bucket_name: str, storage_path: str, file_bytes: bytes):
         """上传文件到 Supabase 存储"""
         client = await self._ensure_client()
-        return await client.storage.from_(bucket_name).upload(storage_path, file_bytes) 
+        return await client.storage.from_(bucket_name).upload(storage_path, file_bytes)
 
     @retry_on()
     async def clear_sentence_translations(self, task_id: str):

@@ -102,23 +102,86 @@ class MainOrchestrator:
             self._clean_memory() # Keep memory cleaning practice
             self.logger.info(f"[{task_id}] Orchestrator: Preprocessing operations took: {time.time() - seg_start_time:.2f}s")
 
-    async def run_translation_pipeline(self, task_id: str):
+    async def run_tts_pipeline(self, task_id: str):
+        """Orchestrates TTS conversion and HLS segment generation."""
+        start_time = time.time()
+        self.logger.info(f"[{task_id}] Orchestrator: 开始 TTS 流程")
+        task_paths = TaskPaths(self.config, task_id)
         try:
-            task_paths = TaskPaths(self.config, task_id)
-            # 获取目标语言
-            task_data = await self.supabase_client.get_task(task_id)
-            target_language = task_data.get('target_language')
+            # Initialize HLS manager
             hls_init_response = await self.hls_manager_handle.create_manager.remote(task_id, task_paths)
             if not (isinstance(hls_init_response, dict) and hls_init_response.get("status") == "success"):
-                self.logger.error(f"[{task_id}] HLS manager init failed: {hls_init_response}")
+                self.logger.error(f"[{task_id}] HLS 管理器初始化失败: {hls_init_response}")
                 return {"status": "error", "message": f"HLS init failed: {hls_init_response}"}
+            added_hls_segments = 0
+            current_audio_time_ms = 0.0
+            processed_segment_paths = []
+            batch_counter = 0
 
-            segment_paths = await self._execute_tts_mixing_pipeline(task_id, task_paths, target_language)
-            result = await self._finalize_hls_and_merge(task_id, segment_paths, task_paths)
+            # Generate audio stream and process
+            async for tts_sentence_batch in self.my_index_tts_handle.generate_audio_stream.remote(task_id):
+                if not tts_sentence_batch:
+                    continue
+                # Duration alignment
+                aligned_batch = await self.duration_aligner_handle.remote(tts_sentence_batch, max_speed=1.2)
+                if not aligned_batch:
+                    continue
+                # Timestamp adjustment
+                adjusted_batch = await self.timestamp_adjuster_handle.remote(
+                    aligned_batch,
+                    self.config.TARGET_SR,
+                    current_audio_time_ms
+                )
+                if not adjusted_batch:
+                    continue
+                # Update current_audio_time_ms
+                last_sentence = adjusted_batch[-1]
+                current_audio_time_ms = last_sentence.adjusted_start + last_sentence.adjusted_duration
+
+                # Media mixing
+                output_segment_path = await self.media_mixer_handle.mix_media.remote(
+                    sentences_batch=adjusted_batch,
+                    task_paths=task_paths,
+                    batch_counter=batch_counter,
+                    task_id=task_id
+                )
+                if not output_segment_path:
+                    self.logger.warning(f"[{task_id}] 媒体混合失败，跳过批次 {batch_counter}")
+                    continue
+
+                # Add HLS segment
+                hls_add_result = await self.hls_manager_handle.add_segment.remote(
+                    task_id,
+                    output_segment_path,
+                    batch_counter + 1
+                )
+                if hls_add_result and hls_add_result.get("status") == "success":
+                    added_hls_segments += 1
+                    processed_segment_paths.append(output_segment_path)
+                    batch_counter += 1
+                    self.logger.info(f"[{task_id}] 添加 HLS 段 {batch_counter} 成功")
+                else:
+                    err_msg = hls_add_result.get('message') if hls_add_result else 'Unknown HLS add error'
+                    self.logger.error(f"[{task_id}] 添加 HLS 段失败: {err_msg}")
+                self._clean_memory()
+
+            self.logger.info(f"[{task_id}] Orchestrator: TTS 完成，用时 {time.time() - start_time:.2f}s，生成段数 {added_hls_segments}")
+            # Finalize HLS and merge
+            result = await self.hls_manager_handle.finalize_merge.remote(
+                task_id=task_id,
+                all_processed_segment_paths=processed_segment_paths,
+                task_paths=task_paths
+            )
+            if result and result.get("status") == "success":
+                self.logger.info(f"[{task_id}] HLSManager 最终化成功: {result.get('output_path', 'N/A')}")
+            else:
+                err_msg = result.get('message') if result else 'Invalid finalize result'
+                self.logger.error(f"[{task_id}] HLSManager 最终化失败: {err_msg}")
+                return {"status": "error", "message": err_msg}
             return result
         except Exception as e:
-            self.logger.exception(f"[{task_id}] Translation pipeline failed: {e}")
-            return {"status": "error", "message": f"Translation failed: {e}"}
+            self.logger.exception(f"[{task_id}] Orchestrator: TTS 流程失败: {e}")
+            return {"status": "error", "message": f"TTS pipeline failed: {e}"}
         finally:
             self._clean_memory()
 
@@ -150,113 +213,6 @@ class MainOrchestrator:
             return {"status": "error", "message": f"Subtitle translation failed: {e}"}
         finally:
             self._clean_memory()
-
-    async def _execute_tts_mixing_pipeline(self, task_id: str, task_paths: TaskPaths, target_language: str) -> List[str]:
-        """Helper for the main TTS and mixing flow."""
-        added_hls_segments = 0
-        start_time = time.time()
-        current_audio_time_ms = 0.0  # Tracks the end time of the last processed audio segment in milliseconds
-        processed_segment_paths = [] # Store paths of successfully mixed .mp4 segments
-        batch_counter = 0
-
-        try:
-            # Translator's translate_sentences handles its own Supabase updates for task status ('translating')
-            # and individual sentence translations.
-            async for translated_batch in self.translator_handle.translate_sentences.remote(
-                task_id=task_id,
-                target_language=target_language,
-                batch_size=int(self.config.TRANSLATION_BATCH_SIZE) # Ensure it's int
-            ):
-                if not translated_batch:
-                    self.logger.warning(f"[{task_id}] Orchestrator: Translator returned an empty batch.")
-                    continue
-                
-                # TTS (MyIndexTTSDeployment's generate_audio_stream)
-                async for tts_sentence_batch in self.my_index_tts_handle.generate_audio_stream.remote(translated_batch):
-                    if not tts_sentence_batch:
-                        continue
-
-                    # Duration Alignment (DurationAligner)
-                    aligned_batch = await self.duration_aligner_handle.remote(tts_sentence_batch, max_speed=1.2)
-                    if not aligned_batch:
-                        continue
-                    
-                    # Timestamp Adjustment (TimestampAdjuster)
-                    adjusted_batch = await self.timestamp_adjuster_handle.remote(
-                        aligned_batch,
-                        self.config.TARGET_SR,
-                        current_audio_time_ms # Pass current end time
-                    )
-                    if not adjusted_batch:
-                        continue
-                    
-                    # Update current_audio_time_ms for the next batch
-                    # It's the adjusted_start of the last sentence + its adjusted_duration
-                    if adjusted_batch:
-                        last_sentence_in_batch = adjusted_batch[-1]
-                        current_audio_time_ms = last_sentence_in_batch.adjusted_start + last_sentence_in_batch.adjusted_duration
-
-                    # Media Mixing (MediaMixer)
-                    # MediaMixer's mix_media handles its own Supabase updates for task status ('mixing') on first batch.
-                    # It needs task_paths for media locations.
-                    output_segment_path = await self.media_mixer_handle.mix_media.remote(
-                         sentences_batch=adjusted_batch, # Pass the processed batch
-                         task_paths=task_paths,
-                         batch_counter=batch_counter,
-                         task_id=task_id
-                     )
-                    if not output_segment_path:
-                        self.logger.warning(f"[{task_id}] Orchestrator: Media mixing failed for batch {batch_counter}, skipping.")
-                        continue
-                    
-                    # Add mixed segment to HLS (HLSManager)
-                    # HLSManager's add_segment handles its own Supabase updates for hls_playlist_url on first segment.
-                    hls_add_result = await self.hls_manager_handle.add_segment.remote(
-                        task_id,
-                        output_segment_path, # Path to the .mp4 segment from MediaMixer
-                        batch_counter + 1 # part_index for HLS
-                    )
-
-                    if hls_add_result and hls_add_result.get("status") == "success":
-                        added_hls_segments += 1
-                        processed_segment_paths.append(output_segment_path)
-                        batch_counter += 1
-                        self.logger.info(f"[{task_id}] Orchestrator: HLS segment {batch_counter} added successfully.")
-                    else:
-                        error_msg = hls_add_result.get('message') if hls_add_result else 'Unknown HLS add error'
-                        self.logger.error(f"[{task_id}] Orchestrator: Failed to add HLS segment: {error_msg}")
-                        # Decide if this is a fatal error for the whole pipeline or if we can continue
-
-                    self._clean_memory() # Clean memory per batch
-
-            self.logger.info(f"[{task_id}] Orchestrator: TTS-Mixing pipeline completed. Duration: {time.time() - start_time:.2f}s, Added HLS segments: {added_hls_segments}")
-            return processed_segment_paths
-
-        except Exception as e:
-            self.logger.exception(f"[{task_id}] Orchestrator: Exception in TTS-Mixing pipeline: {e}")
-            return [] # Return empty list on failure
-
-    async def _finalize_hls_and_merge(self, task_id: str, merged_segments_paths: List[str], task_paths: TaskPaths) -> Dict:
-        """Helper to finalize HLS playlist and merge video segments."""
-        self.logger.info(f"[{task_id}] Orchestrator: Requesting HLSManager to finalize task, {len(merged_segments_paths)} segments.")
-        
-        # HLSManager's finalize_merge handles its own Supabase updates
-        # for final status and download_video_path.
-        result = await self.hls_manager_handle.finalize_merge.remote(
-            task_id=task_id,
-            all_processed_segment_paths=merged_segments_paths,
-            task_paths=task_paths
-        )
-
-        if result and result.get("status") == "success":
-            self.logger.info(f"[{task_id}] Orchestrator: HLSManager successfully finalized task. Output: {result.get('output_path', 'N/A')}")
-        elif result:
-            self.logger.error(f"[{task_id}] Orchestrator: HLSManager reported task finalization failure. Message: {result.get('message', 'Unknown error')}")
-        else:
-            self.logger.error(f"[{task_id}] Orchestrator: HLSManager returned invalid or no response for finalization.")
-            return {"status": "error", "message": "Orchestrator: HLSManager failed to process finalization or returned invalid response"}
-        
-        return result
 
     def _clean_memory(self):
         gc.collect()

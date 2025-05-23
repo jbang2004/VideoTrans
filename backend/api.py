@@ -73,11 +73,6 @@ class VideoTransAPI:
             self.logger.error(f"VideoTransAPI initialization failed: {e}", exc_info=True)
             raise RuntimeError(f"VideoTransAPI cannot connect to MainOrchestrator: {e}")
 
-    @app.get("/")
-    async def index(self, request: Request):
-        """首页"""
-        return templates.TemplateResponse("index.html", {"request": request})
-
     @app.post("/api/preprovideo")
     async def preprovideo(self, videoId: str = Body(..., embed=True)):
         """
@@ -147,160 +142,6 @@ class VideoTransAPI:
             "message": "预处理已开始"
         })
 
-    # @app.get("/task/{task_id}")
-    # async def get_task_status(self, task_id: str):
-    #     """获取任务状态"""
-    #     try:
-    #         # 使用Supabase客户端获取任务状态
-    #         task = await self.supabase_client.get_task(task_id)
-            
-    #         if not task:
-    #             return JSONResponse(content={
-    #                 "status": "error",
-    #                 "message": "任务不存在",
-    #                 "progress": 0
-    #             })
-            
-    #         # 根据任务状态计算进度
-    #         progress = 0
-    #         status = task.get('status', 'unknown')
-            
-    #         # 两阶段流程进度映射
-    #         if status == 'preprocessing':
-    #             progress = 10
-    #         elif status == 'preprocessed':
-    #             progress = 40
-    #         elif status == 'translating':
-    #             progress = 50
-    #         elif status == 'mixing':
-    #             progress = 85
-    #         elif status == 'success':
-    #             progress = 100
-            
-    #         response_data = {
-    #             "status": status,
-    #             "message": task.get('error_message', '处理中') if status == 'error' else '处理中',
-    #             "progress": progress,
-    #             "hls_ready": False
-    #         }
-            
-    #         # 只要 hls_playlist_url 存在，就认为 HLS 已就绪
-    #         if task.get('hls_playlist_url'):
-    #             response_data["hls_url"] = task.get('hls_playlist_url')
-    #             response_data["hls_ready"] = True
-            
-    #         # 如果状态为成功，更新消息并添加下载链接
-    #         if status == 'success':
-    #             response_data["message"] = "处理完成"
-    #             response_data["download_url"] = f"/download/{task_id}"
-            
-    #         return JSONResponse(content=response_data)
-            
-    #     except Exception as e:
-    #         self.logger.error(f"获取任务状态失败: {str(e)}", exc_info=True)
-    #         return JSONResponse(content={
-    #             "status": "error",
-    #             "message": f"获取状态失败: {str(e)}",
-    #             "progress": 0
-    #         })
-
-    @app.get("/playlists/{task_id}/{filename}")
-    async def serve_playlist(self, task_id: str, filename: str):
-        """提供HLS播放列表"""
-        try:
-            # 修改路径，使用task_id子目录
-            playlist_path = config.PUBLIC_DIR / "playlists" / task_id / filename
-            if not playlist_path.exists():
-                # 尝试不带task_id的路径（向后兼容）
-                playlist_path = config.PUBLIC_DIR / "playlists" / filename
-                if not playlist_path.exists():
-                    logger.error(f"播放列表未找到: {playlist_path}")
-                    raise HTTPException(status_code=404, detail="播放列表未找到")
-            
-            logger.info(f"提供播放列表: {playlist_path}")
-            async with aiofiles.open(playlist_path, mode='rb') as f:
-                content = await f.read()
-                
-            return Response(
-                content=content,
-                media_type='application/vnd.apple.mpegurl',
-                headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-                "Access-Control-Allow-Origin": "*"
-            }
-            )
-        except Exception as e:
-            logger.error(f"服务播放列表失败: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/segments/{task_id}/{filename}")
-    async def serve_segments(self, task_id: str, filename: str):
-        """提供HLS视频片段"""
-        try:
-            segment_path = config.PUBLIC_DIR / "segments" / task_id / filename
-            if not segment_path.exists():
-                logger.error(f"片段文件未找到: {segment_path}")
-                raise HTTPException(status_code=404, detail="片段文件未找到")
-            
-            # 使用StreamingResponse而非静态文件
-            return StreamingResponse(
-                open(segment_path, mode="rb"),
-                media_type='video/MP2T',
-                headers={
-                    "Cache-Control": "no-cache, no-store, must-revalidate",
-                    "Pragma": "no-cache",
-                    "Expires": "0",
-                    "Access-Control-Allow-Origin": "*"
-                }
-            )
-        except Exception as e:
-            logger.error(f"服务视频片段失败: {str(e)}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-    @app.get("/download/{task_id}")
-    async def download_translated_video(self, task_id: str):
-        """下载翻译后的视频"""
-        final_video_path = config.TASKS_DIR / task_id / "output" / f"final_{task_id}.mp4"
-        if not final_video_path.exists():
-            raise HTTPException(status_code=404, detail="最终视频文件尚未生成或已被删除")
-        return FileResponse(
-            str(final_video_path),
-            media_type='video/mp4',
-            filename=f"final_{task_id}.mp4",
-        )
-
-    # @app.post("/translate/{task_id}")
-    # async def translate_video(self, task_id: str):
-    #     """触发翻译与合成流水线"""
-    #     try:
-    #         # 获取任务信息，确保预处理已完成
-    #         task = await self.supabase_client.get_task(task_id)
-    #         if not task:
-    #             raise HTTPException(status_code=404, detail="任务不存在。")
-    #         current_status = task.get('status')
-    #         if current_status != 'preprocessed':
-    #             raise HTTPException(status_code=400, detail=f"任务状态为 '{current_status}'。仅当状态为 'preprocessed' 时才能开始翻译。")
-
-    #         # Dispatch to MainOrchestrator
-    #         self.orchestrator_handle.run_translation_pipeline.remote(task_id)
-    #         self.logger.info(f"成功触发 MainOrchestrator for translation: {task_id}")
-
-    #         # 更新状态
-    #         await self.supabase_client.update_task(task_id, {'status': 'translating'})
-
-    #         return JSONResponse(content={
-    #             'status': 'translating',
-    #             'task_id': task_id,
-    #             'message': '翻译与合成已开始'
-    #         })
-    #     except HTTPException as e:
-    #         raise e
-    #     except Exception as e:
-    #         self.logger.error(f"调用 MainOrchestrator for translation 失败: {str(e)}", exc_info=True)
-    #         raise HTTPException(status_code=500, detail=f"无法开始翻译: {e}")
-
     @app.post("/api/translate_subtitles")
     async def translate_subtitles(self, task_id: str = Body(...), target_language: str = Body(...)):
         """触发字幕翻译流程"""
@@ -323,18 +164,21 @@ class VideoTransAPI:
             self.logger.error(f"调用字幕翻译 Orchestrator 失败: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"无法开始字幕翻译: {e}")
 
-# 静态文件挂载
-app.mount("/playlists", 
-    StaticFiles(directory=str(config.PUBLIC_DIR / "playlists"), 
-    check_dir=True), 
-    name="playlists")
-
-app.mount("/segments", 
-    StaticFiles(
-        directory=str(config.PUBLIC_DIR / "segments"), 
-        check_dir=True
-    ), 
-    name="segments")
+    @app.post("/api/tts")
+    async def tts(self, task_id: str = Body(..., embed=True)):
+        """触发 TTS 合成流程"""
+        try:
+            task = await self.supabase_client.get_task(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="任务不存在")
+            await self.supabase_client.update_task(task_id, {'status': 'tts'})
+            self.orchestrator_handle.run_tts_pipeline.remote(task_id)
+            return JSONResponse(content={'status': 'tts', 'task_id': task_id, 'message': 'TTS 合成已开始'})
+        except HTTPException as e:
+            raise e
+        except Exception as e:
+            self.logger.error(f"触发 TTS 失败: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"无法触发 TTS: {e}")
 
 def setup_server():
     """初始化Ray Serve服务器，部署API服务"""

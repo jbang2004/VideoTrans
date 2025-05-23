@@ -44,7 +44,7 @@ def main():
     logger.info(f"Ray initialized: {ray.get_runtime_context().gcs_address if ray.is_initialized() else 'Failed'}")
 
     serve.start(
-        detached=True,  # Run Serve in the background
+        detached=False,  # Run Serve in the background
         http_options={"host": "0.0.0.0", "port": 8000}
     )
     logger.info("Ray Serve started on port 8000.")

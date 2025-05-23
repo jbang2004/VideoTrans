@@ -183,7 +183,10 @@ class Translator:
                 if len(translated_texts) == len(texts):
                     # 继续更新数据库和句子对象
                     for j, sentence in enumerate(batch):
-                        sentence.trans_text = translated_texts[str(j)]
+                        orig = sentence.raw_text
+                        trans = translated_texts[str(j)]
+                        self.logger.info(f"[{task_id}] 翻译: 原文: \"{orig}\" => 译文: \"{trans}\"")
+                        sentence.trans_text = trans
                         await self.supabase_client.update_sentence_translation(
                             task_id,
                             sentence.sentence_id,
