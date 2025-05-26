@@ -93,7 +93,7 @@ class Config:
     WEAK_END_TOKENS = {9686, 9728, 24879}
     SPEAKER_AUDIO_TARGET_DURATION = 20.0
     SPEAKER_AUDIO_MIN_DURATION = 5.0  # 最短音频持续时间（秒）
-    TRANSLATION_BATCH_SIZE = 50
+    SIMPLIFICATION_BATCH_SIZE = 50
     TTS_BATCH_SIZE = 3
     # 控制同时处理多少个视频分段
     MAX_PARALLEL_SEGMENTS = 2
@@ -101,7 +101,7 @@ class Config:
     # Actor资源配置
     CLEARVOICE_ACTOR_NUM_GPUS = 0.2  # 音频分离器
     ASR_ACTOR_NUM_GPUS = 0.2  # ASR模型
-    TRANSLATOR_ACTOR_NUM_CPUS = 0.5  # 翻译Actor（CPU密集）
+    SIMPLIFIER_ACTOR_NUM_CPUS = 0.5  # 简化Actor（CPU密集）
     MODELIN_ACTOR_NUM_CPUS = 0.5  # ModelIn处理Actor（CPU密集）
     MEDIA_MIXER_ACTOR_NUM_CPUS = 0.5  # 媒体混合Actor（CPU密集）
 

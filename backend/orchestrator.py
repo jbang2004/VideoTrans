@@ -30,7 +30,7 @@ class MainOrchestrator:
 
         self.video_separator_handle: DeploymentHandle = serve.get_deployment_handle("video_separator", app_name="VideoSeparatorApp")
         self.asr_handle: DeploymentHandle = serve.get_deployment_handle("asr_model", app_name="ASRApp")
-        self.translator_handle: DeploymentHandle = serve.get_deployment_handle("translator", app_name="TranslatorApp").options(stream=True)
+
         self.my_index_tts_handle: DeploymentHandle = serve.get_deployment_handle("my_index_tts", app_name="TTSApp").options(stream=True)
         self.duration_aligner_handle: DeploymentHandle = serve.get_deployment_handle("duration_aligner", app_name="DurationAlignerApp")
         self.timestamp_adjuster_handle: DeploymentHandle = serve.get_deployment_handle("timestamp_adjuster", app_name="TimestampAdjusterApp")
@@ -185,34 +185,7 @@ class MainOrchestrator:
         finally:
             self._clean_memory()
 
-    async def run_subtitle_translation_pipeline(self, task_id: str, target_language: str):
-        """
-        Orchestrates subtitle translation only.
-        """
-        start_time = time.time()
-        self.logger.warning(f"[{task_id}] 开始字幕翻译")
-        try:
-            # translate_sentences 会自行更新任务状态为 'translating'
-            async for translated_batch in self.translator_handle.translate_sentences.remote(
-                task_id=task_id,
-                target_language=target_language,
-                batch_size=int(self.config.TRANSLATION_BATCH_SIZE)
-            ):
-                if not translated_batch:
-                    self.logger.warning(f"[{task_id}] Orchestrator: Translator returned an empty batch.")
-                    continue
-                self.logger.info(f"[{task_id}] Orchestrator: Subtitle translation batch completed with {len(translated_batch)} sentences.")
-                self._clean_memory()
-            # 更新任务状态为字幕翻译完成
-            asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'translated'}))
-            self.logger.info(f"[{task_id}] Orchestrator: Subtitle translation completed in {time.time() - start_time:.2f}s.")
-            return {"status": "success", "message": "字幕翻译完成"}
-        except Exception as e:
-            self.logger.exception(f"[{task_id}] Orchestrator: Subtitle translation pipeline error: {e}")
-            asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'error', 'error_message': f"Subtitle translation error: {e}"}))
-            return {"status": "error", "message": f"Subtitle translation failed: {e}"}
-        finally:
-            self._clean_memory()
+
 
     def _clean_memory(self):
         gc.collect()

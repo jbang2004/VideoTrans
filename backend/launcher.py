@@ -9,7 +9,7 @@ from config import Config, init_logging
 # Import necessary core actor classes
 from core.video_separator import VideoSeparator
 from core.asr_model import ASRModel
-from core.translation.translator import Translator # Assuming Translator is the class in translator.py
+from core.translation.simplifier import Simplifier
 from core.my_index_tts import MyIndexTTSDeployment
 from core.timeadjust.duration_aligner import DurationAligner
 from core.timeadjust.timestamp_adjuster import TimestampAdjuster
@@ -61,15 +61,10 @@ def main():
         serve.run(asr_app, name="ASRApp", route_prefix=None)
         logger.info("ASRApp deployed successfully.")
 
-        # Translator
-        translator_app = Translator.bind() # Assuming Translator class is directly in core.translation.translator
-        serve.run(translator_app, name="TranslatorApp", route_prefix=None)
-        logger.info("TranslatorApp deployed successfully.")
-        
-        # Simplifier (assuming it's part of Translator or a separate deployment if needed)
-        # For now, if simplifier is a mode of Translator, it's covered.
-        # If it's a distinct deployment that DurationAligner needs, we'd deploy it here.
-        # Let's assume DurationAligner will get its handle from the TranslatorApp for now.
+        # Simplifier
+        simplifier_app = Simplifier.bind()
+        serve.run(simplifier_app, name="SimplifierApp", route_prefix=None)
+        logger.info("SimplifierApp deployed successfully.")
 
         # MyIndexTTS
         my_index_tts_app = MyIndexTTSDeployment.bind(config) # MyIndexTTSDeployment takes config

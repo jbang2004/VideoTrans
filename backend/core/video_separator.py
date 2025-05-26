@@ -12,7 +12,7 @@ import os
 import soundfile as sf
 
 from utils.ffmpeg_utils import extract_audio, extract_video
-from models.ClearerVoice_Minimal.audio_enhancer import AudioEnhancer
+# from models.ClearerVoice_Minimal.audio_enhancer import AudioEnhancer  # 暂时注释用于测试
 from core.supabase_client import SupabaseClient
 
 @serve.deployment(
@@ -27,7 +27,7 @@ class VideoSeparator:
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"初始化视频分离器: {model_name}")
         # 初始化音频增强器，并立即加载模型
-        self.audio_enhancer = AudioEnhancer(model_name=model_name)
+        # self.audio_enhancer = AudioEnhancer(model_name=model_name)  # 暂时注释用于测试
         self.config = Config()
         self.supabase_client = SupabaseClient(config=self.config)
     
@@ -95,19 +95,32 @@ class VideoSeparator:
             except Exception as e:
                 self.logger.warning(f"原始音频归一化失败: {e}")
 
-            # (2) 使用 AudioEnhancer 实例进行音频分离和保存
-            self.logger.info(f"处理音频，生成人声和背景音轨")
+            # (2) 音频分离逻辑（暂时注释AudioEnhancer，直接复制原音频用于测试）
+            self.logger.info(f"处理音频，跳过增强，直接复制原音频作为人声和背景音轨")
             
-            # 使用已加载的模型，不需要再指定model_name
-            success = await asyncio.to_thread(
-                self.audio_enhancer.enhance_audio,
-                input_path=full_audio,
-                enhanced_path=vocals_audio,
-                noise_path=background_audio
-            )
+            # 暂时注释AudioEnhancer的使用，直接复制原音频
+            # success = await asyncio.to_thread(
+            #     self.audio_enhancer.enhance_audio,
+            #     input_path=full_audio,
+            #     enhanced_path=vocals_audio,
+            #     noise_path=background_audio
+            # )
+            
+            # 临时方案：直接复制原始音频作为人声和背景音频
+            try:
+                import shutil
+                # 复制原音频到人声文件
+                await asyncio.to_thread(shutil.copy2, full_audio, vocals_audio)
+                # 复制原音频到背景文件（模拟分离效果）
+                await asyncio.to_thread(shutil.copy2, full_audio, background_audio)
+                success = True
+                self.logger.info("已复制原音频到人声和背景音轨文件")
+            except Exception as e:
+                self.logger.error(f"复制音频文件失败: {e}")
+                success = False
             
             if not success:
-                self.logger.error("音频增强失败")
+                self.logger.error("音频处理失败")
                 # 更新任务状态
                 if task_id:
                     asyncio.create_task(self.supabase_client.update_task(task_id, {

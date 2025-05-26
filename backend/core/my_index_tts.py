@@ -4,7 +4,7 @@ import sys
 import logging
 import asyncio
 import gc
-from typing import List, AsyncGenerator, Optional
+from typing import List, AsyncGenerator, Optional, Union
 
 import torch
 import numpy as np
@@ -71,21 +71,34 @@ class MyIndexTTSDeployment:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    async def generate_audio_stream(
-        self, task_id: str
-    ) -> AsyncGenerator[List, None]:
+    async def generate_audio_stream(self, input_data: Union[str, List]) -> AsyncGenerator[List, None]:
         """
-        根据任务ID从数据库获取句子并生成音频按批次返回。
+        统一的音频生成方法，支持task_id或句子列表输入
+        
+        Args:
+            input_data: task_id (str) 或句子列表 (List)
         """
-        # Ensure Supabase client is initialized
-        await self.supabase_client.initialize()
-        # Fetch translated sentences from Supabase
-        sentences = await self.supabase_client.get_sentences(task_id, as_objects=True)
+        # 根据输入类型获取句子列表
+        if isinstance(input_data, str):
+            # 输入是task_id，从数据库获取句子
+            await self.supabase_client.initialize()
+            sentences = await self.supabase_client.get_sentences(input_data, as_objects=True)
+            task_id = input_data
+        elif isinstance(input_data, list):
+            # 输入是句子列表
+            sentences = input_data
+            task_id = getattr(sentences[0], 'task_id', 'unknown') if sentences else 'unknown'
+        else:
+            logger.error(f"TTS: 不支持的输入类型: {type(input_data)}")
+            return
+
         if not sentences:
             logger.warning(f"TTS: 任务 {task_id} 没有可处理的句子，跳过生成。")
             return
 
-        # Batch generation of audio
+        logger.info(f"TTS: 开始为 {len(sentences)} 个句子生成音频 (任务: {task_id})")
+
+        # 批量生成音频
         batch = []
         for sentence in sentences:
             try:
@@ -100,6 +113,7 @@ class MyIndexTTSDeployment:
             except Exception as e:
                 logger.error(f"TTS 错误：句子 {sentence.sentence_id}，{e}")
                 res = None
+            
             if res is None:
                 sentence.generated_audio = None
                 sentence.duration = 0.0
@@ -108,11 +122,14 @@ class MyIndexTTSDeployment:
                 wav_flat = wav_np.flatten().astype(np.float32) / 32767.0
                 sentence.generated_audio = wav_flat
                 sentence.duration = len(wav_flat) / sr * 1000
+            
             batch.append(sentence)
             if len(batch) >= self.batch_size:
                 yield batch
                 batch = []
+        
         if batch:
             yield batch
-        # Cleanup memory after batches
+        
+        # 清理内存
         self._clean_memory()

@@ -62,9 +62,6 @@ class VideoTransAPI:
         """初始化 API 服务，获取 MainOrchestrator 应用句柄"""
         self.logger = logger
         try:
-            # 获取主编排器句柄
-            # "MainOrchestratorDeployment" is the @serve.deployment name in orchestrator.py
-            # "MainOrchestratorApp" is the serve.run name in launcher.py
             self.orchestrator_handle = serve.get_deployment_handle("MainOrchestratorDeployment", app_name="MainOrchestratorApp")
             
             self.supabase_client = supabase_client
@@ -142,27 +139,7 @@ class VideoTransAPI:
             "message": "预处理已开始"
         })
 
-    @app.post("/api/translate_subtitles")
-    async def translate_subtitles(self, task_id: str = Body(...), target_language: str = Body(...)):
-        """触发字幕翻译流程"""
-        try:
-            task = await self.supabase_client.get_task(task_id)
-            if not task:
-                raise HTTPException(status_code=404, detail="任务不存在。")
-            # 每次请求都更新状态为 translating、存储目标语言并清空历史翻译
-            asyncio.create_task(self.supabase_client.update_task(task_id, {'status': 'translating', 'target_language': target_language}))
-            await self.supabase_client.clear_sentence_translations(task_id)
-            # 调用编排，仅传递 task_id 和目标语言
-            self.orchestrator_handle.run_subtitle_translation_pipeline.remote(task_id, target_language)
-            self.logger.info(f"成功触发字幕翻译 Orchestrator: {task_id}, target_language: {target_language}")
-            return JSONResponse(content={
-                'status': 'translating', 'task_id': task_id, 'message': '字幕翻译已开始'
-            })
-        except HTTPException as e:
-            raise e
-        except Exception as e:
-            self.logger.error(f"调用字幕翻译 Orchestrator 失败: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"无法开始字幕翻译: {e}")
+
 
     @app.post("/api/tts")
     async def tts(self, task_id: str = Body(..., embed=True)):
@@ -187,7 +164,7 @@ def setup_server():
         ray.init(address="auto", namespace="videotrans", ignore_reinit_error=True)
         logger.info("已连接到Ray集群")
 
-    # 检查预处理和翻译应用是否已部署
+    # 检查主编排器应用是否已部署
     try:
         serve.get_app_handle("MainOrchestratorApp")
         logger.info("成功连接到已部署的 MainOrchestratorApp 应用")

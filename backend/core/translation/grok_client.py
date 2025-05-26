@@ -26,7 +26,7 @@ class GrokClient:
         """
         执行一次 chat completion，请求返回 JSON 字符串，
         再解析为字典并返回。格式需包含 "output" 字段，
-        以供上层 Translator 使用。
+        以供上层 Simplifier 使用。
         """
         try:
             # 调用 OpenAI SDK（同步接口）放到线程池
