@@ -12,12 +12,13 @@ import os
 import soundfile as sf
 
 from utils.ffmpeg_utils import extract_audio, extract_video
-# from models.ClearerVoice_Minimal.audio_enhancer import AudioEnhancer  # 暂时注释用于测试
+from models.ClearerVoice_Minimal.audio_enhancer import AudioEnhancer
 from core.supabase_client import SupabaseClient
 
 @serve.deployment(
     name="video_separator",
-    ray_actor_options={"num_cpus": 1, "num_gpus": 0.3}
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.3},
+    logging_config={"log_level": "INFO"}
 )
 class VideoSeparator:
     """
@@ -27,7 +28,7 @@ class VideoSeparator:
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"初始化视频分离器: {model_name}")
         # 初始化音频增强器，并立即加载模型
-        # self.audio_enhancer = AudioEnhancer(model_name=model_name)  # 暂时注释用于测试
+        self.audio_enhancer = AudioEnhancer(model_name=model_name)
         self.config = Config()
         self.supabase_client = SupabaseClient(config=self.config)
     
@@ -95,29 +96,21 @@ class VideoSeparator:
             except Exception as e:
                 self.logger.warning(f"原始音频归一化失败: {e}")
 
-            # (2) 音频分离逻辑（暂时注释AudioEnhancer，直接复制原音频用于测试）
-            self.logger.info(f"处理音频，跳过增强，直接复制原音频作为人声和背景音轨")
+            # (2) 音频分离逻辑 - 使用AudioEnhancer进行语音增强
+            self.logger.info(f"开始使用AudioEnhancer进行语音增强和背景分离")
             
-            # 暂时注释AudioEnhancer的使用，直接复制原音频
-            # success = await asyncio.to_thread(
-            #     self.audio_enhancer.enhance_audio,
-            #     input_path=full_audio,
-            #     enhanced_path=vocals_audio,
-            #     noise_path=background_audio
-            # )
+            # 使用AudioEnhancer进行语音增强和背景分离
+            success = await asyncio.to_thread(
+                self.audio_enhancer.enhance_audio,
+                input_path=full_audio,
+                enhanced_path=vocals_audio,
+                noise_path=background_audio
+            )
             
-            # 临时方案：直接复制原始音频作为人声和背景音频
-            try:
-                import shutil
-                # 复制原音频到人声文件
-                await asyncio.to_thread(shutil.copy2, full_audio, vocals_audio)
-                # 复制原音频到背景文件（模拟分离效果）
-                await asyncio.to_thread(shutil.copy2, full_audio, background_audio)
-                success = True
-                self.logger.info("已复制原音频到人声和背景音轨文件")
-            except Exception as e:
-                self.logger.error(f"复制音频文件失败: {e}")
-                success = False
+            if success:
+                self.logger.info("AudioEnhancer语音增强完成")
+            else:
+                self.logger.error("AudioEnhancer语音增强失败")
             
             if not success:
                 self.logger.error("音频处理失败")

@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 @serve.deployment(
     name="media_mixer",
     ray_actor_options={"num_cpus": 1},
-    num_replicas=2  # 添加多个实例以提高吞吐量
+    num_replicas=2,  # 添加多个实例以提高吞吐量
+    logging_config={"log_level": "INFO"}
 )
 class MediaMixer:
     """

@@ -14,17 +14,20 @@ from utils.ffmpeg_utils import hls_segment, concat_videos
 from utils.task_storage import TaskPaths
 from config import Config
 from core.supabase_client import SupabaseClient
+from core.hls_storage_manager import HLSStorageManager
 
 logger = logging.getLogger(__name__)
 
 @serve.deployment(
-    name="hls_manager"
+    name="hls_manager",
+    logging_config={"log_level": "INFO"}
 )
 class HLSManager:
     """HLS流媒体管理器 - 支持多任务管理"""
     def __init__(self):
         self.config = Config()
         self.supabase_client = SupabaseClient(config=self.config)
+        self.hls_storage_manager = HLSStorageManager(config=self.config)
         self.logger = logging.getLogger(__name__)
         
         # 存储每个任务的HLS管理信息
@@ -64,8 +67,31 @@ class HLSManager:
                 playlist.version = 3
                 playlist.target_duration = 20
                 playlist.media_sequence = 0
-                playlist.playlist_type = 'EVENT'
+                playlist.playlist_type = 'EVENT'  # EVENT类型支持实时流
                 playlist.is_endlist = False
+                
+                # 优化流式播放的配置
+                playlist.allow_cache = False  # 禁用缓存，确保播放器获取最新版本
+                playlist.program_date_time = None  # 可以添加时间戳支持
+                
+                sequence_number = 0
+                has_segments = False
+                
+                # 尝试从Storage恢复现有播放列表
+                if self.config.ENABLE_HLS_STORAGE:
+                    try:
+                        existing_content = await self.hls_storage_manager.get_existing_playlist_content(task_id)
+                        if existing_content:
+                            existing_playlist = m3u8.loads(existing_content)
+                            if existing_playlist.segments:
+                                # 恢复现有片段
+                                playlist.segments = existing_playlist.segments.copy()
+                                sequence_number = len(existing_playlist.segments)
+                                has_segments = True
+                                playlist.media_sequence = existing_playlist.media_sequence or 0
+                                self.logger.info(f"[{task_id}] 从Storage恢复了 {len(existing_playlist.segments)} 个HLS片段")
+                    except Exception as e:
+                        self.logger.debug(f"[{task_id}] 无法从Storage恢复播放列表: {e}")
                 
                 # 存储任务管理信息
                 self.task_managers[task_id] = {
@@ -73,8 +99,8 @@ class HLSManager:
                     "playlist_path": playlist_path,
                     "segments_dir": segments_dir,
                     "playlist": playlist,
-                    "sequence_number": 0,
-                    "has_segments": False,
+                    "sequence_number": sequence_number,
+                    "has_segments": has_segments,
                     "segment_time": 10,  # 默认分段时间为10秒
                     "created_at": time.time()
                 }
@@ -138,6 +164,49 @@ class HLSManager:
         with open(playlist_path, 'w', encoding='utf-8') as f:
             content = playlist.dumps()
             f.write(content)
+    
+    async def _upload_playlist_to_storage(self, task_id: str) -> None:
+        """
+        将播放列表上传到Supabase Storage（支持增量更新）
+        
+        Args:
+            task_id: 任务ID
+        """
+        if task_id not in self.task_managers:
+            raise ValueError(f"任务 {task_id} 的HLS管理器不存在")
+            
+        try:
+            manager = self.task_managers[task_id]
+            playlist = manager["playlist"]
+            
+            # 获取播放列表内容并更新为相对路径
+            playlist_content = playlist.dumps()
+            updated_content = await self.hls_storage_manager.update_playlist_with_storage_urls(
+                playlist_content, task_id
+            )
+            
+            # 上传到Storage（这会覆盖之前的版本，但内存中的playlist对象包含了所有片段）
+            upload_result = await self.hls_storage_manager.upload_playlist(task_id, updated_content)
+            
+            if upload_result["status"] == "success":
+                self.logger.info(f"[{task_id}] 播放列表已上传到Storage: {upload_result['storage_path']} (包含 {len(playlist.segments)} 个片段)")
+                
+                # 更新数据库中的HLS播放列表URL为Storage的公共URL
+                storage_url = upload_result["public_url"]
+                if self.supabase_client:
+                    try:
+                        asyncio.create_task(self.supabase_client.update_task(task_id, {
+                            'hls_playlist_url': storage_url,
+                        }))
+                        self.logger.info(f"[{task_id}] HLS播放列表Storage URL已更新到数据库: {storage_url}")
+                    except Exception as update_e:
+                        self.logger.error(f"[{task_id}] 更新HLS播放列表Storage URL到数据库失败: {update_e}")
+            else:
+                self.logger.error(f"[{task_id}] 播放列表上传到Storage失败: {upload_result.get('message', 'Unknown error')}")
+                
+        except Exception as e:
+            self.logger.error(f"[{task_id}] 上传播放列表到Storage失败: {e}")
+            raise
 
     async def add_segment(self, task_id: str, video_path: Union[str, Path], part_index: int) -> Dict:
         """
@@ -193,9 +262,22 @@ class HLSManager:
                 discontinuity_segment = m3u8.Segment(discontinuity=True)
                 playlist.add_segment(discontinuity_segment)
 
+                # 收集新生成的分段文件路径，用于上传到Storage
+                new_segment_files = []
                 for segment in temp_m3u8.segments:
-                    segment.uri = f"segments/{task_id}/{Path(segment.uri).name}"
+                    local_segment_path = segments_dir / Path(segment.uri).name
+                    new_segment_files.append(str(local_segment_path))
+                    # 使用相对路径，因为m3u8和ts文件在同一个文件夹下
+                    segment.uri = Path(segment.uri).name
                     playlist.segments.append(segment)
+
+                # 上传新分段文件到Supabase Storage（如果启用）
+                if self.config.ENABLE_HLS_STORAGE and new_segment_files:
+                    upload_result = await self.hls_storage_manager.batch_upload_segments(task_id, new_segment_files)
+                    if upload_result["status"] in ["success", "partial"]:
+                        self.logger.info(f"[{task_id}] 分段文件上传完成: {upload_result['uploaded_count']}/{len(new_segment_files)}")
+                    else:
+                        self.logger.warning(f"[{task_id}] 分段文件上传失败")
 
                 # 更新序列号
                 manager["sequence_number"] += len(temp_m3u8.segments)
@@ -204,19 +286,14 @@ class HLSManager:
                 # 确保播放列表不标记为结束，以便实时加载
                 playlist.is_endlist = False
                 
+                # 保存本地播放列表
                 await self._save_playlist(task_id)
+                
+                # 上传更新后的播放列表到Storage（如果启用）
+                if self.config.ENABLE_HLS_STORAGE:
+                    await self._upload_playlist_to_storage(task_id)
 
-                # --- If this was the first segment batch, update hls_playlist_url in Supabase ---
-                if was_first_segment and manager["has_segments"] and self.supabase_client:
-                    hls_relative_path = f"playlists/{task_id}/{task_paths.playlist_path.name}"
-                    try:
-                        asyncio.create_task(self.supabase_client.update_task(task_id, {
-                            'hls_playlist_url': hls_relative_path,
-                        }))
-                        self.logger.info(f"[{task_id}] HLS播放列表URL已由HLSManager更新到数据库: {hls_relative_path}")
-                    except Exception as update_e:
-                        self.logger.error(f"[{task_id}] HLSManager更新HLS播放列表URL到数据库失败: {update_e}")
-                # --- End of new logic ---
+                # HLS播放列表URL现在在_upload_playlist_to_storage方法中更新为Storage URL
                 
                 # 删除临时播放列表
                 if temp_playlist_path.exists():
@@ -256,8 +333,15 @@ class HLSManager:
                 if has_segments:
                     playlist.is_endlist = True
                     await self._save_playlist(task_id)
-                    self.logger.info(f"播放列表已保存，并标记为完成状态, 任务ID={task_id}")
-                    return {"status": "success", "message": "播放列表已标记为完成"}
+                    
+                    # 上传最终的播放列表到Storage（如果启用）
+                    if self.config.ENABLE_HLS_STORAGE:
+                        await self._upload_playlist_to_storage(task_id)
+                        self.logger.info(f"播放列表已保存并上传到Storage，标记为完成状态, 任务ID={task_id}")
+                        return {"status": "success", "message": "播放列表已标记为完成并上传到Storage"}
+                    else:
+                        self.logger.info(f"播放列表已保存，标记为完成状态, 任务ID={task_id}")
+                        return {"status": "success", "message": "播放列表已标记为完成"}
                 else:
                     self.logger.warning(f"播放列表为空，不标记为结束状态, 任务ID={task_id}")
                     return {"status": "warning", "message": "播放列表为空，未标记为完成"}
@@ -319,7 +403,7 @@ class HLSManager:
 
         # 1. 结束HLS播放列表
         await self.finalize_playlist(task_id)
-        self.logger.info(f"[{task_id}] HLSManager: 播放列表已标记为结束。")
+        self.logger.info(f"[{task_id}] HLSManager: 播放列表已标记为结束并上传到Storage。")
 
         # 2. 合并处理好的视频片段
         self.logger.info(f"[{task_id}] HLSManager: 开始合并 {len(all_processed_segment_paths)} 个视频片段。")
@@ -380,6 +464,27 @@ class HLSManager:
                     self.logger.error(f"[{task_id}] HLSManager: 更新数据库状态(成功)失败: {db_update_e}")
                     # 即使数据库更新失败，合并本身是成功的，所以仍然返回成功
                     return {"status": "success", "message": "视频处理成功，但数据库更新失败", "output_path": final_video_path_str}
+
+            # 3. 清理本地HLS文件（如果启用Storage且配置了清理）
+            if self.config.ENABLE_HLS_STORAGE and self.config.CLEANUP_LOCAL_HLS_FILES:
+                try:
+                    if task_id in self.task_managers:
+                        manager = self.task_managers[task_id]
+                        segments_dir = manager["segments_dir"]
+                        playlist_path = manager["playlist_path"]
+                        
+                        # 收集所有本地HLS文件
+                        local_hls_files = []
+                        if segments_dir.exists():
+                            local_hls_files.extend([str(f) for f in segments_dir.glob("*.ts")])
+                        if playlist_path.exists():
+                            local_hls_files.append(str(playlist_path))
+                        
+                        if local_hls_files:
+                            cleanup_result = await self.hls_storage_manager.cleanup_local_files(task_id, local_hls_files)
+                            self.logger.info(f"[{task_id}] HLS本地文件清理完成: {cleanup_result['cleaned_count']}/{len(local_hls_files)}")
+                except Exception as cleanup_e:
+                    self.logger.warning(f"[{task_id}] HLS本地文件清理失败: {cleanup_e}")
 
             self.logger.info(f"[{task_id}] HLSManager: 视频合并成功，耗时: {merge_duration:.2f}s")
             return {"status": "success", "message": "视频处理成功", "output_path": final_video_path_str}

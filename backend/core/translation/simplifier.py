@@ -29,7 +29,8 @@ T = TypeVar('T')
 @serve.deployment(
     name="simplifier",
     ray_actor_options={"num_cpus": 1},
-    num_replicas=1
+    num_replicas=1,
+    logging_config={"log_level": "INFO"}
 )
 class Simplifier:
     # 简化等级常量

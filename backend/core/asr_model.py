@@ -9,7 +9,8 @@ from core.supabase_client import SupabaseClient
 
 @serve.deployment(
     name="asr_model",
-    ray_actor_options={"num_cpus": 1, "num_gpus": 0.3}
+    ray_actor_options={"num_cpus": 1, "num_gpus": 0.3},
+    logging_config={"log_level": "INFO"}
 )
 class ASRModel:
     """

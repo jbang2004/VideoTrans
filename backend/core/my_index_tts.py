@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
     name="my_index_tts",
     ray_actor_options={"num_cpus": 1, "num_gpus": 0.4},
     max_ongoing_requests=2,
+    logging_config={"log_level": "INFO"}
 )
 class MyIndexTTSDeployment:
     """

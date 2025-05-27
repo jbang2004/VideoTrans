@@ -6,7 +6,8 @@ logger = logging.getLogger(__name__)
 
 @serve.deployment(
     name="timestamp_adjuster",
-    ray_actor_options={"num_cpus": 0.25}
+    ray_actor_options={"num_cpus": 0.25},
+    logging_config={"log_level": "INFO"}
 )
 class TimestampAdjuster:
     async def __call__(self, sentences: List, sample_rate: int, start_time: float = None) -> List:

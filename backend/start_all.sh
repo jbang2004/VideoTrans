@@ -1,20 +1,25 @@
 #!/bin/bash
 
-echo "===== 启动 VideoTrans 服务 (统一启动器) ====="
+# 视频翻译后端服务启动脚本
+set -e
 
-# 获取脚本所在的目录
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+echo "=== 启动视频翻译后端服务 ==="
 
-# 启动统一的launcher.py
-# 确保从 backend 目录的上下文执行，或者 launcher.py 处理好路径依赖
-# Assuming launcher.py is in the same directory as this script (backend/)
-python "$SCRIPT_DIR/launcher.py"
-
-RET_CODE=$?
-
-if [ $RET_CODE -eq 0 ]; then
-  echo "Launcher.py 启动成功 (API服务通常在此阻塞运行)."
-  echo "如需停止所有服务, 请在前台终止 launcher.py (Ctrl+C)."
-else
-  echo "Launcher.py 启动失败. 返回码: $RET_CODE"
+# 检查Python环境
+if ! command -v python3 &> /dev/null; then
+    echo "错误: 未找到 python3"
+    exit 1
 fi
+
+# 检查必要的环境变量
+if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+    echo "警告: 未设置 SUPABASE_URL 或 SUPABASE_SERVICE_ROLE_KEY 环境变量"
+    echo "请确保 .env 文件存在并包含必要的配置"
+fi
+
+# 启动服务
+echo "启动后端服务..."
+cd "$(dirname "$0")"
+python3 launcher.py
+
+echo "=== 后端服务启动完成 ==="

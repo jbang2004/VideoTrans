@@ -1,30 +1,28 @@
 from ray import serve
-from ray.serve.handle import DeploymentHandle
 import logging
 import asyncio
-from config import Config
+from config import get_config
 from core.sentence_tools import Sentence
 from typing import List
-
-# 导入新的工具函数
 from utils.duration_utils import apply_speed_and_silence, align_batch
 
 logger = logging.getLogger(__name__)
 
 @serve.deployment(
     name="duration_aligner",
-    ray_actor_options={"num_cpus": 1}
+    ray_actor_options={"num_cpus": 1},
+    logging_config={"log_level": "INFO"}
 )
 class DurationAligner:
-    def __init__(self): # 不再接收外部句柄
-        self.config = Config()
-        self.sample_rate = getattr(self.config, 'TARGET_SR', 24000)  # 获取采样率，默认24kHz
+    def __init__(self):
+        self.config = get_config()
+        self.sample_rate = self.config.TARGET_SR
         
+        # 获取服务句柄
         self.simplifier = serve.get_deployment_handle("simplifier", app_name="SimplifierApp").options(stream=True)
-        
         self.index_tts = serve.get_deployment_handle("my_index_tts", app_name="TTSApp").options(stream=True)
         
-        logger.warning("时长对齐器已初始化并自动获取所需句柄")
+        logger.info("时长对齐器初始化完成")
 
     async def __call__(self, sentences: List[Sentence], max_speed: float = 1.1) -> List[Sentence]:
         """执行句子时长对齐"""
@@ -32,144 +30,102 @@ class DurationAligner:
             logger.warning("时长对齐：收到空句子列表")
             return sentences
 
-        task_id = sentences[0].task_id if sentences else "unknown" 
-        logger.warning(f"[{task_id}] 开始为 {len(sentences)} 个句子进行时长对齐")
+        task_id = sentences[0].task_id if sentences else "unknown"
+        logger.info(f"[{task_id}] 开始时长对齐，句子数: {len(sentences)}")
 
         try:
-            # 第一次对齐：计算初始速度和差异
+            # 初始对齐
             aligned_sentences = await asyncio.to_thread(align_batch, sentences)
             if not aligned_sentences:
-                 logger.error(f"[{task_id}] 初始对齐失败或返回空列表")
-                 return sentences
+                logger.error(f"[{task_id}] 初始对齐失败")
+                return sentences
 
-            # 查找超过最大速度的句子并输出详细信息
-            fast_indices = []
-            for i, s in enumerate(aligned_sentences):
-                if s.speed > max_speed:
-                    fast_indices.append(i)
-                    logger.warning(f"[{task_id}] 句子ID {s.sentence_id}: 速度过快 ({s.speed:.2f}x > {max_speed:.2f}x), "
-                               f"原始时长: {s.duration:.2f}ms, 目标时长: {s.target_duration:.2f}ms")
-                else:
-                    logger.warning(f"[{task_id}] 句子ID {s.sentence_id}: 速度正常 ({s.speed:.2f}x), "
-                               f"原始时长: {s.duration:.2f}ms, 目标时长: {s.target_duration:.2f}ms, "
-                               f"将应用速度: {s.speed:.2f}x, 静音长度: {s.silence_duration:.2f}ms")
-
-            # 处理过快的句子
+            # 检查超速句子
+            fast_indices = [i for i, s in enumerate(aligned_sentences) if s.speed > max_speed]
+            
             if fast_indices:
-                # 提取过快的句子
-                fast_sentences = [aligned_sentences[idx] for idx in fast_indices]
-                logger.warning(f"[{task_id}] 发现 {len(fast_indices)} 个语速过快的句子 (>{max_speed}x)，尝试简化并重新生成")
-                
-                # 简化和重新生成音频
-                result_sentences = await self._process_fast_sentences(task_id, aligned_sentences, fast_sentences, fast_indices, max_speed)
-                return result_sentences
+                logger.info(f"[{task_id}] 发现 {len(fast_indices)} 个超速句子，进行简化处理")
+                return await self._process_fast_sentences(task_id, aligned_sentences, fast_indices, max_speed)
             else:
-                # 没有过快的句子，直接应用变速和静音
-                logger.warning(f"[{task_id}] 没有语速过快的句子，直接应用速度和静音调整")
+                logger.info(f"[{task_id}] 所有句子速度正常，应用速度调整")
                 await apply_speed_and_silence(aligned_sentences, self.sample_rate)
-                
-                # 显示处理结果
-                for s in aligned_sentences:
-                    if hasattr(s, 'speed') and s.speed != 1.0:
-                        logger.warning(f"[{task_id}] 句子ID {s.sentence_id} 速度调整成功: {s.speed:.2f}x")
-                    if hasattr(s, 'silence_duration') and s.silence_duration > 0:
-                        logger.warning(f"[{task_id}] 句子ID {s.sentence_id} 添加静音成功: {s.silence_duration:.2f}ms")
-                
-                logger.warning(f"[{task_id}] 时长对齐和音频调整完成")
                 return aligned_sentences
 
         except Exception as e:
-            logger.exception(f"[{task_id}] 时长对齐过程中发生错误: {e}")
+            logger.exception(f"[{task_id}] 时长对齐失败: {e}")
+            # 尝试应用基本的速度调整作为后备方案
             try:
                 if 'aligned_sentences' in locals() and aligned_sentences:
                     await apply_speed_and_silence(aligned_sentences, self.sample_rate)
                     return aligned_sentences
-            except Exception as e_apply:
-                logger.error(f"[{task_id}] 应用速度和静音调整失败: {e_apply}")
-            
-            return sentences # 返回原始句子作为后备方案
+            except Exception:
+                pass
+            return sentences
 
-    async def _process_fast_sentences(self, task_id, aligned_sentences, fast_sentences, fast_indices, max_speed):
-        """处理语速过快的句子"""
+    async def _process_fast_sentences(self, task_id: str, aligned_sentences: List[Sentence], 
+                                    fast_indices: List[int], max_speed: float) -> List[Sentence]:
+        """处理超速句子"""
         try:
-            # 尝试简化文本
+            # 提取超速句子
+            fast_sentences = [aligned_sentences[idx] for idx in fast_indices]
+            
+            # 简化文本
             simplified_results = await self._simplify_sentences(task_id, fast_sentences, max_speed)
             if not simplified_results:
-                logger.warning(f"[{task_id}] 未能获取简化结果，应用速度和静音调整到初始对齐结果")
+                logger.warning(f"[{task_id}] 简化失败，使用原始对齐结果")
                 await apply_speed_and_silence(aligned_sentences, self.sample_rate)
                 return aligned_sentences
             
             # 重新生成音频
-            all_refined_sentences = await self._regenerate_audio(task_id, simplified_results)
-            if not all_refined_sentences or len(all_refined_sentences) != len(fast_indices):
-                logger.warning(f"[{task_id}] TTS重新生成失败或返回数量不匹配 ({len(all_refined_sentences) if all_refined_sentences else 0} vs {len(fast_indices)})")
+            refined_sentences = await self._regenerate_audio(task_id, simplified_results)
+            if not refined_sentences or len(refined_sentences) != len(fast_indices):
+                logger.warning(f"[{task_id}] 音频重新生成失败，使用原始对齐结果")
                 await apply_speed_and_silence(aligned_sentences, self.sample_rate)
                 return aligned_sentences
             
-            # 将简化后的句子替换回原始列表
+            # 替换简化后的句子
             result_sentences = aligned_sentences.copy()
-            successful_refinement = False
-            
             for i, orig_idx in enumerate(fast_indices):
-                if i < len(all_refined_sentences) and all_refined_sentences[i].generated_audio is not None and all_refined_sentences[i].duration > 0:
-                    result_sentences[orig_idx] = all_refined_sentences[i]
-                    logger.warning(f"[{task_id}] 句子ID {all_refined_sentences[i].sentence_id} 简化并重新生成成功，"
-                               f"原始时长: {aligned_sentences[orig_idx].duration:.2f}ms → 新时长: {all_refined_sentences[i].duration:.2f}ms")
-                    successful_refinement = True
-                else:
-                    logger.warning(f"[{task_id}] 句子索引 {i} (原始索引 {orig_idx}) 缺少有效音频/时长或丢失，保留原始对齐句子")
+                if i < len(refined_sentences) and refined_sentences[i].generated_audio is not None:
+                    result_sentences[orig_idx] = refined_sentences[i]
+                    logger.info(f"[{task_id}] 句子 {refined_sentences[i].sentence_id} 简化成功")
             
-            if not successful_refinement:
-                logger.warning(f"[{task_id}] 没有句子成功完成简化和重新生成，应用速度和静音调整到初始对齐结果")
-                await apply_speed_and_silence(aligned_sentences, self.sample_rate)
-                return aligned_sentences
+            # 最终对齐
+            final_aligned = await asyncio.to_thread(align_batch, result_sentences)
+            await apply_speed_and_silence(final_aligned, self.sample_rate)
             
-            # 重新对齐和应用变速静音
-            logger.warning(f"[{task_id}] 简化和重新生成完成，执行最终对齐...")
-            final_aligned_sentences = await asyncio.to_thread(align_batch, result_sentences)
-            
-            logger.warning(f"[{task_id}] 最终对齐后应用速度和静音调整")
-            await apply_speed_and_silence(final_aligned_sentences, self.sample_rate)
-            
-            # 显示处理结果
-            for s in final_aligned_sentences:
-                if hasattr(s, 'speed') and s.speed != 1.0:
-                    logger.warning(f"[{task_id}] 句子ID {s.sentence_id} 最终速度调整: {s.speed:.2f}x")
-                if hasattr(s, 'silence_duration') and s.silence_duration > 0:
-                    logger.warning(f"[{task_id}] 句子ID {s.sentence_id} 最终静音添加: {s.silence_duration:.2f}ms")
-            
-            logger.warning(f"[{task_id}] 最终时长对齐和音频调整完成")
-            return final_aligned_sentences
+            logger.info(f"[{task_id}] 超速句子处理完成")
+            return final_aligned
             
         except Exception as e:
-            logger.exception(f"[{task_id}] 处理快速句子时出错: {e}")
+            logger.exception(f"[{task_id}] 处理超速句子失败: {e}")
             await apply_speed_and_silence(aligned_sentences, self.sample_rate)
             return aligned_sentences
 
-    async def _simplify_sentences(self, task_id, fast_sentences, max_speed):
+    async def _simplify_sentences(self, task_id: str, fast_sentences: List[Sentence], max_speed: float) -> List[Sentence]:
         """简化句子文本"""
         simplified_results = []
         try:
-            logger.warning(f"[{task_id}] 开始简化 {len(fast_sentences)} 个句子...")
+            logger.warning(f"[{task_id}] 开始简化 {len(fast_sentences)} 个句子")
             async for simplified_batch in self.simplifier.simplify_sentences.remote(fast_sentences, target_speed=max_speed):
                 if simplified_batch:
                     simplified_results.extend(simplified_batch)
-            logger.warning(f"[{task_id}] 获得 {len(simplified_results)} 个简化后的句子")
+            logger.warning(f"[{task_id}] 简化完成，获得 {len(simplified_results)} 个句子")
             return simplified_results
         except Exception as e:
-            logger.error(f"[{task_id}] 简化调用期间出错: {e}", exc_info=True)
+            logger.error(f"[{task_id}] 简化失败: {e}")
             return []
 
-    async def _regenerate_audio(self, task_id, simplified_results):
+    async def _regenerate_audio(self, task_id: str, simplified_results: List[Sentence]) -> List[Sentence]:
         """重新生成音频"""
-        all_refined_sentences = []
+        refined_sentences = []
         try:
-            logger.warning(f"[{task_id}] 使用流式TTS重新生成 {len(simplified_results)} 个句子的音频...")
+            logger.info(f"[{task_id}] 开始重新生成 {len(simplified_results)} 个句子的音频")
             async for tts_batch in self.index_tts.generate_audio_stream.remote(simplified_results):
                 if tts_batch:
-                    all_refined_sentences.extend(tts_batch)
-            logger.warning(f"[{task_id}] 成功重新生成 {len(all_refined_sentences)} 个句子的音频")
-            return all_refined_sentences
+                    refined_sentences.extend(tts_batch)
+            logger.info(f"[{task_id}] 音频重新生成完成，获得 {len(refined_sentences)} 个句子")
+            return refined_sentences
         except Exception as e:
-            logger.error(f"[{task_id}] TTS流处理期间出错: {e}", exc_info=True)
+            logger.error(f"[{task_id}] 音频重新生成失败: {e}")
             return []
