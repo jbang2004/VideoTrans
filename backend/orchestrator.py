@@ -94,6 +94,9 @@ class MainOrchestrator:
         
         try:
             task_paths = TaskPaths(self.config, task_id)
+            # 确保任务目录存在
+            await asyncio.to_thread(task_paths.create_directories)
+            self.logger.info(f"[{task_id}] 任务目录已创建")
 
             # 视频分离
             separated_media = await self.video_separator_handle.separate_video.remote(
@@ -140,6 +143,9 @@ class MainOrchestrator:
         start_time = time.time()
         self.logger.info(f"[{task_id}] 开始TTS流程")
         task_paths = TaskPaths(self.config, task_id)
+        # 确保任务目录存在
+        await asyncio.to_thread(task_paths.create_directories)
+        self.logger.info(f"[{task_id}] 任务目录已创建")
         
         try:
             # 初始化HLS管理器

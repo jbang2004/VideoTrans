@@ -420,6 +420,10 @@ class HLSManager:
             return {"status": "error", "message": msg}
 
         try:
+            # 确保输出目录存在
+            task_paths.output_dir.mkdir(parents=True, exist_ok=True)
+            self.logger.info(f"[{task_id}] HLSManager: 确保输出目录存在: {task_paths.output_dir}")
+            
             # 创建合并列表文件
             list_txt_path = task_paths.processing_dir / "concat_list.txt"
             async with aiofiles.open(list_txt_path, "w", encoding='utf-8') as f:
@@ -456,7 +460,7 @@ class HLSManager:
             if self.supabase_client:
                 try:
                     asyncio.create_task(self.supabase_client.update_task(task_id, {
-                        'status': 'success',
+                        'status': 'completed',
                         'download_video_path': final_video_path_str,
                     }))
                     self.logger.info(f"[{task_id}] HLSManager: 任务状态成功，下载路径已异步更新到数据库。")
