@@ -171,6 +171,26 @@ class VideoTransAPI:
             self.logger.error(f"触发 TTS 失败: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"无法触发 TTS: {e}")
 
+    @app.get("/api/task/{task_id}/status")
+    async def get_task_status(self, task_id: str):
+        """获取任务状态和HLS播放列表URL"""
+        try:
+            task = await self.supabase_client.get_task(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="任务不存在")
+            
+            return JSONResponse(content={
+                'task_id': task_id,
+                'status': task.get('status'),
+                'hls_playlist_url': task.get('hls_playlist_url'),
+                'error_message': task.get('error_message')
+            })
+        except HTTPException:
+            raise
+        except Exception as e:
+            self.logger.error(f"获取任务状态失败: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"获取任务状态失败: {e}")
+
 def setup_server():
     """初始化Ray Serve服务器，部署API服务"""
     # 连接到Ray集群

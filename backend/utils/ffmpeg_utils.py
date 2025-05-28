@@ -99,6 +99,8 @@ async def hls_segment(
         "-hls_time", str(hls_time),
         "-hls_list_size", "0",
         "-hls_segment_type", "mpegts",
+        "-hls_flags", "append_list+omit_endlist",  # 追加模式，不添加endlist
+        "-hls_allow_cache", "0",  # 禁用缓存
         "-hls_segment_filename", segment_pattern,
         playlist_path
     ]

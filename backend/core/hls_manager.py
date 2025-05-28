@@ -65,7 +65,7 @@ class HLSManager:
                 # 创建播放列表
                 playlist = m3u8.M3U8()
                 playlist.version = 3
-                playlist.target_duration = 20
+                playlist.target_duration = 10  # 与实际分段时长保持一致
                 playlist.media_sequence = 0
                 playlist.playlist_type = 'EVENT'  # EVENT类型支持实时流
                 playlist.is_endlist = False
