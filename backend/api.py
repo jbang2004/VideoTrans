@@ -104,20 +104,10 @@ class VideoTransAPI:
             storage_path = video.get("storage_path")
             bucket_name = video.get("bucket_name")
 
-            # 下载视频
-            data = await self._download_video_with_retry(bucket_name, storage_path)
-
-            # 保存视频文件
-            task_dir = self.config.TASKS_DIR / videoId
-            filename = Path(storage_path).name
-            local_video_path = task_dir / filename
-            await self._save_video_file(data, local_video_path)
-
-            # 创建任务
+            # 先创建任务记录获取task_id
             task_data = {
                 "video_id": videoId,
                 "video_path_supabase": storage_path,
-                "download_video_path": str(local_video_path),
                 "status": "pending"
             }
             
@@ -126,6 +116,20 @@ class VideoTransAPI:
                 raise HTTPException(status_code=500, detail="创建任务失败")
             
             new_task_id = resp.data[0].get("id") or resp.data[0].get("task_id")
+
+            # 下载视频
+            data = await self._download_video_with_retry(bucket_name, storage_path)
+
+            # 使用task_id创建目录并保存视频文件
+            task_dir = self.config.TASKS_DIR / new_task_id
+            filename = Path(storage_path).name
+            local_video_path = task_dir / filename
+            await self._save_video_file(data, local_video_path)
+
+            # 更新任务记录中的本地路径
+            await self.supabase_client.update_task(new_task_id, {
+                "download_video_path": str(local_video_path)
+            })
 
             # 启动预处理流水线
             self.orchestrator_handle.run_preprocessing_pipeline.remote(
