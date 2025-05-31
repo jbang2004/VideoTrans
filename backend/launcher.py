@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 from core.video_separator import VideoSeparator
 from core.asr_model import ASRModel
 from core.translation.simplifier import Simplifier
+from core.translation.translator import Translator
 from core.my_index_tts import MyIndexTTSDeployment
 from core.timeadjust.duration_aligner import DurationAligner
 from core.timeadjust.timestamp_adjuster import TimestampAdjuster
@@ -27,6 +28,7 @@ def deploy_core_services():
         ("VideoSeparatorApp", VideoSeparator.bind()),
         ("ASRApp", ASRModel.bind()),
         ("SimplifierApp", Simplifier.bind()),
+        ("TranslatorApp", Translator.bind()),
         ("TTSApp", MyIndexTTSDeployment.bind(config)),
         ("DurationAlignerApp", DurationAligner.bind()),
         ("TimestampAdjusterApp", TimestampAdjuster.bind()),

@@ -90,8 +90,9 @@ class MediaMixer:
                 self.logger.error(f"[{task_id}] MediaMixer: 数据库中缺少 silent_video_path 或 vocals_audio_path")
                 return None
             
-            if not target_language:
-                self.logger.error(f"[{task_id}] MediaMixer: 数据库中缺少 target_language")
+            # 只有在生成字幕时才需要target_language
+            if generate_subtitle and not target_language:
+                self.logger.error(f"[{task_id}] MediaMixer: 生成字幕时缺少 target_language")
                 return None
             
             logger.info(f"[{task_id}] 开始处理批次 {batch_counter}, 句子数 {len(sentences_batch)}, 目标语言: {target_language}")

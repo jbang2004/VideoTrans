@@ -171,6 +171,40 @@ class VideoTransAPI:
             self.logger.error(f"触发 TTS 失败: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"无法触发 TTS: {e}")
 
+    @app.post("/api/translation")
+    async def translation(self, request: Dict[str, Any] = Body(...)):
+        """启动翻译流程"""
+        try:
+            task_id = request.get('task_id')
+            if not task_id:
+                raise HTTPException(status_code=400, detail="缺少task_id参数")
+            
+            task = await self.supabase_client.get_task(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="任务不存在")
+            
+            # 获取目标语言：优先使用请求参数，其次任务记录，最后默认中文
+            target_language = request.get('target_language') or task.get('target_language', 'zh')
+            
+            # 更新任务状态和目标语言
+            await self.supabase_client.update_task(task_id, {
+                'status': 'translating',
+                'target_language': target_language
+            })
+            self.orchestrator_handle.run_translation_pipeline.remote(task_id, target_language)
+            
+            return JSONResponse(content={
+                'status': 'translating', 
+                'task_id': task_id, 
+                'target_language': target_language,
+                'message': '翻译已开始'
+            })
+        except HTTPException:
+            raise
+        except Exception as e:
+            self.logger.error(f"启动翻译失败: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"无法启动翻译: {str(e)}")
+
     @app.get("/api/task/{task_id}/status")
     async def get_task_status(self, task_id: str):
         """获取任务状态和HLS播放列表URL"""

@@ -19,7 +19,7 @@ class DurationAligner:
         self.sample_rate = self.config.TARGET_SR
         
         # 获取服务句柄
-        self.simplifier = serve.get_deployment_handle("simplifier", app_name="SimplifierApp").options(stream=True)
+        self.simplifier = serve.get_deployment_handle("simplifier", app_name="SimplifierApp")
         self.index_tts = serve.get_deployment_handle("my_index_tts", app_name="TTSApp").options(stream=True)
         
         logger.info("时长对齐器初始化完成")
@@ -104,13 +104,13 @@ class DurationAligner:
 
     async def _simplify_sentences(self, task_id: str, fast_sentences: List[Sentence], max_speed: float) -> List[Sentence]:
         """简化句子文本"""
-        simplified_results = []
         try:
-            logger.warning(f"[{task_id}] 开始简化 {len(fast_sentences)} 个句子")
-            async for simplified_batch in self.simplifier.simplify_sentences.remote(fast_sentences, target_speed=max_speed):
-                if simplified_batch:
-                    simplified_results.extend(simplified_batch)
-            logger.warning(f"[{task_id}] 简化完成，获得 {len(simplified_results)} 个句子")
+            logger.info(f"[{task_id}] 开始简化 {len(fast_sentences)} 个句子")
+            simplified_results = await self.simplifier.simplify_sentences.remote(
+                fast_sentences, 
+                target_speed=max_speed
+            )
+            logger.info(f"[{task_id}] 简化完成，获得 {len(simplified_results)} 个句子")
             return simplified_results
         except Exception as e:
             logger.error(f"[{task_id}] 简化失败: {e}")
@@ -121,7 +121,7 @@ class DurationAligner:
         refined_sentences = []
         try:
             logger.info(f"[{task_id}] 开始重新生成 {len(simplified_results)} 个句子的音频")
-            async for tts_batch in self.index_tts.generate_audio_stream.remote(simplified_results):
+            async for tts_batch in self.index_tts.generate_audio_stream.options(stream=True).remote(simplified_results):
                 if tts_batch:
                     refined_sentences.extend(tts_batch)
             logger.info(f"[{task_id}] 音频重新生成完成，获得 {len(refined_sentences)} 个句子")

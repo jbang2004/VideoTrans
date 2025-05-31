@@ -34,7 +34,7 @@ class MainOrchestrator:
         required_handles = [
             'video_separator_handle', 'asr_model_handle', 'my_index_tts_handle',
             'duration_aligner_handle', 'timestamp_adjuster_handle', 
-            'media_mixer_handle', 'hls_manager_handle'
+            'media_mixer_handle', 'hls_manager_handle', 'translator_handle'
         ]
         
         missing_handles = [handle for handle in required_handles if not hasattr(self, handle)]
@@ -53,7 +53,8 @@ class MainOrchestrator:
             ("duration_aligner", "duration_aligner", "DurationAlignerApp"),
             ("timestamp_adjuster", "timestamp_adjuster", "TimestampAdjusterApp"),
             ("media_mixer", "media_mixer", "MediaMixerApp"),
-            ("hls_manager", "hls_manager", "HLSManagerApp")
+            ("hls_manager", "hls_manager", "HLSManagerApp"),
+            ("translator", "translator", "TranslatorApp")
         ]
         
         for attr_name, deployment_name, app_name in handle_configs:
@@ -174,7 +175,7 @@ class MainOrchestrator:
         batch_counter = 0
 
         # 生成音频流并处理
-        async for tts_sentence_batch in self.my_index_tts_handle.generate_audio_stream.remote(task_id):
+        async for tts_sentence_batch in self.my_index_tts_handle.generate_audio_stream.options(stream=True).remote(task_id):
             if not tts_sentence_batch:
                 continue
 
@@ -237,3 +238,44 @@ class MainOrchestrator:
             return {"status": "error", "message": err_msg}
         
         return result 
+
+    async def run_translation_pipeline(self, task_id: str, target_language: str = "zh"):
+        """执行翻译流水线"""
+        start_time = time.time()
+        self.logger.info(f"[{task_id}] 开始翻译流程，目标语言: {target_language}")
+        
+        try:
+            # 从数据库获取句子数据
+            await self.supabase_client.initialize()
+            sentences = await self.supabase_client.get_sentences(task_id, as_objects=True)
+            
+            if not sentences:
+                await self._update_task_status(task_id, 'translated')
+                return {"status": "translated", "message": "没有需要翻译的句子"}
+            
+            self.logger.info(f"[{task_id}] 从数据库获取到 {len(sentences)} 个句子")
+            
+            # 执行翻译
+            translated_count = 0
+            async for batch_result in self.translator_handle.translate_sentences.options(stream=True).remote(
+                sentences, batch_size=50, target_language=target_language
+            ):
+                translated_count += len(batch_result)
+                self.logger.info(f"[{task_id}] 翻译进度: {translated_count}/{len(sentences)}")
+                
+                # 批量更新翻译结果到数据库
+                for sentence in batch_result:
+                    await self.supabase_client.update_sentence_translation(
+                        task_id, sentence.sentence_id, sentence.trans_text
+                    )
+            
+            await self._update_task_status(task_id, 'translated')
+            self.logger.info(f"[{task_id}] 翻译完成，耗时: {time.time() - start_time:.2f}s")
+            return {"status": "translated", "message": "翻译完成"}
+            
+        except Exception as e:
+            self.logger.exception(f"[{task_id}] 翻译流程失败: {e}")
+            await self._update_task_status(task_id, 'error', f"翻译失败: {e}")
+            return {"status": "error", "message": f"翻译失败: {e}"}
+        finally:
+            self._clean_memory() 
